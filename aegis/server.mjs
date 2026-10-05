@@ -43,7 +43,7 @@ import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Burrow } from "../burrow/index.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
-import { health as bridgeHealth, submitToForge, adoptForge } from "./bridge.mjs";
+import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Pack } from "./pack.mjs";
 import { listIntegrations, getIntegration, publicView, forgeDesktops, forgeAction, addonView } from "./integrations.mjs";
@@ -542,7 +542,9 @@ async function handleApi(req, res, path, url) {
     const br = await burrow.handle(req.method, path.slice("/__gate/api".length), () => readJsonBody(req));
     if (br) return br.body !== undefined ? send(res, br.status, br.body, br.headers) : sendJson(res, br.status, br.json);
     if (path === "/__gate/api/addon" && req.method === "GET") {
-      return sendJson(res, 200, addonView({ tunnels, control: burrow.controlView(), burrow: burrow.status() }));
+      const v = addonView({ tunnels, control: burrow.controlView(), burrow: burrow.status() });
+      if (v.forge && !v.addon) v.addon = await forgeHasUs();          // the drop-in may lag the Forge
+      return sendJson(res, 200, v);
     }
     if (path.startsWith("/__gate/api/addons") || path.startsWith("/__gate/api/bridge")) return await handleAddons(req, res, path, url);
 
@@ -610,6 +612,9 @@ async function handleAddons(req, res, path, url) {
     if (path === "/__gate/api/addons" && req.method === "GET") return ok({ addons: await addons.list(), spec: 1, host: "burrow", version: VERSION });
     if (path === "/__gate/api/addons/scan" && req.method === "GET") return ok(await addons.scan(url.searchParams.get("fresh") ? 0 : 60000));
     if (path === "/__gate/api/addons/add" && req.method === "POST") return ok({ addon: await addons.add((await readJsonBody(req)).source) });
+    if (path === "/__gate/api/addons/inspect" && req.method === "POST") {
+      try { return ok(await addons.inspect((await readJsonBody(req)).source)); } catch (e) { return ok({ valid: false, error: e.message }); }
+    }
     const j = /^\/__gate\/api\/addons\/jobs\/([0-9a-f]{12})(\/cancel)?$/.exec(path);
     if (j) {
       const job = addons.job(j[1]);
@@ -635,6 +640,8 @@ async function handleAddons(req, res, path, url) {
       if (op === "share") return ok({ tunnel: await addons.share(id, b.on !== false, b.access === "public" ? "public" : "login") });
     }
     if (path === "/__gate/api/bridge" && req.method === "GET") return ok(await bridgeHealth({ burrow, addons }));
+    const bj = /^\/__gate\/api\/bridge\/job\/([0-9a-f]{4,64})$/.exec(path);
+    if (bj) return ok(await forgeJob(bj[1], Number(url.searchParams.get("since")) || 0));
     if (path === "/__gate/api/bridge/connect" && req.method === "POST") {
       const out = { forge: await submitToForge({ log }) };
       const local = await adoptForge({ addons, log }).catch((e) => ({ error: e.message }));

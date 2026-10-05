@@ -612,3 +612,26 @@ body[data-bg="glow"]::after { top: -200px; width: 1400px; height: 900px; backgro
 .upd-list { list-style: none; margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; background: var(--card-2); border: 1px solid var(--line); font-size: 12.5px; display: grid; gap: 6px; }
 .adc .t-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .more summary.btn { font-size: 16px; letter-spacing: 1px; }
+
+/* ---------- Selkies Forge tab: add it for me, or by hand ---------- */
+.ab-hero.ask { border-color: rgba(255,255,255,.2); }
+.ab-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 16px; }
+.ab-choice { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-radius: 14px; text-align: left; cursor: pointer;
+             border: 1px solid var(--line-2); background: rgba(255,255,255,.025); color: var(--text); transition: border-color .15s, background .15s, transform .05s; }
+.ab-choice:hover { border-color: rgba(255,255,255,.26); background: rgba(255,255,255,.05); }
+.ab-choice:active { transform: translateY(1px); }
+.ab-choice:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.ab-choice:disabled { opacity: .7; cursor: default; }
+.ab-choice b { display: block; font-size: 14.5px; letter-spacing: -.01em; }
+.ab-choice small { display: block; margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.ab-choice-i { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; flex: none; background: #1d1f23; border: 1px solid var(--line-2); }
+.ab-choice-i svg { width: 16px; height: 16px; }
+.ab-choice.primary { background: #f1f2f3; color: #000; border-color: transparent; box-shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 14px 34px -14px rgba(255,255,255,.45); }
+.ab-choice.primary:hover { background: #fff; }
+.ab-choice.primary small { color: #3c4046; }
+.ab-choice.primary .ab-choice-i { background: #000; color: #fff; border-color: #000; }
+.ab-choice.primary .spin { border-color: rgba(255,255,255,.25); border-top-color: #fff; }
+.ab-choice.on { border-color: rgba(255,255,255,.4); background: rgba(255,255,255,.06); }
+ol.perm { margin: 0 0 14px; padding: 0 0 0 20px; display: grid; gap: 10px; font-size: 13.5px; color: #d7dade; }
+ol.perm li::marker { color: var(--faint); font: 600 12px var(--mono); }
+ol.perm .mono { font-size: 12px; }

@@ -1,7 +1,7 @@
 {
   "name": "aegis-burrow",
-  "version": "2.0.1",
-  "description": "Aegis \u00d7 Burrow: a post-quantum gate and dashboard (Aegis) on a tunnel engine (Burrow).",
+  "version": "2.1.0",
+  "description": "Aegis × Burrow: a post-quantum gate and dashboard (Aegis) on a tunnel engine (Burrow).",
   "license": "MIT",
   "private": true,
   "type": "module",

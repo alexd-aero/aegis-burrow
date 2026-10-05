@@ -8,6 +8,7 @@
   <img alt="ML-KEM-768 + X25519" src="https://img.shields.io/badge/login-ML--KEM--768%20%2B%20X25519-3ddc97?style=flat-square&labelColor=101113">
   <img alt="Addons: one format with Selkies Forge" src="https://img.shields.io/badge/addons-one%20format%20with%20Selkies%20Forge-e8eaed?style=flat-square&labelColor=101113">
   <img alt="Selkies Forge addon" src="https://img.shields.io/badge/Selkies%20Forge-addon-5aa6ff?style=flat-square&labelColor=101113">
+  <a href="https://github.com/alexd-aero/weft"><img alt="Powered by the Weft Architecture" src="https://img.shields.io/badge/powered%20by-Weft%20Architecture-c9b8ff?style=flat-square&labelColor=101113"></a>
 </p>
 
 <p align="center">
@@ -45,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/alexd-aero/aegis-burrow/main/instal
 
 **3 · Pick your pack.** Aegis offers Selkies Forge, Termix (with a login you choose right there) and Burrow. Take all of it, some of it, or none.
 
-**Using Selkies Forge?** Paste `https://github.com/alexd-aero/aegis-burrow` under *Addons*, or just press **Connect** in *Burrow → Selkies Forge*.
+**Using Selkies Forge?** Open *Burrow → Selkies Forge* and press **Add it for me** (it asks first). Or paste `https://github.com/alexd-aero/aegis-burrow` under the Forge's *Addons* yourself.
 
 </td>
 <td width="50%" valign="top">
@@ -165,16 +166,20 @@ Each tunnel gets its own DNS record. *Unlink* removes the records, the tunnel an
 
 <p align="center"><img src="docs/screenshots/addons.png" alt="Burrow → Addons: the smart scan and an installed addon" width="100%"></p>
 
-**Burrow → Addons** installs apps beside Burrow. It uses **the same addon format as Selkies Forge**: a `forge-addon.json` and a few bash scripts, read with the same rules, run with the same environment, and talking back with the same `::progress`, `::open` and `::warn` lines. One addon works in both unless its manifest says otherwise:
+**Burrow → Addons** installs apps beside Burrow. **Everything is powered by the [Weft Architecture](https://github.com/alexd-aero/weft)**: the same addon format as Selkies Forge, a `forge-addon.json` and a few bash scripts, read with the same rules, run with the same environment, and talking back with the same `::progress`, `::open` and `::warn` lines. One addon works in both unless its manifest says otherwise:
 
 ```json
 "platforms": ["selkies-forge", "burrow"]    // the default; name one to stay on that host
 ```
 
-- **Paste a link.** Any of these works: a repository, a folder in one (`…/tree/main/a/folder`), or a folder on this machine. The addon shows up as a card. Install it, open it, run its actions, check for updates against its git commits, and uninstall it. An addon whose status reports a port gets **Publish**, which gives it a Burrow address.
+- **Paste a link.** Any of these works:
+  - a repository on GitHub, GitLab (subgroups and self-hosted too), Codeberg, or any git URL;
+  - a folder in one (`…/tree/main/a/folder`, GitLab's `…/-/tree/…`, or a `/blob/` link to its `forge-addon.json`);
+  - a **`.zip` / `.tar.gz` download**, inspected statically first: unpacked into a fresh folder with size limits, refused if anything could escape it, then its manifest validated before anything runs;
+  - a folder on this machine. The addon shows up as a card. Install it, open it, run its actions, check for updates against its git commits, and uninstall it. An addon whose status reports a port gets **Publish**, which gives it a Burrow address.
 - **Found on this machine.** Opening *Addons* scans your home, `/opt`, `/srv` and the code folders apps declare. It lists every valid addon it finds, **running, stopped or not installed**, using each one's read-only `detect` and `status` scripts. Addons already in the list aren't repeated. Addons made for another host are shown greyed out.
 
-Scripts get the universal `ADDON_*` names (`ADDON_ID`, `ADDON_DIR`, `ADDON_DATA`, `ADDON_SETTING_<KEY>`, `ADDON_HOST=burrow`…), the older `FORGE_ADDON_*` twins, and `BURROW_SOCKET`. **The full guide:** [the addon format](https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md).
+Scripts get the universal `ADDON_*` names (`ADDON_ID`, `ADDON_DIR`, `ADDON_DATA`, `ADDON_SETTING_<KEY>`, `ADDON_HOST=burrow`…), the older `FORGE_ADDON_*` twins, and `BURROW_SOCKET`. **Start here:** [the Weft Architecture](https://github.com/alexd-aero/weft). It has the spec, **[stable example addons that link to each other](https://github.com/alexd-aero/weft#-the-examples)** (Beacon, Pulse, Relay for Burrow, Shelf for the Forge), `weft-check`, `weft-run`, and [a strict brief for AI agents](https://github.com/alexd-aero/weft/blob/main/prompt.md). The Forge's [addon guide](https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md) covers the details.
 
 ## 🖥️ Selkies Forge
 
@@ -185,7 +190,7 @@ Aegis × Burrow and Selkies Forge each become **the other's addon**, and either 
 | From | Do | Then |
 |---|---|---|
 | **Selkies Forge** | *Addons* → paste this repository (or *Add and link* under *Found on this machine*) | The Forge links the copy that's already here. Burrow sees it and adds the Forge as one of its own addons, from the Forge's checkout. |
-| **Burrow** | *Burrow → Selkies Forge → **Connect*** | Burrow checks its own `forge-addon.json` with the Forge's rules, the Forge adds and links it, and Burrow adds the Forge. |
+| **Burrow** | *Burrow → Selkies Forge → **Add it for me*** | Burrow first lists exactly what it will do and waits for **Allow**. Then it checks its own `forge-addon.json` with the Forge's rules, the Forge adds and links it (with its live log shown in Burrow), and Burrow adds the Forge. Prefer to do it yourself? **I'll do it myself** shows the link and the button to press |
 | **Burrow** | *Burrow → Addons* → *Add and link* on Selkies Forge | The same, from the other end. |
 
 Once linked:
@@ -208,10 +213,10 @@ The **Selkies Forge** tab shows:
 | Control socket is private | Missing, not a socket, not yours, not mode `600`, or in a folder others can enter |
 | Both sides answer | The socket or the Forge's API doesn't respond |
 | The Forge registered itself | Its drop-in is stale, or writable by anyone but you |
-| Each side has the other as an addon | One side hasn't added the other yet; **Connect** fixes it |
+| Each side has the other as an addon | One side hasn't added the other yet; **Add it** fixes it (after asking) |
 | The Forge's API stays private | It answers on an address that isn't loopback, a private network or Tailscale |
 | The Forge's dashboard needs a login | Warns when a Burrow tunnel publishes it to anyone |
-| Our manifest is valid, and versions fit | The checks Connect relies on |
+| Our manifest is valid, and versions fit | The checks *Add it for me* relies on |
 
 Burrow's tab shows both views side by side: *Seen from Burrow* and *Seen from Selkies Forge*. The Forge shows its own at the top of *Addons*.
 
@@ -293,7 +298,8 @@ A deep `AEGIS_HOME` whose socket path would be over 100 bytes gets the socket in
 | `/__gate/api/tunnels…`, `/ports` | Burrow's tunnel API (409 while it is off) |
 | `GET /__gate/api/addons` · `/addons/scan[?fresh=1]` · `POST /addons/add {source}` | Addons, and what the scan found |
 | `POST /__gate/api/addons/<id>/install` `{settings}` · `update` · `uninstall` `{keep_data}` · `remove` · `action` `{action}` · `check` · `share` `{on, access}` | The lifecycle; jobs at `GET /addons/jobs/<id>?since=N`, `POST …/cancel` |
-| `GET /__gate/api/addon` · `/bridge` · `POST /bridge/connect` | As a Selkies Forge addon; the bridge's health; Connect |
+| `GET /__gate/api/addon` · `/bridge` · `POST /bridge/connect` · `GET /bridge/job/<id>?since=N` | As a Selkies Forge addon; the bridge's health; *Add it for me*; the Forge's job, live |
+| `POST /__gate/api/addons/inspect` `{source}` | Fetch and validate a link (git, GitLab, .zip, .tar.gz) without adding it or running anything |
 | `/__gate/api/cf…`, `/termix…`, `/integrations…`, `/password` | Domain, Termix, connected apps, the login |
 
 The control socket serves the tunnel API (without `/__gate/api`), plus `GET /status` and `POST /module {burrow}`. Callers name themselves with `X-Burrow-Client: name/version`.
@@ -310,6 +316,11 @@ The repository ships `public/login.js` and `aegis/vendor/pq.mjs` built, so insta
 ## 🌱 Where it came from
 
 Aegis and Burrow started as two repositories: a gate, and a tunnel manager with its own copy of the same login. Here they are one product, with Aegis on top and Burrow underneath. If you ran either, `aegis install` upgrades it in place and keeps your login, domain and tunnels. Selkies Forge lists it under *Found on this machine*, ready to link.
+
+## 🙏 Credits
+
+- **Powered by the [Weft Architecture](https://github.com/alexd-aero/weft)**, the addon format it shares with [Selkies Forge](https://github.com/adatskov-wcpss/animated-fiesta)
+- [Cloudflare](https://www.cloudflare.com/) tunnels, [noble](https://paulmillr.com/noble/) for the post-quantum cryptography, [Termix](https://github.com/Termix-SSH/Termix) for terminals
 
 ## 💙 It's yours
 

@@ -272,18 +272,35 @@ function addonHero(a) {
   const f = a.forge, ad = a.addon, man = a.manifest;
   const linked = !!ad, upd = linked && ad.update && ad.update.available;
   const forgeLogo = f && f.logo ? f.logo : "/__gate/logos/forge.svg";
-  const title = linked ? "Connected to Selkies Forge, as an addon"
-    : f ? "Selkies Forge is here, but hasn't added us yet" : "Not an addon yet";
+  const wire = `<div class="ab-link" aria-hidden="true">
+      <div class="ab-node"><img src="/__gate/logos/aegis-burrow.svg" alt=""><b>Aegis × Burrow</b><small class="mono">v${h(man.version || "")}</small></div>
+      <div class="ab-wire"><span class="ab-line"><i></i></span><em>${linked ? "addon" : f ? "ready to link" : "no forge"}</em></div>
+      <div class="ab-node${f ? "" : " ghost"}"><img src="${h(forgeLogo)}" alt=""><b>Selkies Forge</b><small class="mono">${f && f.version ? "v" + h(f.version) : "–"}</small></div>
+    </div>`;
+  if (!linked && f) {
+    // Not linked yet: Burrow offers to do it (after asking), or shows the way by hand.
+    return `<section class="card lit ab-hero ask">
+    ${wire}
+    <div class="ab-copy">
+      <h1>Add Aegis × Burrow to Selkies Forge?</h1>
+      <p>Selkies Forge ${h(f.version)} is on this machine. As one of its addons, Aegis × Burrow gets updated, restarted and checked on from the Forge, and Burrow gets the Forge's desktops. Burrow can add itself for you, or you can do it by hand.</p>
+      <div class="ab-choices" role="group" aria-label="How to add it">
+        <button class="ab-choice primary" data-act="bridge-ask"${S.bridgeBusy ? " disabled" : ""}>
+          <span class="ab-choice-i">${S.bridgeBusy ? '<span class="spin"></span>' : ICON.plug}</span>
+          <span><b>${S.bridgeBusy ? "Adding…" : "Add it for me"}</b><small>Burrow asks first, then has the Forge add and link it. About a minute.</small></span></button>
+        <button class="ab-choice${S.manual ? " on" : ""}" data-act="bridge-manual">
+          <span class="ab-choice-i">${ICON.term}</span>
+          <span><b>I'll do it myself</b><small>The link to paste and the button to press, on the Forge's own Addons page.</small></span></button>
+      </div>
+    </div>
+  </section>`;
+  }
+  const title = linked ? "Connected to Selkies Forge, as an addon" : "Not an addon yet";
   const text = linked
     ? `Selkies Forge ${ad.adopted ? "linked the copy that was already on this machine" : "installed it"}${ad.installedAt ? ` ${ago(ad.installedAt * 1000)}` : ""}. It updates, restarts and checks on it from its Addons page, and publishes desktops through Burrow.`
-    : f ? `Add Aegis × Burrow on its Addons page: the Forge sees it is already here and links it instead of installing it again.`
-    : `Install Selkies Forge (150+ Linux desktops in the browser) and add this repository on its Addons page. Its desktops get a card here, and Burrow publishes them.`;
+    : `Install Selkies Forge (150+ Linux desktops in the browser): Burrow sees it within a minute and offers to link the two. Its desktops get a card here, and Burrow publishes them.`;
   return `<section class="card lit ab-hero${linked ? " on" : ""}${upd ? " upd" : ""}">
-    <div class="ab-link" aria-hidden="true">
-      <div class="ab-node"><img src="/__gate/logos/aegis-burrow.svg" alt=""><b>Aegis × Burrow</b><small class="mono">v${h(man.version || "")}</small></div>
-      <div class="ab-wire"><span class="ab-line"><i></i></span><em>${linked ? "addon" : f ? "not linked" : "no forge"}</em></div>
-      <div class="ab-node${f ? "" : " ghost"}"><img src="${h(forgeLogo)}" alt=""><b>Selkies Forge</b><small class="mono">${f && f.version ? "v" + h(f.version) : "–"}</small></div>
-    </div>
+    ${wire}
     <div class="ab-copy">
       <h1>${linked ? `<span class="ab-ok">${ICON.check}</span>` : ""}${h(title)}</h1>
       <p>${text}</p>
@@ -291,7 +308,6 @@ function addonHero(a) {
         <span class="pill">${ad.adopted ? "linked" : "installed by the Forge"}</span>${ad.state ? `<span class="pill ${ad.state === "running" ? "ok" : ""}"><i class="dot ${ad.state === "running" ? "ok" : "idle"}"></i>${h(ad.state)}</span>` : ""}</div>` : ""}
       <div class="row ab-btns">
         ${linked && ad.page ? `<a class="btn primary" href="${h(ad.page)}" target="_blank" rel="noopener">${ICON.ext} Open in Selkies Forge</a>`
-          : f ? `<a class="btn primary" href="${h(f.dashboard.replace(/#.*$/, ""))}#addons" target="_blank" rel="noopener">${ICON.ext} Open its Addons page</a>`
           : `<a class="btn primary" href="https://github.com/adatskov-wcpss/animated-fiesta" target="_blank" rel="noopener">${ICON.ext} Get Selkies Forge</a>`}
         ${f ? `<button class="btn" data-act="integ" data-id="${h(f.id)}">${ICON.desk} Its desktops</button>` : ""}
       </div>
@@ -301,13 +317,10 @@ function addonHero(a) {
 function addonSteps(a) {
   const f = a.forge;
   const step = (n, body) => `<li><span class="ab-n">${n}</span><div>${body}</div></li>`;
-  return `<section class="card panel ab-steps"><h3>Make it an addon <span class="faint">${f ? "one click, or by hand" : "three steps"}</span></h3>
-    ${f ? `<div class="ab-connect"><div class="grow"><b>Connect from here</b><div class="muted small">Burrow checks its own forge-addon.json with the Forge's rules, then the Forge adds and links it, and Burrow adds the Forge as one of its addons. Both sides show the link.</div></div>
-      <button class="btn primary" data-act="bridge-connect"${S.bridgeBusy ? " disabled" : ""}>${S.bridgeBusy ? '<span class="spin"></span> Connecting…' : `${ICON.plug} Connect`}</button></div>
-      <p class="faint small" style="margin:14px 0 10px">Or from the Forge's side:</p>` : ""}<ol>
+  return `<section class="card panel ab-steps"><h3>${f ? "Adding it by hand" : "Make it an addon"} <span class="faint">${f ? "two steps" : "three steps"}</span></h3><ol>
     ${f ? "" : step(1, `Install Selkies Forge on this machine:<div class="ab-code mono">curl -fsSL https://raw.githubusercontent.com/adatskov-wcpss/animated-fiesta/main/docker.sh | bash<button class="copy" data-act="copy" data-text="curl -fsSL https://raw.githubusercontent.com/adatskov-wcpss/animated-fiesta/main/docker.sh | bash" aria-label="Copy">${ICON.copy}</button></div>`)}
-    ${step(f ? 1 : 2, `In Selkies Forge, open <b>Addons</b> and paste:<div class="ab-code mono">${REPO}<button class="copy" data-act="copy" data-text="${REPO}" aria-label="Copy">${ICON.copy}</button></div>`)}
-    ${step(f ? 2 : 3, `Press <b>Link it</b>. Aegis × Burrow is already on this machine, so the Forge links it and keeps your login, domain and tunnels. This tab lights up within a minute.`)}
+    ${step(f ? 1 : 2, `${f ? `<a class="link" href="${h(f.dashboard.replace(/#.*$/, ""))}#addons" target="_blank" rel="noopener">Open Selkies Forge's Addons page</a>` : "In Selkies Forge, open <b>Addons</b>"} and paste:<div class="ab-code mono">${REPO}<button class="copy" data-act="copy" data-text="${REPO}" aria-label="Copy">${ICON.copy}</button></div>Or find <b>Aegis × Burrow</b> under <i>Found on this machine</i> there.`)}
+    ${step(f ? 2 : 3, `Press <b>Link it</b> (or <b>Add and link</b>). It is already on this machine, so the Forge links it and keeps your login, domain and tunnels. Burrow then adds the Forge back, and this tab lights up within a minute.`)}
   </ol></section>`;
 }
 // ------------------------------------------------------------------ the bridge's health
@@ -322,7 +335,7 @@ function bridgePanel() {
   const n = b.checks.filter((c) => c.state === "ok").length;
   const row = (c) => `<li class="bc ${c.state}"><span class="bc-i">${{ ok: ICON.check, warn: "!", fail: "✕", off: "–" }[c.state]}</span>
       <div class="grow"><b>${h(c.label)}</b><div class="muted small">${h(c.detail)}</div></div>
-      ${c.fix === "connect" && !S.bridgeBusy ? `<button class="btn sm" data-act="bridge-connect">${ICON.plug} Connect</button>` : ""}</li>`;
+      ${c.fix === "connect" && !S.bridgeBusy ? `<button class="btn sm" data-act="bridge-ask">${ICON.plug} Add it</button>` : ""}</li>`;
   const fs = b.forgeSide;
   return `<section class="card panel bridge-panel ${b.state}">
     <h3>${ICON.shield} Bridge health <span class="pill ${b.state === "ok" ? "ok" : b.state === "fail" ? "err" : b.state === "warn" ? "warn" : ""}">${h(word)}</span>
@@ -335,14 +348,59 @@ function bridgePanel() {
     </div>
   </section>`;
 }
+// "Add it for me": say exactly what will happen, and only go on with a yes.
+function bridgeAsk() {
+  const f = S.addon && S.addon.forge;
+  if (!f) return;
+  const li = (t) => `<li>${t}</li>`;
+  openModal(`<h2>Let Burrow add itself to Selkies Forge?</h2>
+    <p>Nothing happens until you allow it. This is what Burrow will do:</p>
+    <ol class="perm">
+      ${li(`<b>Check its own <span class="mono">forge-addon.json</span></b> with the Forge's rules. Nothing leaves this machine.`)}
+      ${li(`<b>Ask the Forge</b> at <span class="mono">${h(f.local.replace(/^https?:\/\//, "").replace(/\/$/, ""))}</span> to add <span class="mono">${h(REPO.replace("https://", ""))}</span> (or this machine's copy, if GitHub can't be reached).`)}
+      ${li(`<b>The Forge links the copy that is already here.</b> It runs Aegis × Burrow's install script, which keeps your login, domain, tunnels and settings. Aegis restarts for a few seconds, so this page may blink.`)}
+      ${li(`<b>Add Selkies Forge as a Burrow addon</b>, from its own checkout, so each shows the other.`)}
+    </ol>
+    <p class="faint small">To undo it later: the Forge's Addons page → Aegis × Burrow → ⋯ → Uninstall, then Remove (your gate keeps running).</p>
+    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="permGo">${ICON.plug} Allow and add</button></div>`, (m) => {
+    m.querySelector("#permGo").addEventListener("click", () => { closeModal(); bridgeConnect(); });
+  });
+}
 async function bridgeConnect() {
   S.bridgeBusy = true; render();
-  try {
-    const r = await api("/__gate/api/bridge/connect", { method: "POST", body: "{}" });
-    toast(r.forge && r.forge.already ? "Already an addon of Selkies Forge" : "Selkies Forge is linking Aegis × Burrow. Burrow may restart for a moment.");
-    if (r.local && r.local.error) toast(r.local.error);
-  } catch (e) { toast(e.message); }
-  finally { S.bridgeBusy = false; setTimeout(() => loadBridge(true), 4000); }
+  let r;
+  try { r = await api("/__gate/api/bridge/connect", { method: "POST", body: "{}" }); }
+  catch (e) { S.bridgeBusy = false; render(); openModal(`<h2>Could not add it</h2><p class="err-msg">${h(e.message)}</p><p class="muted small">Nothing was changed. You can still add it by hand.</p><div class="modal-actions"><button class="btn primary" data-act="close">Close</button></div>`); return; }
+  if (r.local && r.local.error) toast(r.local.error);
+  if (!r.forge || r.forge.already || !r.forge.job) { S.bridgeBusy = false; toast("It is already an addon of Selkies Forge"); S.addon = null; loadBridge(true); refresh(); return; }
+  // follow the Forge's job: its phase, its log, and Aegis's own restart in the middle
+  const jid = r.forge.job.id || r.forge.job;
+  let since = 0, misses = 0;
+  openModal(`<h2>Adding Aegis × Burrow to Selkies Forge</h2><p id="jobP" class="mono small">asking the Forge…</p>
+    <div class="jbar"><i id="jobB" style="width:4%"></i></div><pre class="jlog" id="jobL"></pre>
+    <div class="modal-actions" id="jobA"><span class="faint small">Aegis restarts for a moment near the end; this keeps going.</span></div>`);
+  S.modal.querySelector(".modal").classList.add("wide");
+  const tick = async () => {
+    if (!S.modal) { S.bridgeBusy = false; return; }
+    try {
+      const v = await api(`/__gate/api/bridge/job/${encodeURIComponent(jid)}?since=${since}`);
+      misses = 0; since = v.next;
+      const L = S.modal.querySelector("#jobL");
+      for (const l of v.lines) { const d = document.createElement("div"); d.textContent = l.line; if (l.cls) d.className = l.cls; L.append(d); }
+      L.scrollTop = L.scrollHeight;
+      S.modal.querySelector("#jobP").textContent = v.state === "running" ? v.phase || "working" : v.state === "done" ? "Linked." : v.error || v.state;
+      S.modal.querySelector("#jobB").style.width = Math.round((v.state === "running" ? Math.max(0.04, v.progress) : 1) * 100) + "%";
+      if (v.state !== "running") {
+        S.bridgeBusy = false;
+        S.modal.querySelector(".jbar").classList.add(v.state === "done" ? "ok" : "bad");
+        S.modal.querySelector("#jobA").innerHTML = `${v.state === "done" ? `<a class="btn" href="${h(v.page)}" target="_blank" rel="noopener">${ICON.ext} Open in Selkies Forge</a>` : ""}<button class="btn primary" data-act="close">${v.state === "done" ? "Done" : "Close"}</button>`;
+        S.addon = null; setTimeout(() => { loadBridge(true); refresh(); }, 1500);
+        return;
+      }
+    } catch { if (++misses > 90) { S.bridgeBusy = false; S.modal.querySelector("#jobP").textContent = "Lost track of it; check the Forge's Addons page."; return; } }
+    setTimeout(tick, 1000);
+  };
+  tick();
 }
 
 // ------------------------------------------------------------------ Burrow's addons
@@ -365,6 +423,8 @@ function adState(a) {
   return '<span class="pill ok"><i class="dot ok"></i>installed</span>';
 }
 const shortSrc = (s) => String(s || "").replace(/^https:\/\/(www\.)?(github\.com\/)?/, "").replace(/^\/home\/[^/]+/, "~");
+// "is made for Burrow, not …" is about the addon; the rest are about this machine
+const problemText = (ps) => ps.map((p) => (/^is made for/.test(p) ? "It " : "This machine ") + p).join(". ") + ".";
 function adCard(a) {
   const upd = a.installed && a.remote && a.remote.up_to_date === false;
   const w = a.ways;
@@ -376,7 +436,7 @@ function adCard(a) {
       ${adState(a)}
     </div>
     <p class="adc-desc">${h(a.description || "No description.")}</p>
-    ${a.problems.length ? `<div class="note-err small">This machine ${h(a.problems.join("; "))}.</div>` : ""}
+    ${a.problems.length ? `<div class="note-err small">${h(problemText(a.problems))}</div>` : ""}
     ${a.installed && w ? `<div class="dl">${w.burrow && w.burrow.url ? `<div class="dl-row"><span class="dl-k">Burrow</span><a class="mono" href="${h(w.burrow.url)}" target="_blank" rel="noopener">${h(w.burrow.url.replace(/^https:\/\//, ""))}</a></div>` : ""}
       <div class="dl-row"><span class="dl-k">Local</span><span class="mono">${h(w.local)}</span></div></div>` : ""}
     <div class="t-actions">
@@ -416,10 +476,10 @@ function renderAddons() {
     ${subtabs()}
     <section class="card panel addbar">
       <form class="row" id="adForm" autocomplete="off">
-        <input class="input grow" id="adSrc" spellcheck="false" placeholder="https://github.com/owner/repo  ·  …/tree/main/a/folder  ·  /a/folder/here" aria-label="Addon repository link">
+        <input class="input grow" id="adSrc" spellcheck="false" placeholder="https://github.com/owner/repo  ·  …/tree/main/a/folder  ·  a GitLab link  ·  https://…/addon.zip" aria-label="Addon repository link">
         <button class="btn primary" id="adGo">Add</button>
       </form>
-      <div class="faint small" style="margin-top:8px">Addons run as you on this machine, like anything you install. <a class="link" href="https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md" target="_blank" rel="noopener">The addon format →</a></div>
+      <div class="faint small" style="margin-top:8px">Addons run as you on this machine, like anything you install. Powered by the <a class="link" href="https://github.com/alexd-aero/weft" target="_blank" rel="noopener">Weft Architecture</a> · <a class="link" href="https://github.com/alexd-aero/weft#-the-examples" target="_blank" rel="noopener">examples →</a></div>
       <div id="adErr" class="err-msg"></div>
     </section>
     <section class="found">
@@ -555,7 +615,7 @@ function renderAddon() {
       <div class="card stat"><b class="${upd && upd.available ? "ab-g" : ""}">${!upd ? "–" : upd.available ? "Update" : "Up to date"}</b><span>updates</span><div class="sub">${ad.checkedAt ? "checked " + ago(ad.checkedAt * 1000) : "not checked yet"}</div></div>
       <div class="card stat"><b>${sum ? (sum.reachable ? sum.desktops : "–") : "…"}</b><span>Forge desktops</span><div class="sub">${sum && sum.reachable ? sum.running + " running" : sum ? "not answering" : "asking"}</div></div>
       <div class="card stat"><b>${fmtN(calls)}</b><span>control socket calls</span><div class="sub">${forgeClient ? "Forge: " + ago(forgeClient.last) : "since Aegis started"}</div></div>
-    </div>` : addonSteps(a)}
+    </div>` : !f || S.manual ? addonSteps(a) : ""}
     <div class="d-two">
       <section class="card panel"><h3>How they're linked</h3>
         <dl class="kv">
@@ -877,7 +937,8 @@ document.addEventListener("click", async (e) => {
     else if (act === "home") go("list");
     else if (act === "tab") go(["forge", "addons"].includes(el.dataset.v) ? el.dataset.v : "list");
     else if (act === "bridge-check") loadBridge(true);
-    else if (act === "bridge-connect") bridgeConnect(el);
+    else if (act === "bridge-ask") bridgeAsk();
+    else if (act === "bridge-manual") { S.manual = !S.manual; render(); if (S.manual) setTimeout(() => document.querySelector(".ab-steps")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); }
     else if (act === "scan") loadScan(true);
     else if (act === "ad-add") addAddon(el.dataset.src, el);
     else if (act === "ad-install") installForm(el.dataset.id);

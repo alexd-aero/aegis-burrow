@@ -104,7 +104,7 @@ export async function health({ burrow, addons }) {
       PRIVATE.test(host) ? `${host} is this machine or a private network` : `${host} looks public: anyone who reaches it can drive the Forge`);
 
   // each side has the other as an addon
-  const ad = forge.addon;
+  const ad = forge.addon || await forgeHasUs();
   add("forge-has-us", "Aegis × Burrow is a Forge addon", ad ? "ok" : "warn",
       ad ? `${ad.id} ${ad.version}${ad.commit ? ` · ${ad.commit.slice(0, 7)}` : ""} · ${ad.adopted ? "linked" : "installed by the Forge"}${ad.state ? ` · ${ad.state}` : ""}`
          : "not yet: press Connect, or add it on the Forge's Addons page", ad ? null : "connect");
@@ -172,4 +172,42 @@ export async function adoptForge({ addons, log }) {
   const a = await addons.add(repo);
   log("bridge: added Selkies Forge as a Burrow addon from", tilde(repo));
   return addons.install(a.id, {});
+}
+
+// A Forge job (the linking Connect started), for Burrow's progress view: its
+// state from the Forge's API, its lines from the Forge's log file (same user).
+export async function forgeJob(id, since = 0) {
+  const forge = forgeIntegration();
+  if (!forge) throw new Error("Selkies Forge isn't on this machine.");
+  const j = await forgeCall(forge, `job/${encodeURIComponent(id)}`, null, 8000);
+  let lines = [];
+  try {
+    const { readFileSync } = await import("node:fs");
+    for (const raw of readFileSync(j.log, "utf8").split("\n")) {
+      // the Forge's job logs: "  line" and "! error" (web UI jobs), "L line" and "E error" (selkies-cli)
+      if (/^( {2}|[LE] )/.test(raw)) lines.push({ line: raw.slice(2), cls: raw[0] === "E" ? "err" : "" });
+      else if (raw.startsWith("! ")) lines.push({ line: raw.slice(2), cls: "err" });
+    }
+  } catch { /* no log yet */ }
+  const next = lines.length;
+  lines = lines.slice(Math.max(0, since));
+  return { id, state: j.status, phase: j.phase || j.label || "", progress: Number(j.progress) || 0, error: j.error || null,
+           result: j.result || null, lines, next, page: forge.url + "#addons/aegis-burrow" };
+}
+
+// What the Forge's own API says about us, when its drop-in hasn't caught up
+// (it is rewritten every 20 s, so a page may load in between).
+export async function forgeHasUs() {
+  const forge = forgeIntegration();
+  if (!forge) return null;
+  try {
+    const r = await forgeCall(forge, "addons", null, 6000);
+    const a = (r.addons || []).find((x) => x.id === "aegis-burrow" && x.installed);
+    if (!a) return null;
+    const rem = a.remote;
+    return { id: a.id, name: a.name, version: a.installed_version || a.version, commit: a.commit, source: a.source,
+             state: a.status?.state || null, adopted: !!a.adopted, installedAt: null, checkedAt: rem?.checked ? Math.round(rem.checked) : null,
+             update: rem ? { available: rem.up_to_date === false, commit: rem.commit, version: rem.version, subject: rem.subject, behind: 0 } : null,
+             page: forge.url + "#addons/aegis-burrow" };
+  } catch { return null; }
 }

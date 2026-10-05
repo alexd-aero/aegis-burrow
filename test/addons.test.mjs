@@ -91,3 +91,46 @@ test("the smart scan finds addons on this machine", async () => {
   assert.equal(by.oldthing, undefined);
   rmSync(dir, { recursive: true });
 });
+
+test("sources: GitLab (subgroups, self-hosted), blob links, archives", () => {
+  let s = A.parseSource("https://gitlab.com/grp/sub/repo/-/tree/main/addons/x");
+  assert.deepEqual([s.kind, s.url, s.ref, s.subdir], ["git", "https://gitlab.com/grp/sub/repo", "main", "addons/x"]);
+  s = A.parseSource("https://git.example.org/g/r/-/blob/dev/forge-addon.json");
+  assert.deepEqual([s.url, s.ref, s.subdir], ["https://git.example.org/g/r", "dev", ""]);
+  s = A.parseSource("https://github.com/o/r/archive/refs/heads/main.zip#addons/x");
+  assert.deepEqual([s.kind, s.format, s.subdir], ["archive", "zip", "addons/x"]);
+  assert.equal(A.parseSource("https://x.org/r.tgz?t=1").format, "tar");
+});
+
+test("archives: inspected statically, added, checked; unsafe ones refused", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { createServer } = await import("node:http");
+  const { readFileSync } = await import("node:fs");
+  const www = tmp(), src = join(tmp(), "zippy-main");
+  addon(src, { id: "zippy", name: "Zippy" });
+  execFileSync("python3", ["-c", `
+import zipfile, os, sys
+src, www = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(os.path.join(www, "zippy.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+    for n in os.listdir(src): z.write(os.path.join(src, n), "zippy-main/" + n)
+with zipfile.ZipFile(os.path.join(www, "evil.zip"), "w") as z:
+    z.writestr("../../escape.sh", "echo gotcha")`, src, www]);
+  execFileSync("tar", ["-czf", join(www, "zippy.tar.gz"), "-C", join(src, ".."), "zippy-main"]);
+  const srv = createServer((q, r) => { try { r.end(readFileSync(join(www, q.url.slice(1)))); } catch { r.statusCode = 404; r.end(); } });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const base = `http://127.0.0.1:${srv.address().port}/`;
+  const dir = tmp();
+  const H = new A.Addons({ dir: join(dir, "addons"), registry: join(dir, "addons.json"), version: "2.0.0", log: () => {} });
+  try {
+    for (const n of ["zippy.zip", "zippy.tar.gz"]) {
+      const r = await H.inspect(base + n);
+      assert.deepEqual([r.valid, r.manifest.id, r.registered], [true, "zippy", false]);
+      assert.match(r.commit, /^sha256:[0-9a-f]{64}$/);
+    }
+    assert.deepEqual(Object.keys(H.load()), []);                 // inspect adds nothing
+    const a = await H.add(base + "zippy.zip");
+    assert.equal(a.id, "zippy");
+    assert.equal((await H.checkUpdates("zippy")).up_to_date, true);
+    await assert.rejects(H.inspect(base + "evil.zip"), /unsafe path/);
+  } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
+});

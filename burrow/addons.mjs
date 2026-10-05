@@ -26,6 +26,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
+import { ArchiveError, download, unpack } from "./archive.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -47,7 +48,12 @@ export class AddonError extends Error {}
 const fail = (msg) => { throw new AddonError(msg); };
 
 // ------------------------------------------------------------------ sources
-const HOSTED_TREE = /^(https:\/\/(?:github\.com|gitlab\.com|codeberg\.org)\/[^/\s]+\/[^/\s#]+?)(?:\.git)?\/(?:-\/)?tree\/([^/\s#]+)(?:\/([^#\s]*?))?\/?$/;
+// GitHub and Codeberg: OWNER/REPO/tree|blob/REF[/path]
+const HOSTED_TREE = /^(https:\/\/(?:github\.com|codeberg\.org)\/[^/\s]+\/[^/\s#]+?)(?:\.git)?\/(?:tree|blob|src\/branch)\/([^/\s#]+)(?:\/([^#\s]*?))?\/?$/;
+// GitLab, gitlab.com or self-hosted, with subgroups: GROUP/SUB/.../REPO/-/tree|blob/REF[/path]
+const GITLAB_TREE = /^(https:\/\/[^/\s]+\/[^\s#]+?)(?:\.git)?\/-\/(?:tree|blob)\/([^/\s#]+)(?:\/([^#\s]*?))?\/?$/;
+// a download: .zip, .tar.gz, .tgz (GitHub's and GitLab's archive links included)
+const ARCHIVE = /^https?:\/\/[^\s#]+?\.(zip|tar\.gz|tgz)(?:\?[^\s#]*)?$/i;
 
 export function parseSource(text) {
   const raw = String(text || "").trim();
@@ -61,8 +67,17 @@ export function parseSource(text) {
   }
   let [url, sub = ""] = raw.split("#", 2);
   let ref = null;
-  const m = HOSTED_TREE.exec(url);
-  if (m) { url = m[1]; ref = m[2]; sub = sub || m[3] || ""; }
+  const okSub = (x) => !x || (!x.split("/").includes("..") && /^[A-Za-z0-9._/-]+$/.test(x));
+  if (ARCHIVE.test(url)) {
+    sub = sub.replace(/^\/+|\/+$/g, "");
+    if (!okSub(sub)) fail("The folder part of the link is not valid.");
+    return { kind: "archive", url, format: /\.zip(\?|$)/i.test(url) ? "zip" : "tar", ref: null, subdir: sub, display: raw };
+  }
+  const m = HOSTED_TREE.exec(url) || GITLAB_TREE.exec(url);
+  if (m) {
+    url = m[1]; ref = m[2]; sub = sub || m[3] || "";
+    if (sub === MANIFEST || sub.endsWith("/" + MANIFEST)) sub = sub.slice(0, -MANIFEST.length);   // a /blob/ link to the manifest
+  }
   url = url.replace(/\/+$/, "");
   if (!/^(https?:\/\/[^\s/]+\/\S+|ssh:\/\/\S+|git@[^\s:]+:\S+)$/.test(url)) fail("That does not look like a git repository link.");
   sub = sub.replace(/^\/+|\/+$/g, "");
@@ -77,6 +92,10 @@ function git(args, { cwd, timeout = 240 } = {}) {
 }
 
 async function fetchSource(source, dest) {
+  if (source.kind === "archive") {
+    try { return unpack(await download(source.url, `burrow/${HOST}`), dest); }
+    catch (e) { if (e instanceof ArchiveError) fail(e.message); throw e; }
+  }
   if (source.kind === "local") {
     cpSync(source.path, dest, { recursive: true, verbatimSymlinks: true,
       filter: (p) => !/(^|\/)(\.git|node_modules|__pycache__)$/.test(p) });
@@ -435,6 +454,29 @@ export class Addons {
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   }
 
+  // Look at an addon without adding it or running anything: fetch it to a
+  // scratch folder, validate forge-addon.json, return its metadata.
+  async inspect(text) {
+    const source = parseSource(text);
+    const tmp = mkdtempSync(join(this.dir, ".inspect-"));
+    try {
+      const commit = await fetchSource(source, join(tmp, "repo"));
+      const root = join(tmp, "repo", source.subdir || "");
+      if (!existsSync(root)) fail(`There is no folder ${source.subdir} in it.`);
+      const m = loadManifest(root);
+      let logo = null;
+      if (m.logo) { const p = join(root, m.logo); if (statSync(p).size <= 65536) logo = `data:${IMAGE_TYPES[extname(p).toLowerCase()]};base64,${readFileSync(p).toString("base64")}`; }
+      let files = 0;
+      const walk = (d) => { for (const e of readdirSync(d, { withFileTypes: true })) e.isDirectory() ? walk(join(d, e.name)) : files++; };
+      walk(root);
+      const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
+      return { valid: true, source: pick(source, ["kind", "url", "ref", "subdir", "display", "format"]), commit,
+               manifest: pick(m, ["id", "name", "version", "description", "author", "license", "homepage", "platforms", "replaces", "requires", "links"]),
+               scripts: Object.keys(m.scripts).sort(), actions: m.actions.map((a) => a.label), settings: m.settings.map((x) => x.key),
+               integration: m.integration.dir || null, logo, files, problems: checkRequirements(m, this.version), registered: !!this.load()[m.id] };
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  }
+
   cleanSettings(rec, given = {}) {
     const out = {}, old = rec.settings || {};
     for (const st of rec.manifest.settings) {
@@ -553,6 +595,20 @@ export class Addons {
   async checkUpdates(id) {
     const rec = this.get(id), src = rec.source, m = rec.manifest;
     const out = { id, name: m.name, source: src.display, checked: Date.now(), local: { commit: rec.commit, version: m.version } };
+    if (src.kind === "archive") {
+      // download it again: the same bytes mean nothing changed
+      const tmp = mkdtempSync(join(this.dir, ".chk-"));
+      try {
+        const digest = await fetchSource(src, join(tmp, "x"));
+        let version = "";
+        try { version = loadManifest(join(tmp, "x", rec.subdir || "")).version; } catch { /* */ }
+        out.up_to_date = digest === rec.commit;
+        out.remote = { commit: digest, short: digest.slice(7, 14), version, subject: "a new archive" };
+        out.note = out.up_to_date ? "Checked by downloading the archive again." : "The archive at that link has changed.";
+        this.patch(id, { remote: { checked: out.checked, up_to_date: out.up_to_date, commit: digest, version, subject: "a new archive" } });
+        return out;
+      } finally { rmSync(tmp, { recursive: true, force: true }); }
+    }
     if (src.kind !== "git") { out.up_to_date = null; out.note = "Added from a folder on this machine. Update copies the folder again."; return out; }
     const repo = join(this.addonDir(id), "repo");
     let r = await git(["fetch", "--quiet", "--depth", "40", "--filter=blob:none", "origin", src.ref || "HEAD"], { cwd: repo, timeout: 90 });
