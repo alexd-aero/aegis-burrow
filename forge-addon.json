@@ -2,7 +2,7 @@
   "spec": 1,
   "id": "aegis-burrow",
   "name": "Aegis × Burrow",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Aegis is the gate and the UI: one post-quantum login in front of everything on this machine, a dashboard you arrange yourself, Termix, Selkies Forge and your own links. Burrow is the engine underneath: any port on its own HTTPS address, through Cloudflare, with your own domain or free trycloudflare.com names.",
   "author": "Alexd Aero",
   "homepage": "https://github.com/alexd-aero/aegis-burrow",

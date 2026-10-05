@@ -42,7 +42,15 @@ curl -fsSL https://raw.githubusercontent.com/alexd-aero/aegis-burrow/main/instal
 
 **1 · Install.** The line above finds Node.js 18+ (or downloads a private copy) and `cloudflared` (or downloads it), installs into `~/.local/share/aegis`, and starts a systemd user service.
 
-**2 · Create your login.** The installer prints a one-time link. Pick a username and password; they're sealed with ML-KEM-768 before they leave the page.
+**2 · Create your login.** The installer prints the one-time setup link twice:
+
+```
+  Create your login, from this machine or anywhere:
+    local   http://127.0.0.1:4310/__gate/setup?t=…
+    serveo  https://1a2b3c….serveousercontent.com/__gate/setup?t=…
+```
+
+The **serveo** link works from any device, with no account and no domain. Pick a username and password; they're sealed with ML-KEM-768 before they leave the page.
 
 **3 · Pick your pack.** Aegis offers Selkies Forge, Termix (with a login you choose right there) and Burrow. Take all of it, some of it, or none.
 
@@ -63,6 +71,9 @@ aegis url
 burrow status
 burrow publish 3000 --name "my app"
 burrow list
+
+# every address it answers on: domain, local, serveo
+aegis serveo on | off | url
 
 # the first-run link, Termix, checks
 aegis setup-link
@@ -128,7 +139,7 @@ Everything else lives in **Settings**:
 | Section | What you can change |
 |---|---|
 | **Sign-in** | The gate's name, the line on the sign-in page, how long a sign-in lasts, the lockout after wrong tries |
-| **Modules** | Burrow on or off; the pack |
+| **Modules** | Burrow on or off; the **serveo link** on or off (with its address); the pack |
 | **Domain** | Link a domain through Cloudflare, or unlink it |
 | **Termix** | Install, open, remove (its data volume is kept) |
 | **Login** | Your username and password |
@@ -161,6 +172,14 @@ burrow off / on                     # the module switch (tunnels are kept)
 3. runs `cloudflared --post-quantum` itself.
 
 Each tunnel gets its own DNS record. *Unlink* removes the records, the tunnel and the files.
+
+## 🔗 The serveo link
+
+Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it up. That gives the dashboard a public `https://…serveousercontent.com` address, from a key of its own in `data/serveo/` so the name stays the same.
+
+- **When it's on.** By default until a domain is linked, so a first run is reachable from your phone. After that it's off, unless you switch it on in *Settings → Modules* or with `aegis serveo on`.
+- **It goes through the same gate as everything else.** Serveo's visitors count as remote, never as "this machine", even though serveo connects from loopback. The setup page needs the one-time token, sign-in needs your password, and the lockout counts each visitor's real address.
+- **Serveo's warning page.** Serveo shows its own *Browser Warning* the first time a browser opens a free tunnel; press *Continue to Site*.
 
 ## 📦 Addons
 

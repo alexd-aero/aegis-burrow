@@ -635,3 +635,6 @@ body[data-bg="glow"]::after { top: -200px; width: 1400px; height: 900px; backgro
 ol.perm { margin: 0 0 14px; padding: 0 0 0 20px; display: grid; gap: 10px; font-size: 13.5px; color: #d7dade; }
 ol.perm li::marker { color: var(--faint); font: 600 12px var(--mono); }
 ol.perm .mono { font-size: 12px; }
+
+.mod-ico { display: grid; place-items: center; width: 46px; height: 46px; flex: none; border-radius: 13px; font-size: 20px;
+           background: linear-gradient(180deg, #1a1b1f, #060607); border: 1px solid rgba(255,255,255,.14); color: #e8eaed; }

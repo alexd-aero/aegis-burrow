@@ -91,12 +91,21 @@ function accountBody() {
 // ------------------------------------------------------------------ modules + sign-in
 function modulesBody() {
   const on = !!S.me?.modules?.burrow;
+  const sv = S.me?.serveo || {};
   return `<div class="mod">
       <img src="/__gate/logos/burrow.svg" alt="" width="46" height="46">
       <div class="grow"><b>Burrow</b> <span class="pill">comes with Aegis</span>
         <p class="muted small">Tunnels: any port on its own HTTPS address, behind this login, with live traffic and clients. Switch it off if you only want the gate;
         your tunnels are kept, and they come back when you switch it on again.</p></div>
       <label class="switch" title="${on ? "On" : "Off"}"><input type="checkbox" id="modBurrow" ${on ? "checked" : ""} aria-label="Burrow on or off"><i></i></label>
+    </div>
+    <div class="mod">
+      <span class="mod-ico" aria-hidden="true">⇄</span>
+      <div class="grow"><b>Serveo link</b> ${sv.url ? `<span class="pill ok">up</span>` : sv.on ? `<span class="pill">connecting</span>` : ""}
+        <p class="muted small">A public HTTPS address for this dashboard through serveo.net: no account, no domain. Handy for the first run or a phone.
+        It goes through this gate like everything else: the sign-in page, then your password.</p>
+        ${sv.url ? `<p class="mono small"><a class="link" href="${h(sv.url)}" target="_blank" rel="noopener">${h(sv.url)}</a></p>` : sv.on && sv.error ? `<p class="err-msg">${h(sv.error)}</p>` : ""}</div>
+      <label class="switch" title="${sv.on ? "On" : "Off"}"><input type="checkbox" id="modServeo" ${sv.on ? "checked" : ""} aria-label="Serveo link on or off"><i></i></label>
     </div>
     <div class="mod">
       <img src="/__gate/logos/aegis-burrow.svg" alt="" width="46" height="46">
@@ -180,6 +189,15 @@ function wireForms() {
     if (!mb.checked && !confirm("Switch Burrow off? Its tunnels stop answering until you switch it back on (they are kept).")) { mb.checked = true; return; }
     try { S.me = await post("/__gate/api/prefs", { modules: { burrow: mb.checked } }); toast(mb.checked ? "Burrow is on" : "Burrow is off"); chrome("settings"); render(); }
     catch (ex) { toast(ex.message); mb.checked = !mb.checked; }
+  });
+  const ms = $("#modServeo");
+  if (ms) ms.addEventListener("change", async () => {
+    try {
+      S.me = await post("/__gate/api/prefs", { serveo: ms.checked });
+      toast(ms.checked ? "Opening a serveo link…" : "Serveo link closed");
+      render();
+      if (ms.checked) setTimeout(async () => { S.me = await fetch("/__gate/api/me", { credentials: "same-origin" }).then((r) => r.json()); render(); }, 6000);
+    } catch (ex) { toast(ex.message); ms.checked = !ms.checked; }
   });
   const pf = $("#pwForm");
   if (pf) pf.addEventListener("submit", async (e) => {

@@ -115,7 +115,8 @@ export class Burrow {
     this.activity.length = Math.min(this.activity.length, ACTIVITY);
   }
 
-  listenControl(path) {
+  // extra(method, path, readJson) -> {status, json} | null: routes the dashboard adds
+  listenControl(path, extra) {
     const readJson = (req) => new Promise((resolve, reject) => {
       let size = 0; const chunks = [];
       req.on("data", (c) => { size += c.length; if (size > 65536) { reject(new Error("too large")); req.destroy(); } else chunks.push(c); });
@@ -136,6 +137,8 @@ export class Burrow {
       try {
         const path = new URL(req.url || "/", "http://x").pathname.replace(/^\/__gate\/api/, "");
         if (path === "/status" && req.method === "GET") return reply(200, this.status());
+        const x = extra ? await extra(req.method, path, () => readJson(req)) : null;
+        if (x) { if (req.method !== "GET") this.note(id, `changed ${path.slice(1)}`); return reply(x.status, x.json); }
         if (path === "/module" && req.method === "POST") {
           const b = await readJson(req);
           this.setOn(b.burrow !== false);

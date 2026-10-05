@@ -42,6 +42,7 @@ import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Burrow } from "../burrow/index.mjs";
+import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
@@ -140,7 +141,11 @@ setInterval(refreshLocalAddrs, 60000).unref();
 const isThisMachine = (a) => isLoopback(a) || localAddrs.has(String(a || "").replace(/^::ffff:/, ""));
 // cloudflared runs on this machine, so only this machine may tell us who the client is
 const viaProxy = (req) => isThisMachine(req.socket.remoteAddress) && !!req.headers["cf-connecting-ip"];
-const clientIp = (req) => (viaProxy(req) ? req.headers["cf-connecting-ip"] : req.socket.remoteAddress) || "?";
+// serveo connects from this machine (our ssh) and names the visitor in X-Real-Ip
+const viaServeo = (req) => isThisMachine(req.socket.remoteAddress) && !!serveo.host() && hostOf(req) === serveo.host();
+const clientIp = (req) => (viaProxy(req) ? req.headers["cf-connecting-ip"]
+  : viaServeo(req) ? (req.headers["x-real-ip"] || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || "serveo")
+  : req.socket.remoteAddress) || "?";
 const isSecure = (req) => !!req.socket.encrypted || (isThisMachine(req.socket.remoteAddress) && req.headers["x-forwarded-proto"] === "https");
 const cookieName = (req) => (isSecure(req) ? COOKIE : PLAIN_COOKIE);
 const goName = (req) => (isSecure(req) ? "__Host-" + GO : GO);
@@ -360,7 +365,8 @@ function messagePage(res, status, title, text) {
 function setupAllowed(req, token) {
   const want = settings.setupToken();
   if (want && token && timingSafeEqual(sha256(String(token)), sha256(want))) return true;
-  return isLoopback(req.socket.remoteAddress) && !req.headers["cf-connecting-ip"] && !req.headers["x-forwarded-for"];
+  return isLoopback(req.socket.remoteAddress) && !req.headers["cf-connecting-ip"] && !req.headers["x-forwarded-for"]
+    && !req.headers["x-real-ip"] && !viaServeo(req);
 }
 
 // ---------- gate routes (any host) ----------
@@ -464,6 +470,26 @@ async function handleGate(req, res, path, url, host, isMain) {
 
 // ---------- dashboard API (signed in) ----------
 
+// ---------- the serveo link (burrow/serveo.mjs) ----------
+// On by default until a domain is linked (a first run has no other public
+// address); after that, only if switched on in Settings → Modules.
+const serveo = new Serveo({ dataDir: DATA, log });
+const serveoWanted = () => { const v = settings.get("serveo"); return v == null ? !settings.get("domain") : v !== false; };
+let serveoPort = null;
+function setServeo(on) {
+  settings.set({ serveo: !!on });
+  if (on) startServeo(); else serveo.stop();
+  writeRuntime();
+}
+function startServeo() {
+  if (serveoPort) return serveo.start(serveoPort);
+  // a plain-HTTP listener on loopback just for serveo (serveo forwards HTTP,
+  // and the main listener may speak TLS only, or listen on a LAN address)
+  const plain = createHttpServer(handler);
+  plain.on("upgrade", (...a) => server.emit("upgrade", ...a));
+  plain.listen(0, "127.0.0.1", () => { serveoPort = plain.address().port; serveo.start(serveoPort); });
+}
+
 function me(req) {
   const s = sessionOf(req);
   const d = settings.get("domain");
@@ -479,6 +505,7 @@ function me(req) {
     login: { subtitle: (settings.get("login") || {}).subtitle || "Secure channel" },
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
+    serveo: serveo.state(),
   };
 }
 
@@ -515,6 +542,7 @@ function savePrefs(p) {
   if ("lockout" in p) patch.lockout = { attempts: Math.max(3, Math.min(50, Math.round(Number(p.lockout?.attempts) || 5))),
                                         minutes: Math.max(1, Math.min(1440, Math.round(Number(p.lockout?.minutes) || 15))) };
   if ("modules" in p) burrow.setOn(p.modules?.burrow !== false);
+  if ("serveo" in p) setServeo(p.serveo !== false);
   settings.set(patch);
 }
 
@@ -762,7 +790,7 @@ async function handler(req, res) {
   try {
     const port = burrow.matchHost(host);
     if (port !== null) return tunnelRequest(port, req, res, path, url, host);
-    const isMain = host === mainHost() || isLocalName(host);
+    const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
     if (!isMain) return send(res, 404, "Not found");
     if (path.startsWith("/__gate/")) return await handleGate(req, res, path, url, host, true);
     if (!settings.auth()) return send(res, 302, "", { Location: "/__gate/setup" + url.search });
@@ -810,21 +838,38 @@ server.on("upgrade", (req, socket, head) => {
     if (t.access === "login" && !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
-  if (!(host === mainHost() || isLocalName(host)) || !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
+  if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
   proxyUpgrade(req, socket, head);
 });
 
 // ---------- the local control socket (Burrow's, see burrow/index.mjs) ----------
 
-burrow.listenControl(join(DATA, "control.sock"));
-for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { burrow.stop(); process.exit(0); });
+burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) => {
+  // the dashboard's own extras on the socket: the serveo link (bin/aegis serveo)
+  if (path === "/serveo" && method === "GET") return { status: 200, json: serveo.state() };
+  if (path === "/serveo" && method === "POST") { setServeo((await readJson()).on !== false); return { status: 200, json: serveo.state() }; }
+  return null;
+});
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { burrow.stop(); serveo.stop(); process.exit(0); });
+
+const LOCAL_URL = `${TLS ? "https" : "http"}://${LISTEN.host === "0.0.0.0" || LISTEN.host === "::" ? "127.0.0.1" : LISTEN.host}:${LISTEN.port}`;
+// data/runtime.json: where it answers right now (bin/aegis prints these)
+let lastRuntime = "";
+function writeRuntime() {
+  const r = { pid: process.pid, url: LOCAL_URL + "/", started: startedAt, version: VERSION, mainHost: mainHost(), serveo: serveo.url ? serveo.url + "/" : null };
+  const j = JSON.stringify(r);
+  if (j === lastRuntime) return;
+  lastRuntime = j;
+  try { writeJson(join(DATA, "runtime.json"), r, 0o644); } catch { /* read-only data dir: fine */ }
+}
+const startedAt = Date.now();
+setInterval(writeRuntime, 2000).unref();
 
 server.listen(LISTEN.port, LISTEN.host, () => {
-  const scheme = TLS ? "https" : "http";
-  const local = `${scheme}://${LISTEN.host === "0.0.0.0" || LISTEN.host === "::" ? "127.0.0.1" : LISTEN.host}:${LISTEN.port}`;
+  const local = LOCAL_URL;
   log(`aegis × burrow ${VERSION} on ${local}${mainHost() ? ` (dashboard https://${mainHost()})` : ""}, tunnels: ${tunnels.mode}`);
-  try { writeJson(join(DATA, "runtime.json"), { pid: process.pid, url: local + "/", started: Date.now(), version: VERSION, mainHost: mainHost() }, 0o644); }
-  catch { /* read-only data dir: fine */ }
+  writeRuntime();
+  if (serveoWanted()) startServeo();
   if (!settings.auth()) {
     const t = settings.setupToken();
     log(`first run: create the login at ${local}/__gate/setup${t ? `?t=${t}` : ""}`);

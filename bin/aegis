@@ -9,6 +9,7 @@
 #   aegis url | setup-link | logs [-f] | version
 #   aegis termix install | remove    Termix in Docker, behind the same login
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared
+#   aegis serveo on | off | url        a public https link to the dashboard (serveo.net)
 #   aegis burrow status | list | on | off
 #   aegis burrow publish PORT [--name N] [--public] [--host H]
 #   aegis burrow unpublish PORT      Burrow, the tunnel engine (also: burrow …)
@@ -146,6 +147,25 @@ listen_url() {
 }
 dashboard_url() { local m; m="$(setting domain.mainHost)"; if [ -n "$m" ]; then printf 'https://%s/' "$m"; else printf '%s/' "$(listen_url)"; fi; }
 setup_needed() { [ -z "$(setting auth.hash)" ]; }
+# The serveo link (burrow/serveo.mjs): on by default until a domain is linked.
+serveo_wanted() { local v; v="$(setting serveo)"; if [ -z "$v" ]; then [ -z "$(setting domain.mainHost)" ]; else [ "$v" != false ]; fi; }
+serveo_url() { json_get "$AEGIS_HOME/data/runtime.json" serveo; }
+wait_serveo() {  # the server opens it a few seconds after it starts
+  local i; serveo_wanted || return 1
+  for i in $(seq 1 50); do [ -n "$(serveo_url)" ] && return 0; sleep 0.5; done; return 1
+}
+# links PATH: every address it answers on, one per line, PATH appended
+links() {
+  local p="${1:-}" s m; m="$(setting domain.mainHost)"
+  [ -n "$m" ] && printf '    %s  %s\n' "$(c '2' 'domain')" "$(c '1' "https://$m/$p")"
+  printf '    %s   %s\n' "$(c '2' 'local')" "$(c '1' "$(listen_url)/$p")"
+  if serveo_wanted; then
+    s="$(serveo_url)"
+    if [ -n "$s" ]; then printf '    %s  %s\n' "$(c '2' 'serveo')" "$(c '1' "$s$p")"
+    else printf '    %s  %s\n' "$(c '2' 'serveo')" "$(c '2' 'not up yet; see: aegis serveo url')"; fi
+  fi
+}
+setup_path() { local t; t="$(setting setupToken)"; printf '__gate/setup%s' "${t:+?t=$t}"; }
 setup_link() { local t; t="$(setting setupToken)"; printf '%s/__gate/setup%s' "$(listen_url)" "${t:+?t=$t}"; }
 
 # ---------------------------------------------------------------- service
@@ -333,11 +353,14 @@ cmd_install() {
 
   progress 100 "done"
   echo
+  [ "$start" = 1 ] && serveo_wanted && { progress 100 "opening a serveo link"; wait_serveo || true; }
   if setup_needed; then
-    echo "  Create your login: $(c '1' "$(setup_link)")"
+    echo "  Create your login, from this machine or anywhere:"
+    links "$(setup_path)"
     [ -n "${FORGE_ADDON_ID:-}" ] && echo "::open $(setup_link)"
   else
-    echo "  Dashboard: $(c '1' "$(dashboard_url)")"
+    echo "  Dashboard:"
+    links ""
     [ -n "${FORGE_ADDON_ID:-}" ] && echo "::open $(dashboard_url)"
   fi
   echo
@@ -384,8 +407,9 @@ cmd_status() {
     else state=broken; fi
   fi
   if [ "$json" = 1 ]; then
-    printf '{"state":"%s","version":"%s","url":"%s","dashboard":"%s","setup_needed":%s,"setup_url":"%s","home":"%s","burrow":%s}\n' \
-      "$state" "$ver" "$url" "$dash" "$setup" "$link" "$AEGIS_HOME" "$burrow"
+    local sv=""; [ -n "${NODE:-}" ] && [ "$state" = running ] && sv="$(serveo_url)"
+    printf '{"state":"%s","version":"%s","url":"%s","dashboard":"%s","setup_needed":%s,"setup_url":"%s","home":"%s","burrow":%s,"serveo":"%s"}\n' \
+      "$state" "$ver" "$url" "$dash" "$setup" "$link" "$AEGIS_HOME" "$burrow" "$sv"
   else
     echo "  Aegis × Burrow ${ver:-?}: $state$([ "$burrow" = false ] && echo " (Burrow off)")"
     [ -n "$dash" ] && echo "  dashboard: $dash"
@@ -488,13 +512,20 @@ case "${1:-help}" in
   uninstall) shift; cmd_uninstall "$@" ;;
   start|stop|restart) need_installed; svc "$1"; [ "$1" = stop ] || wait_healthy || die "not answering yet; see: aegis logs"; ok "$1 done" ;;
   status) shift; cmd_status "$@" ;;
-  url) need_installed; dashboard_url; echo ;;
-  setup-link) need_installed; if setup_needed; then setup_link; echo; else echo "the login is already set up: $(dashboard_url)"; fi ;;
+  url) need_installed; links "" ;;
+  setup-link) need_installed; if setup_needed; then links "$(setup_path)"; else echo "  the login is already set up:"; links ""; fi ;;
+  serveo) shift; need_installed
+    case "${1:-url}" in
+      on|off) out="$(burrow_call POST /serveo "{\"on\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"
+              ok "serveo link $1"; [ "$1" = on ] && { wait_serveo && links "" || say "still connecting; see: aegis serveo url"; } ;;
+      url) s="$(serveo_url)"; if [ -n "$s" ]; then echo "$s"; elif serveo_wanted; then die "not up yet (ssh to serveo.net still connecting, or blocked)"; else die "off: aegis serveo on"; fi ;;
+      *) die "aegis serveo on | off | url" ;;
+    esac ;;
   logs) shift; cmd_logs "$@" ;;
   termix) shift; need_installed; cmd_termix "$@" ;;
   burrow) shift; need_installed; cmd_burrow "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   version|-v|--version) sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$SRC_DIR/package.json" | head -1 ;;
-  help|-h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command $1 (see: aegis help)" ;;
 esac
