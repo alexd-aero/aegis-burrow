@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#000000">
+<title>Set up {{title}}</title>
+<link rel="icon" href="/__gate/logos/aegis-burrow.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/__gate/login.css">
+</head>
+
+<body data-state="idle" data-mode="setup">
+<main>
+  <div class="mark">
+    <img class="logo" src="/__gate/logos/aegis-burrow.svg" alt="" width="40" height="40">
+    <div class="mark-t"><b>Welcome to {{title}}</b><span>First run</span></div>
+    <i class="dot" aria-hidden="true"></i>
+  </div>
+
+  <p class="lede">Create the one login that guards this dashboard, Termix and every protected tunnel. It is sealed with <b>ML-KEM-768</b> before it leaves this page.</p>
+  <form id="f" autocomplete="on" novalidate>
+    <div class="field">
+      <label class="sr" for="username">Username</label>
+      <input id="username" name="username" placeholder="Choose a username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    </div>
+    <div class="field">
+      <label class="sr" for="password">Password</label>
+      <input id="password" name="password" type="password" placeholder="Password (10+ characters)" autocomplete="new-password" minlength="10" required>
+      <button class="peek" id="peek" type="button" aria-label="Show password" aria-pressed="false">
+        <svg class="on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg class="off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M10.6 5.1A10.6 10.6 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2M6.6 6.6C3.8 8.4 2 12 2 12s3.5 7 10 7c1.8 0 3.4-.5 4.8-1.3M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+      </button>
+    </div>
+    <div class="field">
+      <label class="sr" for="password2">Repeat the password</label>
+      <input id="password2" name="password2" type="password" placeholder="Repeat the password" autocomplete="new-password" required>
+    </div>
+    <div class="caps" id="caps">Caps Lock is on</div>
+    <button id="go" type="submit"><span class="label">Create login</span><i class="spin"></i></button>
+  </form>
+  <p id="msg" role="status" aria-live="polite"></p>
+
+  <footer>
+    <span><b>ML-KEM-768 + X25519</b></span><span>→</span><span><b>AES-256-GCM ×2</b></span>
+  </footer>
+</main>
+<script type="module" src="/__gate/login.js"></script>
+</body>
+</html>

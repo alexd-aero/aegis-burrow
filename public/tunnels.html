@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#000000">
+<title>Burrow · {{title}}</title>
+<link rel="icon" href="/__gate/logos/aegis-burrow.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/__gate/ui.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/__gate/logos/aegis-burrow.svg" alt="" width="30" height="30">
+      <span class="name">{{title}}</span>
+    </a>
+    <nav class="tabs" aria-label="Sections">
+      <a href="/" data-nav="home">Home</a>
+      <a href="/__gate/open/termix" data-nav="termix" hidden>Termix</a>
+      <a href="/__gate/tunnels" data-nav="tunnels">Burrow</a>
+      <a href="/__gate/settings" data-nav="settings">Settings</a>
+    </nav>
+    <div class="top-r">
+      <span class="live" id="liveState"><i class="dot idle"></i><span>connecting</span></span>
+      <a class="btn ghost sm" href="/__gate/logout">Sign out</a>
+    </div>
+  </div>
+</header>
+<main class="wrap" id="app" aria-live="polite"></main>
+<script type="module" src="/__gate/tunnels.js"></script>
+</body>
+</html>

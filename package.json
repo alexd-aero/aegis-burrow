@@ -1,0 +1,23 @@
+{
+  "name": "aegis-burrow",
+  "version": "2.0.0",
+  "description": "Aegis \u00d7 Burrow: a post-quantum gate and dashboard (Aegis) on a tunnel engine (Burrow).",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node aegis/server.mjs",
+    "build": "node client/build.mjs",
+    "check": "for f in aegis/*.mjs burrow/*.mjs public/*.js; do node --check \"$f\" || exit 1; done && bash -n bin/aegis bin/burrow install.sh forge/*.sh",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@noble/post-quantum": "^0.7.1",
+    "esbuild": "^0.28.2"
+  }
+}

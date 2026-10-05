@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Aegis">
+  <defs>
+    <linearGradient id="ag-tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a1b1f"/><stop offset="1" stop-color="#060607"/></linearGradient>
+    <linearGradient id="ag-ink" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#bfc3c9"/></linearGradient>
+    <radialGradient id="ag-glow" cx=".5" cy="0" r=".9"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#ag-tile)"/>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#ag-glow)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="29.5" fill="none" stroke="#fff" stroke-opacity=".14"/>
+  <path d="M38 6.5h52" stroke="#fff" stroke-opacity=".5" stroke-linecap="round"/>
+  <!-- the shield, a second inner edge, and the keyhole -->
+  <path d="M64 20 32 31v26c0 23 13.6 41.5 32 50 18.4-8.5 32-27 32-50V31z" fill="none" stroke="url(#ag-ink)" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M64 35 45 41.5v16c0 14 8 25.5 19 31.5 11-6 19-17.5 19-31.5v-16z" fill="#fff" fill-opacity=".08" stroke="#fff" stroke-opacity=".35" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="64" cy="58" r="7.5" fill="#fff"/>
+  <path d="M60.5 62h7l2.5 17h-12z" fill="#fff"/>
+</svg>

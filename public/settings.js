@@ -1,0 +1,242 @@
+// Settings: link a domain through Cloudflare, Termix, the login, connected apps.
+import { $, h, api, post, toast, ago, chrome, ICONS } from "./common.js";
+
+const app = $("#app");
+const S = { me: null, cf: null, termix: null, poll: null, busy: false };
+
+const sec = (id, title, sub, body) => `<section class="card lit panel set" id="${id}">
+  <div class="set-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ""}</div>${body}</section>`;
+
+// ------------------------------------------------------------------ domain
+function domainBody() {
+  const cf = S.cf;
+  if (!cf) return '<p class="muted">Loading…</p>';
+  if (cf.domain) {
+    const d = cf.domain, c = cf.connector;
+    return `<div class="linked">
+        <div class="kv-row"><span>Dashboard</span><a class="mono" href="https://${h(d.mainHost)}" target="_blank" rel="noopener">https://${h(d.mainHost)}</a></div>
+        <div class="kv-row"><span>Tunnels</span><span class="mono">tunnel-PORT-${h(d.mainHost)}</span></div>
+        <div class="kv-row"><span>Connector</span>${!d.managed ? '<span class="pill">your own cloudflared service</span>'
+          : c && c.running ? `<span class="pill ok"><i class="dot ok"></i>connected · post-quantum · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>not running</span>'}</div>
+      </div>
+      ${c && c.log && c.log.length ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
+      ${d.managed ? `<div class="row end"><button class="btn danger" data-act="unlink">Unlink ${h(d.mainHost)}</button></div>`
+        : '<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis only adds and removes the per-tunnel DNS records.</p>'}`;
+  }
+  if (!cf.cloudflared) {
+    return `<div class="note-err"><b>cloudflared is not installed.</b> Run <span class="mono">aegis doctor --fix</span> on this machine, or install it from
+      <a class="link" href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noopener">Cloudflare</a>, then reload.</div>`;
+  }
+  if (cf.cert) {
+    const zone = cf.cert.zone && cf.cert.zone.name;
+    return `<ol class="steps"><li class="done"><b>Cloudflare authorized</b><span>${zone ? `for <span class="mono">${h(zone)}</span>` : ""}</span></li><li class="on"><b>Pick the dashboard's name</b></li></ol>
+      <form id="linkForm" class="link-form" autocomplete="off">
+        <label class="field"><span>Name</span>
+          <div class="addr"><input class="input mono" id="label" value="aegis" maxlength="40" pattern="[a-z0-9-]+" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zone || "your-zone")}</span></div></label>
+        <div class="preview" id="labelPreview"></div>
+        <div class="err-msg" id="linkErr"></div>
+        <div class="row end"><button type="button" class="btn ghost" data-act="forget">Use another account</button><button class="btn primary" id="linkGo">Link domain</button></div>
+      </form>`;
+  }
+  const l = cf.login;
+  if (l && (l.url || l.waiting)) {
+    return `<ol class="steps"><li class="on"><b>Authorize Cloudflare</b><span>Open the link, sign in, pick the domain (zone) to use.</span></li><li><b>Pick the dashboard's name</b></li></ol>
+      <div class="authbox">
+        <a class="btn primary big" href="${h(l.url)}" target="_blank" rel="noopener">${ICONS.ext} Open the Cloudflare authorization</a>
+        <p class="muted"><i class="spin"></i> Waiting for you to authorize… this page moves on by itself.</p>
+        ${l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
+        <button class="btn ghost sm" data-act="cancel-login">Cancel</button>
+      </div>`;
+  }
+  return `<p class="muted">Right now every tunnel gets a random <span class="mono">trycloudflare.com</span> name that changes when Aegis restarts.
+      Link a domain on your Cloudflare account and the dashboard lives at <span class="mono">aegis.your-domain</span>, every tunnel at
+      <span class="mono">tunnel-PORT-aegis.your-domain</span>, through one post-quantum Cloudflare tunnel that Aegis runs for you.</p>
+    ${l && l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
+    <div class="row end"><button class="btn primary" data-act="login">${ICONS.globe} Connect Cloudflare</button></div>`;
+}
+
+// ------------------------------------------------------------------ termix
+function termixBody() {
+  const t = S.termix;
+  if (!t) return '<p class="muted">Loading…</p>';
+  const logo = '<img class="set-logo" src="/__gate/logos/termix.svg" alt="" width="44" height="44">';
+  if (t.configured) {
+    return `<div class="row">${logo}<div class="grow"><b>Termix</b><div class="mono faint small">${h(t.upstream)}${t.container ? ` · container ${h(t.container)}` : ""}</div></div>
+        ${t.up ? '<span class="pill ok"><i class="dot ok"></i>running</span>' : '<span class="pill err"><i class="dot err"></i>not answering</span>'}</div>
+      <div class="row end"><a class="btn" href="/__gate/open/termix">${ICONS.ext} Open</a>${t.managed ? '<button class="btn danger" data-act="termix-remove">Remove</button>' : ""}</div>`;
+  }
+  const running = t.job && t.job.state === "running";
+  return `<div class="row">${logo}<div class="grow"><b>Termix</b><div class="muted small">SSH terminals, a file manager and saved hosts, in the browser, behind this login. Aegis runs it in Docker, bound to 127.0.0.1.</div></div></div>
+    ${t.job && t.job.lines.length ? `<pre class="log">${h(t.job.lines.join("\n"))}</pre>` : ""}
+    ${!t.docker ? '<p class="err-msg">Docker is not available to Aegis on this machine.</p>' : ""}
+    <div class="row end"><button class="btn primary" data-act="termix-install" ${running || !t.docker ? "disabled" : ""}>${running ? '<i class="spin"></i> Installing…' : "Install Termix"}</button></div>`;
+}
+
+// ------------------------------------------------------------------ account
+function accountBody() {
+  return `<form id="pwForm" autocomplete="off">
+      <div class="row flexwrap">
+        <label class="field grow"><span>Username</span><input class="input" id="pwUser" value="${h(S.me?.user || "")}" autocomplete="username" spellcheck="false" autocapitalize="none"></label>
+        <label class="field grow"><span>Current password</span><input class="input" id="pwCur" type="password" autocomplete="current-password"></label>
+      </div>
+      <div class="row flexwrap">
+        <label class="field grow"><span>New password <span class="faint">(10+ characters)</span></span><input class="input" id="pwNew" type="password" autocomplete="new-password"></label>
+        <label class="field grow"><span>Repeat it</span><input class="input" id="pwNew2" type="password" autocomplete="new-password"></label>
+      </div>
+      <div class="err-msg" id="pwErr"></div>
+      <div class="row end"><span class="faint small grow">Sealed with ML-KEM-768 + X25519 before it leaves this page. Every other browser is signed out.</span><button class="btn" id="pwGo">Change login</button></div>
+    </form>`;
+}
+
+// ------------------------------------------------------------------ modules + sign-in
+function modulesBody() {
+  const on = !!S.me?.modules?.burrow;
+  return `<div class="mod">
+      <img src="/__gate/logos/burrow.svg" alt="" width="46" height="46">
+      <div class="grow"><b>Burrow</b> <span class="pill">comes with Aegis</span>
+        <p class="muted small">Tunnels: any port on its own HTTPS address, behind this login, with live traffic and clients. Switch it off if you only want the gate;
+        your tunnels are kept, and they come back when you switch it on again.</p></div>
+      <label class="switch" title="${on ? "On" : "Off"}"><input type="checkbox" id="modBurrow" ${on ? "checked" : ""} aria-label="Burrow on or off"><i></i></label>
+    </div>
+    <div class="mod">
+      <img src="/__gate/logos/aegis-burrow.svg" alt="" width="46" height="46">
+      <div class="grow"><b>The full pack</b>
+        <p class="muted small">Selkies Forge, Termix (with its own login) and Burrow, set up in one go. ${S.me?.pack?.decided ? (S.me.pack.skipped ? "You skipped it." : "You set it up.") : ""}</p></div>
+      <a class="btn sm" href="/__gate/welcome?again=1">Open the pack</a>
+    </div>`;
+}
+
+function signinBody() {
+  const me = S.me || {};
+  return `<form id="siForm" autocomplete="off">
+      <div class="row flexwrap">
+        <label class="field grow"><span>Name of this gate</span><input class="input" id="siTitle" value="${h(me.title || "Aegis")}" maxlength="40"></label>
+        <label class="field grow"><span>Line under it on the sign-in page</span><input class="input" id="siSub" value="${h(me.login?.subtitle || "Secure channel")}" maxlength="40"></label>
+      </div>
+      <div class="row flexwrap">
+        <label class="field grow"><span>Stay signed in for <span class="faint">(days, 1-365)</span></span><input class="input" id="siDays" type="number" min="1" max="365" value="${h(me.sessionDays || 30)}"></label>
+        <label class="field grow"><span>Lock out after <span class="faint">(wrong tries)</span></span><input class="input" id="siTries" type="number" min="3" max="50" value="${h(me.lockout?.attempts || 5)}"></label>
+        <label class="field grow"><span>…for <span class="faint">(minutes)</span></span><input class="input" id="siMins" type="number" min="1" max="1440" value="${h(me.lockout?.minutes || 15)}"></label>
+      </div>
+      <div class="row end"><span class="faint small grow">The dashboard's tiles, greeting and background: the gear on the home page.</span><button class="btn" id="siGo">Save</button></div>
+    </form>`;
+}
+
+function integrationsBody() {
+  const list = S.me?.integrations || [];
+  return `${list.length ? `<div class="ilist">${list.map((i) => `<div class="irow">
+      <div class="integ-logo sm">${i.logo ? `<img src="${h(i.logo)}" alt="">` : h(i.name[0])}</div>
+      <div class="grow"><b>${h(i.name)}</b> <span class="faint mono small">${h(i.version ? "v" + i.version : "")}</span><div class="faint small mono">${h(i.local || "")}</div></div>
+      ${i.full ? `<a class="btn sm" href="/__gate/tunnels#/i/${h(i.id)}">Desktops</a>` : ""}
+      <a class="btn sm ghost" href="${h(i.dashboard)}" target="_blank" rel="noopener">${ICONS.ext} Open</a></div>`).join("")}</div>`
+    : '<p class="muted">Nothing has plugged in yet.</p>'}
+    <p class="faint small">Apps plug in by dropping a JSON file into <span class="mono">~/.config/aegis/integrations/</span>. Selkies Forge does this by itself when it runs on this machine.</p>`;
+}
+
+function render() {
+  if (S.busy) return;
+  const me = S.me || {};
+  const focusId = document.activeElement?.id;
+  if (focusId && ["label", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId)) return;   // never repaint under typing
+  app.innerHTML = `
+    <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div></div>
+    ${sec("signin", "Sign-in", "What the sign-in page says, and how long a sign-in lasts.", signinBody())}
+    ${sec("modules", "Modules", "What Aegis runs besides the gate.", modulesBody())}
+    ${sec("domain", "Domain", "Where the dashboard and the tunnels live.", domainBody())}
+    ${sec("termix", "Termix", "Optional. A terminal for this machine and your servers, behind the same login.", termixBody())}
+    ${sec("account", "Login", "One login for the dashboard, Termix and every protected tunnel.", accountBody())}
+    ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}`;
+  wireForms();
+  if (location.hash && !S.scrolled) { S.scrolled = true; document.querySelector(location.hash)?.scrollIntoView({ block: "start" }); }
+}
+
+function wireForms() {
+  const lf = $("#linkForm");
+  if (lf) {
+    const label = $("#label"), pv = $("#labelPreview");
+    const zone = S.cf?.cert?.zone?.name || "your-zone";
+    const upd = () => { const v = label.value.trim().toLowerCase() || "aegis"; pv.innerHTML = `Dashboard <b>https://${h(v)}.${h(zone)}</b><br>Tunnels &nbsp;<b>https://tunnel-PORT-${h(v)}.${h(zone)}</b>`; };
+    label.addEventListener("input", upd); upd();
+    lf.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const b = $("#linkGo"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Linking…'; S.busy = true;
+      try {
+        S.cf = await post("/__gate/api/cf/link", { label: label.value.trim().toLowerCase() });
+        S.busy = false; toast("Linked. The new address can take a minute to resolve."); load();
+      } catch (ex) { S.busy = false; $("#linkErr").textContent = ex.message; b.disabled = false; b.textContent = "Link domain"; }
+    });
+  }
+  const sf = $("#siForm");
+  if (sf) sf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      S.me = await post("/__gate/api/prefs", { title: $("#siTitle").value, login: { subtitle: $("#siSub").value },
+        sessionDays: Number($("#siDays").value), lockout: { attempts: Number($("#siTries").value), minutes: Number($("#siMins").value) } });
+      toast("Saved"); document.activeElement?.blur(); render();
+    } catch (ex) { toast(ex.message); }
+  });
+  const mb = $("#modBurrow");
+  if (mb) mb.addEventListener("change", async () => {
+    if (!mb.checked && !confirm("Switch Burrow off? Its tunnels stop answering until you switch it back on (they are kept).")) { mb.checked = true; return; }
+    try { S.me = await post("/__gate/api/prefs", { modules: { burrow: mb.checked } }); toast(mb.checked ? "Burrow is on" : "Burrow is off"); chrome("settings"); render(); }
+    catch (ex) { toast(ex.message); mb.checked = !mb.checked; }
+  });
+  const pf = $("#pwForm");
+  if (pf) pf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("#pwErr"), b = $("#pwGo");
+    err.textContent = "";
+    const username = $("#pwUser").value.trim(), current = $("#pwCur").value, password = $("#pwNew").value;
+    if (password.length < 10) { err.textContent = "Use at least 10 characters."; return; }
+    if (password !== $("#pwNew2").value) { err.textContent = "The two new passwords differ."; return; }
+    b.disabled = true; b.textContent = "Sealing…";
+    try {
+      if (!window.AegisSeal) throw new Error("The sealing code did not load. Reload the page.");
+      const sealed = await window.AegisSeal({ username, current, password });
+      await api("/__gate/api/password", { method: "POST", body: JSON.stringify(sealed) });
+      toast("Login changed. Other browsers are signed out.");
+      pf.reset(); document.activeElement?.blur(); load();
+    } catch (ex) { err.textContent = ex.message; }
+    b.disabled = false; b.textContent = "Change login";
+  });
+}
+
+async function load() {
+  try {
+    const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
+    S.me = me; S.cf = cf; S.termix = termix;
+  } catch (e) { toast(e.message); }
+  render();
+  clearTimeout(S.poll);
+  const waiting = (S.cf?.login && S.cf.login.waiting) || (S.termix?.job && S.termix.job.state === "running");
+  S.poll = setTimeout(load, waiting ? 2000 : 8000);
+}
+
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  try {
+    if (act === "login") {
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Asking Cloudflare…';
+      const r = await post("/__gate/api/cf/login");
+      window.open(r.url, "_blank", "noopener");
+      load();
+    } else if (act === "cancel-login") { await post("/__gate/api/cf/cancel"); load(); }
+    else if (act === "forget") { await post("/__gate/api/cf/forget"); load(); }
+    else if (act === "unlink") {
+      if (!confirm(`Unlink ${S.cf.domain.mainHost}? Its DNS records and the Cloudflare tunnel are deleted, and tunnels go back to trycloudflare.com names.`)) return;
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Unlinking…'; S.busy = true;
+      try { S.cf = await post("/__gate/api/cf/unlink"); toast("Unlinked"); } finally { S.busy = false; }
+      load();
+    } else if (act === "termix-install") {
+      el.disabled = true; await post("/__gate/api/termix/install"); toast("Installing Termix…"); load();
+    } else if (act === "termix-remove") {
+      if (!confirm("Remove the Termix container? Its data volume is kept.")) return;
+      await post("/__gate/api/termix/remove"); toast("Termix removed"); chrome("settings"); load();
+    }
+  } catch (ex) { toast(ex.message); load(); }
+});
+
+chrome("settings");
+load();

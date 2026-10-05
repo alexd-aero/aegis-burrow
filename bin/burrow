@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# burrow: Burrow, the tunnel engine of Aegis × Burrow, on the command line.
+#
+#   burrow status | list | on | off
+#   burrow publish PORT [--name N] [--public] [--host H]
+#   burrow unpublish PORT
+#
+# The same as `aegis burrow …`; it talks to data/control.sock.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+case "${1:-}" in -h|--help|help) sed -n '2,8p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+exec "$(dirname "$SELF")/aegis" burrow "$@"

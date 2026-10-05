@@ -1,0 +1,104 @@
+{
+  "spec": 1,
+  "id": "aegis-burrow",
+  "name": "Aegis × Burrow",
+  "version": "2.0.0",
+  "description": "Aegis is the gate and the UI: one post-quantum login in front of everything on this machine, a dashboard you arrange yourself, Termix, Selkies Forge and your own links. Burrow is the engine underneath: any port on its own HTTPS address, through Cloudflare, with your own domain or free trycloudflare.com names.",
+  "author": "Alexd Aero",
+  "homepage": "https://github.com/alexd-aero/aegis-burrow",
+  "license": "MIT",
+  "logo": "logo.svg",
+  "platforms": [
+    "selkies-forge"
+  ],
+  "requires": {
+    "forge": ">=1.10.0",
+    "os": [
+      "linux"
+    ],
+    "arch": [
+      "x86_64",
+      "aarch64",
+      "armv7l"
+    ],
+    "commands": [
+      "bash",
+      "curl",
+      "tar"
+    ]
+  },
+  "scripts": {
+    "detect": "forge/detect.sh",
+    "install": "forge/install.sh",
+    "update": "forge/install.sh",
+    "uninstall": "forge/uninstall.sh",
+    "status": "forge/status.sh"
+  },
+  "actions": [
+    {
+      "id": "open",
+      "label": "Open the dashboard",
+      "script": "forge/setup-link.sh"
+    },
+    {
+      "id": "burrow",
+      "label": "Burrow on/off",
+      "script": "forge/burrow-toggle.sh"
+    },
+    {
+      "id": "tunnels",
+      "label": "Show tunnels",
+      "script": "forge/tunnels.sh"
+    },
+    {
+      "id": "restart",
+      "label": "Restart",
+      "script": "forge/restart.sh"
+    },
+    {
+      "id": "doctor",
+      "label": "Doctor",
+      "script": "forge/doctor.sh"
+    }
+  ],
+  "settings": [
+    {
+      "key": "PORT",
+      "label": "Dashboard port",
+      "type": "number",
+      "default": 4310,
+      "min": 1024,
+      "max": 65535,
+      "help": "Where the dashboard listens on this machine. It answers on the same address as Selkies Forge."
+    },
+    {
+      "key": "BURROW",
+      "label": "Burrow (tunnels)",
+      "type": "bool",
+      "default": true,
+      "icon": "public/logos/burrow.svg",
+      "help": "The tunnel engine. On by default; switch it off if you only want the gate. It can be switched on or off later (Settings → Modules, or the Burrow on/off action)."
+    },
+    {
+      "key": "TERMIX",
+      "label": "Also install Termix",
+      "type": "bool",
+      "default": false,
+      "icon": "public/logos/termix.svg",
+      "help": "SSH terminals, files and saved hosts in the browser, behind the same login. One Docker container. Aegis also offers it (with a Termix login of your own) right after setup."
+    }
+  ],
+  "integration": {
+    "dir": "~/.config/aegis/integrations"
+  },
+  "links": [
+    {
+      "label": "Documentation",
+      "url": "https://github.com/alexd-aero/aegis-burrow#readme"
+    },
+    {
+      "label": "Burrow, the engine",
+      "url": "https://github.com/alexd-aero/aegis-burrow#-burrow-the-engine"
+    }
+  ]
+}

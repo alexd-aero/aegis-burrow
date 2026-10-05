@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Burrow">
+  <defs>
+    <linearGradient id="bw-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1b1f"/>
+      <stop offset="1" stop-color="#060607"/>
+    </linearGradient>
+    <linearGradient id="bw-ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c4c7cc"/>
+    </linearGradient>
+    <radialGradient id="bw-glow" cx=".5" cy="0" r=".9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#bw-tile)"/>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#bw-glow)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="29.5" fill="none" stroke="#ffffff" stroke-opacity=".14"/>
+  <path d="M38 6.5h52" stroke="#ffffff" stroke-opacity=".5" stroke-linecap="round"/>
+  <!-- the burrow: two arches going into the ground, the light at the end -->
+  <path d="M28 96V66a36 36 0 0 1 72 0v30" fill="none" stroke="url(#bw-ink)" stroke-width="9" stroke-linecap="round"/>
+  <path d="M46 96V68a18 18 0 0 1 36 0v28" fill="none" stroke="#ffffff" stroke-opacity=".42" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="64" cy="82" r="7" fill="#ffffff"/>
+  <path d="M20 104h88" stroke="#ffffff" stroke-opacity=".22" stroke-width="4" stroke-linecap="round"/>
+</svg>
