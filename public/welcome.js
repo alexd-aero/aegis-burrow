@@ -26,13 +26,14 @@ function head(sub) {
 function picker() {
   const st = S.status || {};
   const card = (p) => {
+    const found = p.id === "termix" && !st.termix && st.found && st.found.termix;
     const have = p.id === "forge" ? st.forge : p.id === "termix" ? st.termix : false;
     const on = S.pick[p.id];
     return `<button type="button" class="card pk${on ? " on" : ""}" data-pick="${p.id}" aria-pressed="${on}">
       <span class="pk-tick" aria-hidden="true">${ICON.check}</span>
       <img class="pk-logo" src="${p.logo}" alt="" width="52" height="52">
-      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${have ? ' <span class="pill ok">installed</span>' : ""}</b>
-      <span>${h(p.text)}</span>
+      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${have ? ' <span class="pill ok">installed</span>' : ""}${found ? ` <span class="pill ok">found on port ${found.port}</span>` : ""}</b>
+      <span>${found ? "Already running here: it will be linked, not installed again. Use your own Termix account." : h(p.text)}</span>
     </button>`;
   };
   app.innerHTML = `${head("Set up your gate")}
@@ -43,7 +44,7 @@ function picker() {
     </section>
     <div class="pk-head"><h1>Install the full pack?</h1><p>Everything you need on one machine, behind one post-quantum login. Untick what you don't want.</p></div>
     <div class="pk-grid">${PARTS.map(card).join("")}</div>
-    <form class="card lit pk-termix${S.pick.termix && !st.termix ? "" : " gone"}" id="tx" autocomplete="off">
+    <form class="card lit pk-termix${S.pick.termix && !st.termix && !(st.found && st.found.termix) ? "" : " gone"}" id="tx" autocomplete="off">
       <img src="/__gate/logos/termix.svg" alt="" width="36" height="36">
       <div class="grow"><b>Your Termix login</b><p>Termix has its own accounts. This one is created for you and becomes Termix's admin.</p>
         <div class="row flexwrap">
@@ -95,7 +96,8 @@ document.addEventListener("click", async (e) => {
   const err = $("#pkErr"); err.textContent = "";
   const st = S.status || {};
   const choice = { burrow: S.pick.burrow, forge: S.pick.forge && !st.forge, termix: null };
-  if (S.pick.termix && !st.termix) {
+  if (S.pick.termix && !st.termix && st.found && st.found.termix) choice.termix = { link: true };
+  else if (S.pick.termix && !st.termix) {
     const username = $("#txUser").value.trim(), password = $("#txPass").value;
     if (!/^[A-Za-z0-9._@-]{2,64}$/.test(username)) { err.textContent = "Termix username: 2-64 letters, digits, . _ @ -"; return; }
     if (password.length < 8) { err.textContent = "Termix password: at least 8 characters."; return; }

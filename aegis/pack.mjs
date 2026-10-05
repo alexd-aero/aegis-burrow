@@ -23,11 +23,20 @@ export function forgeInstalled() {
 }
 
 export class Pack {
-  constructor({ settings, termix, log }) {
+  constructor({ settings, termix, log, tunnels }) {
+    this.tunnels = tunnels;
+    this.found = null;
     this.settings = settings;
     this.termix = termix;
     this.log = log;
     this.job = null;
+  }
+
+  // what is already on this machine (Termix on any port, a Forge)
+  async detect() {
+    const termix = this.settings.get("termix") ? null : await this.termix.detect(this.tunnels).catch(() => null);
+    this.found = { termix, forge: forgeInstalled(), at: Date.now() };
+    return this.found;
   }
 
   status() {
@@ -37,6 +46,7 @@ export class Pack {
       burrow: (this.settings.get("modules") || {}).burrow !== false,
       termix: !!this.settings.get("termix"),
       forge: forgeInstalled(),
+      found: this.found,
       job: this.job ? { ...this.job, steps: this.job.steps.map((s) => ({ ...s, lines: s.lines.slice(-6) })) } : null,
     };
   }
@@ -53,7 +63,11 @@ export class Pack {
     const burrow = choice.burrow !== false;
     steps.push({ id: "burrow", label: burrow ? "Burrow: on" : "Burrow: off", state: "waiting", lines: [] });
     let termix = null;
-    if (choice.termix) {
+    let linkTermix = null;
+    if (choice.termix && choice.termix.link && this.found?.termix) {
+      linkTermix = this.found.termix;
+      steps.push({ id: "termix", label: "Termix (already here)", state: "waiting", lines: [] });
+    } else if (choice.termix) {
       const username = String(choice.termix.username || "").trim();
       const password = String(choice.termix.password || "");
       if (!/^[A-Za-z0-9._@-]{2,64}$/.test(username)) throw new Error("Termix username: 2-64 letters, digits, . _ @ -");
@@ -76,6 +90,12 @@ export class Pack {
       say(b, burrow ? "Burrow is on: Tunnels are on the home page." : "Burrow is off. Turn it on any time under Settings → Modules.");
       b.state = "done";
 
+      if (linkTermix) {
+        const t = step("termix");
+        this.settings.set({ termix: { upstream: linkTermix.upstream } });
+        say(t, `linked the Termix on port ${linkTermix.port} (${linkTermix.how}); use your Termix account`);
+        t.state = "done";
+      }
       if (termix) {
         const t = step("termix");
         t.state = "running";

@@ -46,8 +46,8 @@ curl -fsSL https://raw.githubusercontent.com/alexd-aero/aegis-burrow/main/instal
 
 ```
   Create your login, from this machine or anywhere:
-    local   http://127.0.0.1:4310/__gate/setup?t=…
-    serveo  https://1a2b3c….serveousercontent.com/__gate/setup?t=…
+    local   http://127.0.0.1:4310/__gate/setup
+    serveo  https://1a2b3c….serveousercontent.com/__gate/setup
 ```
 
 The **serveo** link works from any device, with no account and no domain. Pick a username and password; they're sealed with ML-KEM-768 before they leave the page.

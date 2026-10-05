@@ -148,7 +148,7 @@ listen_url() {
 dashboard_url() { local m; m="$(setting domain.mainHost)"; if [ -n "$m" ]; then printf 'https://%s/' "$m"; else printf '%s/' "$(listen_url)"; fi; }
 setup_needed() { [ -z "$(setting auth.hash)" ]; }
 # The serveo link (burrow/serveo.mjs): on by default until a domain is linked.
-serveo_wanted() { local v; v="$(setting serveo)"; if [ -z "$v" ]; then [ -z "$(setting domain.mainHost)" ]; else [ "$v" != false ]; fi; }
+serveo_wanted() { [ "$(setting serveo)" != false ]; }
 serveo_url() { json_get "$AEGIS_HOME/data/runtime.json" serveo; }
 wait_serveo() {  # the server opens it a few seconds after it starts
   local i; serveo_wanted || return 1
@@ -165,7 +165,7 @@ links() {
     else printf '    %s  %s\n' "$(c '2' 'serveo')" "$(c '2' 'not up yet; see: aegis serveo url')"; fi
   fi
 }
-setup_path() { local t; t="$(setting setupToken)"; printf '__gate/setup%s' "${t:+?t=$t}"; }
+setup_path() { printf '__gate/setup'; }   # no token: open for 30 min after start (aegis restart reopens)
 setup_link() { local t; t="$(setting setupToken)"; printf '%s/__gate/setup%s' "$(listen_url)" "${t:+?t=$t}"; }
 
 # ---------------------------------------------------------------- service

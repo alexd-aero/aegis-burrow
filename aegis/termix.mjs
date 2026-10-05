@@ -8,6 +8,8 @@
 
 import { execFile } from "node:child_process";
 import { connect as netConnect } from "node:net";
+import http from "node:http";
+import https from "node:https";
 
 const IMAGE = "ghcr.io/lukegus/termix:latest";
 const CONTAINER = "aegis-termix";
@@ -103,6 +105,29 @@ export class Termix {
       await new Promise((res) => setTimeout(res, 2500));
     }
     throw new Error(`Termix did not accept the account: ${last}`);
+  }
+
+  // A Termix already running here, on any port: a container whose image or
+  // name says termix (Burrow's port scan names them), or any listening port
+  // whose page is titled Termix. -> {upstream, port, how} | null
+  async detect(tunnels) {
+    const ports = tunnels ? await tunnels.ports().catch(() => []) : [];
+    const named = ports.filter((p) => /termix/i.test(p.process || ""));
+    const rest = ports.filter((p) => !named.includes(p) && !p.tunneled).slice(0, 60);
+    const title = (port, tls) => new Promise((resolve) => {
+      const mod = tls ? https : http;
+      const r = mod.get({ host: "127.0.0.1", port, path: "/", timeout: 1500, rejectUnauthorized: false }, (res) => {
+        let b = ""; res.on("data", (c) => { b += c; if (b.length > 20000) res.destroy(); });
+        res.on("end", () => resolve(/<title>[^<]*termix/i.test(b))); res.on("close", () => resolve(/<title>[^<]*termix/i.test(b)));
+      });
+      r.on("error", () => resolve(false)); r.on("timeout", () => { r.destroy(); resolve(false); });
+    });
+    for (const p of [...named, ...rest]) {
+      for (const tls of [false, true]) {
+        if (await title(p.port, tls)) return { upstream: `${tls ? "https" : "http"}://127.0.0.1:${p.port}`, port: p.port, how: p.process || "a page titled Termix" };
+      }
+    }
+    return null;
   }
 
   // Forget Termix; a container Aegis made is removed, its data volume kept.

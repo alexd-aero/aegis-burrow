@@ -61,6 +61,7 @@ const GO = "aegis-go";                                             // one-shot: 
 const sessionTtl = () => Math.max(1, Math.min(365, Number(settings.get("sessionDays")) || 30)) * 864e5;
 const SESSION_RENEW_MS = 24 * 60 * 60 * 1000;
 const TICKET_TTL_MS = 60 * 1000;
+const SETUP_WINDOW_MS = 30 * 60 * 1000;
 const REVOKED_FILE = join(DATA, "revoked.json");
 const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 const lockout = () => {
@@ -116,7 +117,7 @@ const bridgeTick = () => adoptForge({ addons, log }).catch((e) => log("bridge:",
 setTimeout(bridgeTick, 20000);
 setInterval(bridgeTick, 120000);
 const termix = new Termix({ settings, log });
-const pack = new Pack({ settings, termix, log });
+const pack = new Pack({ settings, termix, log, tunnels });
 
 const mainHost = () => settings.get("domain")?.mainHost?.toLowerCase() || null;
 
@@ -365,8 +366,11 @@ function messagePage(res, status, title, text) {
 function setupAllowed(req, token) {
   const want = settings.setupToken();
   if (want && token && timingSafeEqual(sha256(String(token)), sha256(want))) return true;
-  return isLoopback(req.socket.remoteAddress) && !req.headers["cf-connecting-ip"] && !req.headers["x-forwarded-for"]
-    && !req.headers["x-real-ip"] && !viaServeo(req);
+  if (isLoopback(req.socket.remoteAddress) && !req.headers["cf-connecting-ip"] && !req.headers["x-forwarded-for"]
+      && !req.headers["x-real-ip"] && !viaServeo(req)) return true;
+  // No link token needed: the first login can be created from anywhere for
+  // 30 minutes after Aegis starts (aegis restart opens the window again).
+  return Date.now() - startedAt < SETUP_WINDOW_MS;
 }
 
 // ---------- gate routes (any host) ----------
@@ -430,7 +434,7 @@ async function handleGate(req, res, path, url, host, isMain) {
     const to = isMain ? "/__gate/login" : hasDomain ? `https://${mainHost()}/__gate/logout` : "/";
     return send(res, 302, "", { Location: to, "Set-Cookie": clearSessionCookie(req) });
   }
-  if (!isMain && path === "/__gate/sso/callback" && req.method === "GET") {
+  if (path === "/__gate/sso/callback" && req.method === "GET") {
     const t = openTicket(url.searchParams.get("t"), host);
     if (!t) {
       log("sso ticket refused", clientIp(req), host);
@@ -474,7 +478,8 @@ async function handleGate(req, res, path, url, host, isMain) {
 // On by default until a domain is linked (a first run has no other public
 // address); after that, only if switched on in Settings → Modules.
 const serveo = new Serveo({ dataDir: DATA, log });
-const serveoWanted = () => { const v = settings.get("serveo"); return v == null ? !settings.get("domain") : v !== false; };
+// on unless switched off; with a domain linked it only forwards to the domain
+const serveoWanted = () => settings.get("serveo") !== false;
 let serveoPort = null;
 function setServeo(on) {
   settings.set({ serveo: !!on });
@@ -558,7 +563,10 @@ async function handleApi(req, res, path, url) {
   try {
     if (path === "/__gate/api/me") return sendJson(res, 200, me(req));
     if (path === "/__gate/api/prefs" && req.method === "POST") { savePrefs(await readJsonBody(req)); return sendJson(res, 200, me(req)); }
-    if (path === "/__gate/api/pack" && req.method === "GET") return sendJson(res, 200, pack.status());
+    if (path === "/__gate/api/pack" && req.method === "GET") {
+      if (!pack.found || Date.now() - pack.found.at > 30000) await pack.detect();
+      return sendJson(res, 200, pack.status());
+    }
     if (path === "/__gate/api/pack" && req.method === "POST") {
       const body = await readJsonBody(req);
       if (body.skip) { pack.skip(); return sendJson(res, 200, pack.status()); }
@@ -790,6 +798,13 @@ async function handler(req, res) {
   try {
     const port = burrow.matchHost(host);
     if (port !== null) return tunnelRequest(port, req, res, path, url, host);
+    // Once a domain is linked, the serveo link forwards page loads to it,
+    // carrying a signed-in session along (a 60 s single-use ticket).
+    if (host === serveo.host() && mainHost() && req.method === "GET" && isPageLoad(req)) {
+      const s = sessionOf(req), next = safeNext(req.url, "/");
+      return send(res, 302, "", { Location: s ? `https://${mainHost()}/__gate/sso/callback?t=${sealTicket(mainHost(), s.sid)}&next=${encodeURIComponent(next)}`
+                                               : `https://${mainHost()}${next}` });
+    }
     const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
     if (!isMain) return send(res, 404, "Not found");
     if (path.startsWith("/__gate/")) return await handleGate(req, res, path, url, host, true);
