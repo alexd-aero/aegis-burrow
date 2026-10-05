@@ -233,6 +233,9 @@ export function loadManifest(root) {
     if (!(p.startsWith("~/") || p.startsWith("$HOME/")) || p.split("/").includes("..")) fail("integration.dir must be a folder under ~/ (e.g. ~/.config/myapp/integrations)");
     m.integration = { dir: p };
   }
+  const rep = d.replaces || [];
+  if (!Array.isArray(rep) || rep.length > 8 || !rep.every((x) => typeof x === "string" && ID_RE.test(x))) fail('"replaces" must be a list of addon ids, e.g. ["old-name"]');
+  m.replaces = rep.filter((x) => x !== m.id);
   m.links = [];
   for (const ln of (d.links || []).slice(0, 6)) if (ln && typeof ln === "object") m.links.push({ label: text(ln, "label", 40, true), url: url(ln.url, "link url") });
   return m;
@@ -651,6 +654,10 @@ export class Addons {
       }
       catch (e) { broken.push({ path: d, error: e.message }); }
     }
+    // an addon that replaces older ones (renamed, merged) hides them
+    const gone = new Set([...byId.values()].flat().flatMap(([, m]) => m.replaces || []));
+    for (const r of Object.values(reg)) for (const x of r.manifest?.replaces || []) gone.add(x);
+    for (const id of [...byId.keys()]) if (gone.has(id)) byId.delete(id);
     const one = async (id, places) => {
       places.sort((a, b) => vcmp(versionTuple(b[1].version), versionTuple(a[1].version)) || (existsSync(join(b[0], ".git")) - existsSync(join(a[0], ".git"))));
       const [d, m] = places[0];

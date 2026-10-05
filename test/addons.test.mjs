@@ -76,7 +76,8 @@ test("the smart scan finds addons on this machine", async () => {
   const code = join(process.env.HOME, "code");
   addon(join(code, "gizmo"), { id: "gizmo", scripts: { install: "install.sh", detect: "detect.sh", status: "status.sh" } },
         { "detect.sh": 'echo \'{"version":"0.9"}\'\n', "status.sh": 'echo \'{"state":"stopped"}\'\n' });
-  addon(join(code, "forgeonly"), { id: "forgeonly", platforms: ["selkies-forge"] });
+  addon(join(code, "forgeonly"), { id: "forgeonly", platforms: ["selkies-forge"], replaces: ["oldthing"] });
+  addon(join(code, "oldthing"), { id: "oldthing" });                         // replaced: hidden
   addon(join(code, "aegis-burrow"), { id: "aegis-burrow" });                 // ourselves: never listed
   mkdirSync(join(code, "broken")); writeFileSync(join(code, "broken", "forge-addon.json"), "{nope");
   const dir = tmp();
@@ -87,5 +88,6 @@ test("the smart scan finds addons on this machine", async () => {
   assert.equal(by.forgeonly.compatible, false);
   assert.equal(by["aegis-burrow"], undefined);
   assert.equal(r.broken.length, 1);
+  assert.equal(by.oldthing, undefined);
   rmSync(dir, { recursive: true });
 });
