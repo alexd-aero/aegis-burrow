@@ -215,6 +215,7 @@ Termix normally answers at the root of the dashboard's address (the home page st
 
 - **Your domain, checked.** It looks at whether your domain is linked, and whether anything on it already points at GitHub or GitLab Pages, and for which account. Those accounts are added for you; remove them, or add others by **username**.
 - **Sign in with GitHub** with a code at [github.com/login/device](https://github.com/login/device), and private repositories show up too.
+- **Static websites only:** HTML, CSS, JavaScript and images, already built (or a Jekyll site GitHub Pages builds). Apps that need a server won't run.
 - **Repositories sorted by commits and recent activity.** Pick one and a subdomain, and Burrow serves its files itself (a `gh-pages` branch, `/`, `docs/`, `dist/`…). Private repositories stay private, and it follows every push. Sites that need building (Jekyll) are served from their Pages site.
 - **Behind your login** or a password of the site's own; never public.
 - A Pages address that's already live (`you.github.io/project`) works too: **+ A Pages address**.
