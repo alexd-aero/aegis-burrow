@@ -111,23 +111,8 @@ export class Termix {
   // name says termix (Burrow's port scan names them), or any listening port
   // whose page is titled Termix. -> {upstream, port, how} | null
   async detect(tunnels) {
-    const ports = tunnels ? await tunnels.ports().catch(() => []) : [];
-    const named = ports.filter((p) => /termix/i.test(p.process || ""));
-    const rest = ports.filter((p) => !named.includes(p) && !p.tunneled).slice(0, 60);
-    const title = (port, tls) => new Promise((resolve) => {
-      const mod = tls ? https : http;
-      const r = mod.get({ host: "127.0.0.1", port, path: "/", timeout: 1500, rejectUnauthorized: false }, (res) => {
-        let b = ""; res.on("data", (c) => { b += c; if (b.length > 20000) res.destroy(); });
-        res.on("end", () => resolve(/<title>[^<]*termix/i.test(b))); res.on("close", () => resolve(/<title>[^<]*termix/i.test(b)));
-      });
-      r.on("error", () => resolve(false)); r.on("timeout", () => { r.destroy(); resolve(false); });
-    });
-    for (const p of [...named, ...rest]) {
-      for (const tls of [false, true]) {
-        if (await title(p.port, tls)) return { upstream: `${tls ? "https" : "http"}://127.0.0.1:${p.port}`, port: p.port, how: p.process || "a page titled Termix" };
-      }
-    }
-    return null;
+    const f = await findByTitle(tunnels, /termix/i, /termix/i);
+    return f && { upstream: f.url, port: f.port, how: f.how || "a page titled Termix" };
   }
 
   // Forget Termix; a container Aegis made is removed, its data volume kept.
@@ -138,4 +123,31 @@ export class Termix {
     this.job = null;
     return { ok: true, kept: t?.container ? VOLUME : null };
   }
+}
+
+// An app already running on this machine, on any port: Burrow's port list
+// (ss + Docker names) first for names that match, then every other listening
+// port, asked for its page's <title>. {url, port, how} or null.
+export async function findByTitle(tunnels, titleRe, nameRe) {
+  const ports = tunnels ? await tunnels.ports().catch(() => []) : [];
+  const named = ports.filter((p) => nameRe.test(p.process || ""));
+  const rest = ports.filter((p) => !named.includes(p) && !p.tunneled).slice(0, 60);
+  // ask where it listens: loopback when it does, else its own address (a Tailscale IP…)
+  const where = (p) => p.local ? "127.0.0.1" : (p.addrs.find((a) => !a.includes(":")) || p.addrs[0] || "127.0.0.1");
+  const title = (host, port, tls) => new Promise((resolve) => {
+    const mod = tls ? https : http;
+    const re = new RegExp(`<title>[^<]*${titleRe.source}`, "i");
+    const r = mod.get({ host, port, path: "/", timeout: 1500, rejectUnauthorized: false }, (res) => {
+      let b = ""; res.on("data", (c) => { b += c; if (b.length > 20000) res.destroy(); });
+      res.on("end", () => resolve(re.test(b))); res.on("close", () => resolve(re.test(b)));
+    });
+    r.on("error", () => resolve(false)); r.on("timeout", () => { r.destroy(); resolve(false); });
+  });
+  for (const p of [...named, ...rest]) {
+    for (const tls of [false, true]) {
+      const host = where(p);
+      if (await title(host, p.port, tls)) return { url: `${tls ? "https" : "http"}://${host.includes(":") ? `[${host}]` : host}:${p.port}`, port: p.port, how: p.process || "" };
+    }
+  }
+  return null;
 }

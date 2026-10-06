@@ -89,6 +89,15 @@ for (const f of ["login.html", "setup.html", "home.html", "tunnels.html", "setti
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
+// Every link to our scripts and styles carries the version: a proxy in front
+// (Cloudflare's Browser Cache TTL turns no-cache into max-age=14400) can't keep
+// an old copy around after an update, because the new pages ask for new URLs.
+for (const f of Object.keys(FILES)) {
+  if (!/\.(html|js)$/.test(f)) continue;
+  FILES[f] = Buffer.from(FILES[f].toString("utf8")
+    .replace(/(["'(])(\/__gate\/[a-z-]+\.(?:js|css))(["')])/g, `$1$2?v=${VERSION}$3`)
+    .replace(/(from\s+["']\.\/[a-z-]+\.js)(["'])/g, `$1?v=${VERSION}$2`));
+}
 const TYPES = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".html": "text/html; charset=utf-8" };
 
 // ---------- the pieces ----------
@@ -122,6 +131,8 @@ const pack = new Pack({ settings, termix, log, tunnels });
 // Updates from GitHub, by hand or by itself (Settings → Updates)
 const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo.stop(); process.exit(0); } });
 
+// the serveo link sends visitors on to the domain, once there is one (Settings → Modules)
+const serveoForward = () => settings.get("serveoForward") !== false;
 const mainHost = () => settings.get("domain")?.mainHost?.toLowerCase() || null;
 
 // ---------- helpers ----------
@@ -466,6 +477,8 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/choose" || path === "/__gate/home") return page(res, "home.html");
   if (path === "/__gate/open/termix") {
     if (!settings.get("termix")) return send(res, 302, "", { Location: "/__gate/settings#termix" });
+    const tm = mounts().find((m) => m.id === "termix");
+    if (tm) return send(res, 302, "", { Location: tm.prefix + "/" });
     return send(res, 302, "", { Location: "/", "Set-Cookie": `${goName(req)}=termix; ${cookieAttrs(req, 30).replace("SameSite=Lax", "SameSite=Strict")}` });
   }
   if (path === "/__gate/tunnels") return page(res, "tunnels.html");
@@ -506,14 +519,15 @@ function me(req) {
     mode: tunnels.mode, pattern: tunnels.pattern(),
     domain: d ? { mainHost: d.mainHost, managed: !!d.managed } : null,
     termix: !!settings.get("termix"),
-    integrations: listIntegrations().map((i) => publicView(i, tunnels)),
+    integrations: listIntegrations().map((i) => viewOf(i)),
     tunnels: tunnels.tunnels.size,
     modules: { burrow: burrowOn() },
     home: settings.get("home") || null,
     login: { subtitle: (settings.get("login") || {}).subtitle || "Secure channel" },
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
-    serveo: serveo.state(),
+    serveo: { ...serveo.state(), forward: serveoForward() },
+    mounts: { ...(settings.get("mounts") || {}) }, mountable: { termix: !!settings.get("termix"), "selkies-forge": !!listIntegrations().find((i) => i.kind === "selkies-forge" && i.url) },
     update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
   };
 }
@@ -553,6 +567,17 @@ function savePrefs(p) {
   if ("modules" in p) burrow.setOn(p.modules?.burrow !== false);
   if ("serveo" in p) setServeo(p.serveo !== false);
   if ("autoUpdate" in p) updater.setAuto(!!p.autoUpdate);
+  if ("serveoForward" in p) patch.serveoForward = p.serveoForward !== false;
+  if ("mounts" in p) {
+    const next = { ...(settings.get("mounts") || {}) };
+    for (const [id, v] of Object.entries(p.mounts || {})) {
+      if (!MOUNTABLE[id]) throw new Error("That app can't be moved.");
+      next[id] = cleanMount(v);
+    }
+    const used = Object.values(next).filter(Boolean);
+    if (new Set(used).size !== used.length || used.some((a) => used.some((b) => a !== b && b.startsWith(a + "/")))) throw new Error("Two apps can't share a path.");
+    patch.mounts = next;
+  }
   settings.set(patch);
 }
 
@@ -590,7 +615,7 @@ async function handleApi(req, res, path, url) {
     if (path.startsWith("/__gate/api/addons") || path.startsWith("/__gate/api/bridge")) return await handleAddons(req, res, path, url);
 
     // integrations
-    if (path === "/__gate/api/integrations") return sendJson(res, 200, { integrations: listIntegrations().map((i) => publicView(i, tunnels)) });
+    if (path === "/__gate/api/integrations") return sendJson(res, 200, { integrations: listIntegrations().map((i) => viewOf(i)) });
     const im = /^\/__gate\/api\/integrations\/([a-z0-9-]{1,40})(?:\/(logo|desktops)(?:\/([A-Za-z0-9._-]{1,128})\/(start|stop|restart))?)?$/.exec(path);
     if (im) {
       const integ = getIntegration(im[1]);
@@ -602,14 +627,14 @@ async function handleApi(req, res, path, url) {
       }
       if (im[2] === "desktops" && !im[3] && req.method === "GET") {
         if (integ.kind !== "selkies-forge") return sendJson(res, 400, { error: "This integration has no desktops." });
-        return sendJson(res, 200, { ...(await forgeDesktops(integ, tunnels)), integration: publicView(integ, tunnels) });
+        return sendJson(res, 200, { ...(await forgeDesktops(integ, tunnels)), integration: viewOf(integ) });
       }
       if (im[3] && req.method === "POST") {
         await forgeAction(integ, im[3], im[4]);
         log("integration", integ.id, im[4], im[3]);
         return sendJson(res, 200, { ok: true });
       }
-      if (!im[2]) return sendJson(res, 200, publicView(integ, tunnels));
+      if (!im[2]) return sendJson(res, 200, viewOf(integ));
     }
 
     // Cloudflare / domain
@@ -720,6 +745,87 @@ function followForge(jid) {
   }, 2000);
 }
 
+// ---------- apps under a path (Settings → Advanced → Where apps live) ----------
+// Off by default: Termix answers at the dashboard's root, Selkies Forge on its
+// own address. A mount serves one of them under a path of the dashboard
+// instead (/__gate/termix, /forge…), behind the same login. The prefix is cut
+// off before the request goes on. Termix is told its base path (its page has a
+// <meta name="termix-base-path">); anything a mounted page asks for at an
+// absolute path (Forge's /api/…, /app.js) is recognised by its Referer.
+
+const MOUNT_RE = /^\/(?:__gate\/)?[a-z0-9][a-z0-9-]{0,30}$/;
+const GATE_WORDS = new Set(["login", "logout", "setup", "settings", "tunnels", "welcome", "api", "open", "sso", "challenge",
+                            "health", "logos", "home", "common", "ui"]);
+const MOUNTABLE = { termix: "Termix", "selkies-forge": "Selkies Forge" };
+function cleanMount(p) {
+  if (p == null || p === "") return null;
+  p = String(p).trim().toLowerCase().replace(/\/+$/, "");
+  if (!p.startsWith("/")) p = "/" + p;
+  if (!MOUNT_RE.test(p)) throw new Error("A path is / then 1-31 letters, digits and dashes, like /termix or /__gate/termix.");
+  const word = p.split("/").pop();
+  if (p.startsWith("/__gate/") && (GATE_WORDS.has(word) || FILES[word] || FILES[word + ".js"] || FILES[word + ".html"])) throw new Error(`/__gate/${word} is Aegis's own.`);
+  if (p === "/__gate") throw new Error("/__gate is Aegis's own.");
+  return p;
+}
+function mounts() {
+  const want = settings.get("mounts") || {}, out = [];
+  const up = (u) => { try { const x = new URL(u); return { https: x.protocol === "https:", host: x.hostname, port: Number(x.port || (x.protocol === "https:" ? 443 : 80)) }; } catch { return null; } };
+  if (want.termix && termixUpstream()) out.push({ id: "termix", name: "Termix", prefix: want.termix, up: termixUpstream(), keepHost: true, meta: "termix-base-path" });
+  const f = want["selkies-forge"] && listIntegrations().find((i) => i.kind === "selkies-forge" && i.url);
+  if (f && up(f.url)) out.push({ id: "selkies-forge", name: "Selkies Forge", prefix: want["selkies-forge"], up: up(f.url), keepHost: false });
+  return out;
+}
+const mountAt = (path) => mounts().find((m) => path === m.prefix || path.startsWith(m.prefix + "/")) || null;
+const termixMounted = () => mounts().some((m) => m.id === "termix");
+// a request a mounted page made for an absolute path: its Referer says which page
+function mountByReferer(req) {
+  let u;
+  try { u = new URL(req.headers.referer || ""); } catch { return null; }
+  if (u.hostname.toLowerCase() !== hostOf(req)) return null;
+  return mountAt(u.pathname);
+}
+function viewOf(integ) {
+  const v = publicView(integ, tunnels);
+  const m = mounts().find((x) => x.id === integ.kind);
+  if (m) Object.assign(v, { dashboard: m.prefix + "/", mounted: m.prefix });
+  return v;
+}
+
+function proxyMount(m, req, res, upPath) {
+  const headers = upstreamHeaders(req);
+  if (!m.keepHost) {
+    // a Forge bound to localhost only answers to its own name, and checks Origin against it
+    const upOrigin = `${m.up.https ? "https" : "http"}://${m.up.host}:${m.up.port}`;
+    headers.host = `${m.up.host}:${m.up.port}`;
+    if (headers.origin) headers.origin = upOrigin;
+    if (headers.referer) delete headers.referer;
+  }
+  const rewrite = !!m.meta && req.method === "GET" && isPageLoad(req);
+  if (rewrite) delete headers["accept-encoding"];
+  const mod = m.up.https ? httpsRequest : httpRequest;
+  const r = mod({ host: m.up.host, port: m.up.port, method: req.method, path: upPath, headers, rejectUnauthorized: false }, (upRes) => {
+    const h = { ...upRes.headers, "referrer-policy": "same-origin" };
+    const loc = h.location;
+    if (typeof loc === "string" && loc.startsWith("/") && !loc.startsWith("//") && !loc.startsWith(m.prefix + "/")) h.location = m.prefix + loc;
+    if (rewrite && /text\/html/i.test(h["content-type"] || "")) {
+      const chunks = [];
+      upRes.on("data", (c) => chunks.push(c));
+      upRes.on("end", () => {
+        const html = Buffer.concat(chunks).toString("utf8")
+          .replace(new RegExp(`(<meta\\s+name="${m.meta}"\\s+content=")[^"]*(")`, "i"), `$1${m.prefix}$2`);
+        delete h["content-length"]; delete h["content-encoding"];
+        res.writeHead(upRes.statusCode, h);
+        res.end(html);
+      });
+      return;
+    }
+    res.writeHead(upRes.statusCode, h);
+    upRes.pipe(res);
+  });
+  r.on("error", (e) => { log(`${m.id} upstream error`, e.message); if (!res.headersSent) messagePage(res, 502, `${m.name} is not responding`, "Check it on this machine, or put it back at its own address under Settings → Advanced."); else res.destroy(); });
+  req.pipe(r);
+}
+
 // ---------- reverse proxy to Termix ----------
 
 function termixUpstream() {
@@ -756,11 +862,10 @@ function proxy(req, res, extra) {
   req.pipe(r);
 }
 
-function proxyUpgrade(req, socket, head) {
-  const up = termixUpstream();
+function proxyUpgrade(req, socket, head, up = termixUpstream(), path = req.url, headers = upstreamHeaders(req)) {
   if (!up) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
   const mod = up.https ? httpsRequest : httpRequest;
-  const r = mod({ host: up.host, port: up.port, method: req.method, path: req.url, headers: upstreamHeaders(req), rejectUnauthorized: false });
+  const r = mod({ host: up.host, port: up.port, method: req.method, path, headers, rejectUnauthorized: false });
   r.on("upgrade", (upRes, upSocket, upHead) => {
     const lines = [`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`];
     for (let i = 0; i < upRes.rawHeaders.length; i += 2) lines.push(`${upRes.rawHeaders[i]}: ${upRes.rawHeaders[i + 1]}`);
@@ -817,13 +922,24 @@ async function handler(req, res) {
     if (port !== null) return tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,
     // carrying a signed-in session along (a 60 s single-use ticket).
-    if (host === serveo.host() && mainHost() && req.method === "GET" && isPageLoad(req)) {
+    if (host === serveo.host() && mainHost() && serveoForward() && req.method === "GET" && isPageLoad(req)) {
       const s = sessionOf(req), next = safeNext(req.url, "/");
       return send(res, 302, "", { Location: s ? `https://${mainHost()}/__gate/sso/callback?t=${sealTicket(mainHost(), s.sid)}&next=${encodeURIComponent(next)}`
                                                : `https://${mainHost()}${next}` });
     }
     const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
     if (!isMain) return send(res, 404, "Not found");
+    // an app served under a path of the dashboard (it may live under /__gate/ too)
+    const mount = settings.auth() ? mountAt(path) : null;
+    if (mount) {
+      if (!isAuthed(req)) {
+        const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
+        return wantsHtml ? send(res, 302, "", { Location: "/__gate/login?next=" + encodeURIComponent(safeNext(req.url, "/")) })
+                         : sendJson(res, 401, { error: "login required" });
+      }
+      if (path === mount.prefix) return send(res, 302, "", { Location: mount.prefix + "/" + url.search });
+      return proxyMount(mount, req, res, req.url.slice(mount.prefix.length) || "/");
+    }
     if (path.startsWith("/__gate/")) return await handleGate(req, res, path, url, host, true);
     if (!settings.auth()) return send(res, 302, "", { Location: "/__gate/setup" + url.search });
     if (!isAuthed(req)) {
@@ -834,7 +950,10 @@ async function handler(req, res) {
     }
     const renew = req.method === "GET" && isPageLoad(req) ? renewalCookie(req) : null;
     const withRenew = renew ? { "Set-Cookie": renew } : {};
-    if (!termixUpstream()) {
+    // what a mounted app's page asks for at an absolute path
+    const byRef = path !== "/" ? mountByReferer(req) : null;
+    if (byRef) return proxyMount(byRef, req, res, req.url);
+    if (!termixUpstream() || termixMounted()) {
       if (path === "/" && req.method === "GET") return page(res, "home.html", withRenew);
       return send(res, 302, "", { Location: "/" });
     }
@@ -871,6 +990,13 @@ server.on("upgrade", (req, socket, head) => {
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
   if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
+  const m = mountAt(new URL(req.url || "/", "http://x").pathname);
+  if (m) {
+    const headers = upstreamHeaders(req);
+    if (!m.keepHost) { headers.host = `${m.up.host}:${m.up.port}`; delete headers.origin; }
+    return proxyUpgrade(req, socket, head, m.up, req.url.slice(m.prefix.length) || "/", headers);
+  }
+  if (termixMounted()) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
   proxyUpgrade(req, socket, head);
 });
 

@@ -582,6 +582,11 @@ setup_pack() {
   port="$(printf '%s' "$js" | jget found.termix.port)"
   forge_here="$(printf '%s' "$js" | jget forge)"
   termix_set="$(printf '%s' "$js" | jget termix)"
+  local old; old="$(printf '%s' "$js" | jget found.oldBurrow.home)"
+  if [ -n "$old" ]; then
+    warn "an older standalone Burrow is also here ($old); this one replaces it, and its tunnels aren't moved over"
+    dim "remove it when you're ready: $(printf '%s' "$js" | jget found.oldBurrow.cli) uninstall"
+  fi
   confirm "Keep Burrow on? (any port on its own HTTPS address, behind this login)" y || burrow=false
   if [ "$termix_set" = true ]; then ok "Termix is already set up"
   elif [ -n "$port" ]; then

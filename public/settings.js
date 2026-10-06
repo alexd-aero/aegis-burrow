@@ -142,6 +142,120 @@ function loadLog(id, force) {
     .catch((e) => { S.logErr[id] = e.message; render(); });
 }
 
+// ------------------------------------------------------------------ advanced
+// Where apps live: Termix at the dashboard's root (or Selkies Forge at its own
+// address), or under a path of the dashboard, behind the same login.
+const MOUNTS = [
+  { id: "termix", name: "Termix", logo: "/__gate/logos/termix.svg", def: "/__gate/termix",
+    root: () => `the root of ${S.me?.domain?.mainHost || "the dashboard's address"} (the home page stays at /, Termix opens from its tile)` },
+  { id: "selkies-forge", name: "Selkies Forge", logo: "/__gate/logos/forge.svg", def: "/__gate/forge",
+    root: () => { const f = (S.me?.integrations || []).find((i) => i.full); return `its own address${f?.local ? ` (${f.local.replace(/^https?:\/\//, "").replace(/\/$/, "")})` : ""}, or a Burrow tunnel`; } },
+];
+function advancedBody() {
+  const me = S.me || {}, cur = me.mounts || {}, can = me.mountable || {};
+  const rows = MOUNTS.filter((m) => can[m.id] || cur[m.id]).map((m) => {
+    const on = S.mountDraft?.[m.id] !== undefined ? S.mountDraft[m.id] !== null : !!cur[m.id];
+    const val = S.mountDraft?.[m.id] ?? cur[m.id] ?? m.def;
+    const host = me.domain?.mainHost || location.host;
+    return `<div class="mnt" data-mount="${m.id}">
+      <img src="${m.logo}" alt="" width="36" height="36">
+      <div class="grow"><b>${h(m.name)}</b>
+        <div class="seg mnt-seg"><button type="button" data-mnt="root" class="${on ? "" : "on"}">At ${m.id === "termix" ? "the root" : "its own address"}</button><button type="button" data-mnt="path" class="${on ? "on" : ""}">Under a path</button></div>
+        ${on ? `<div class="addr mnt-addr"><span class="mono zone">${h(host)}</span><input class="input mono" id="mnt-${m.id}" value="${h(val)}" maxlength="40" spellcheck="false" autocapitalize="none"></div>
+          <p class="faint small">Behind the same login, at <span class="mono">${me.domain ? "https" : location.protocol.slice(0, -1)}://${h(host)}${h(val)}/</span>${m.id === "termix" ? ". The root then always shows the home page." : ". Its own address keeps working on this machine."}</p>`
+        : `<p class="faint small">Now: ${h(m.root())}.</p>`}
+      </div></div>`;
+  }).join("");
+  return `<details class="adv-set"${S.advOpen ? " open" : ""}><summary>Advanced <span class="faint small">· for people who know why they want it</span></summary>
+    <div class="adv-in">
+      <h3>Where apps live</h3>
+      <p class="muted small">Serve an app under a path of the dashboard instead (like <span class="mono">/__gate/termix</span>), behind the same login. Burrow's tunnels always keep addresses of their own.</p>
+      ${rows || '<p class="muted small">Nothing to move yet: Termix and Selkies Forge show up here once they are on this machine.</p>'}
+      ${rows ? `<div class="err-msg" id="mntErr"></div><div class="row end"><button class="btn" id="mntGo">Save where apps live</button></div>` : ""}
+    </div></details>`;
+}
+
+// ------------------------------------------------------------------ search all settings
+// Every setting, by the words people use for it. Opens with the button, "/" or Ctrl+K.
+const INDEX = [
+  ["Name of this gate", "signin", "title name sign-in page brand"],
+  ["Line under it on the sign-in page", "signin", "subtitle text login page"],
+  ["Stay signed in for (days)", "signin", "session days cookie remember"],
+  ["Lock out after wrong tries", "signin", "brute force attempts minutes lockout security"],
+  ["Customize the home page", "signin", "dashboard tiles greeting tagline background columns gear links", "/?customize=1"],
+  ["Check for updates", "updates", "update version upgrade new release"],
+  ["Update by itself", "updates", "auto-update automatic updates"],
+  ["Changelog: Aegis × Burrow", "changelog", "release notes what's new history versions", "log:aegis-burrow"],
+  ["Changelog: Selkies Forge", "changelog", "release notes forge desktops", "log:selkies-forge"],
+  ["Changelog: Weft", "changelog", "release notes addons format weft architecture", "log:weft"],
+  ["Burrow on or off", "modules", "tunnels engine module switch"],
+  ["Serveo link", "modules", "public link serveousercontent phone url temporary"],
+  ["Serveo link: send visitors on to the domain", "modules", "forward redirect serveo domain"],
+  ["The full pack", "modules", "termix forge install welcome first run"],
+  ["Domain", "domain", "cloudflare dns link custom domain address"],
+  ["Change the dashboard's name (subdomain)", "domain", "rename subdomain name aegis private"],
+  ["Unlink the domain", "domain", "remove cloudflare tunnel"],
+  ["Termix", "termix", "ssh terminal install remove docker"],
+  ["Change the username or password", "account", "login password user credentials"],
+  ["Connected apps", "apps", "integrations selkies forge plugged in"],
+  ["Where apps live (an app under a path)", "advanced", "path mount subpath directory base url /__gate/termix /__gate/forge advanced root"],
+];
+function searchOpen() {
+  if (document.querySelector(".srch")) return;
+  const scrim = document.createElement("div");
+  scrim.className = "scrim srch";
+  scrim.innerHTML = `<div class="card lit srch-box" role="dialog" aria-label="Search all settings">
+    <div class="srch-in"><span aria-hidden="true">${SEARCH}</span><input id="srchQ" class="input" placeholder="Search all settings" autocomplete="off" spellcheck="false"><kbd>esc</kbd></div>
+    <div class="srch-list" id="srchList" role="listbox"></div></div>`;
+  document.body.append(scrim);
+  const q = scrim.querySelector("#srchQ"), list = scrim.querySelector("#srchList");
+  let sel = 0, hits = [];
+  const close = () => scrim.remove();
+  const draw = () => {
+    const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    hits = INDEX.filter(([t, s, k]) => words.every((w) => `${t} ${k} ${s}`.toLowerCase().includes(w)));
+    // anything else on the page that says it
+    if (words.length) {
+      for (const el of document.querySelectorAll("section.set")) {
+        const title = el.querySelector("h2")?.textContent || "";
+        if (!hits.some((x) => x[1] === el.id) && words.every((w) => el.textContent.toLowerCase().includes(w))) hits.push([`“${q.value}” in ${title}`, el.id, ""]);
+      }
+    }
+    sel = Math.min(sel, Math.max(0, hits.length - 1));
+    list.innerHTML = hits.length ? hits.map(([t, s], i) => `<button type="button" class="srch-hit${i === sel ? " on" : ""}" data-i="${i}" role="option"><b>${h(t)}</b><span>${h(document.getElementById(s)?.querySelector("h2")?.textContent || "Advanced")}</span></button>`).join("")
+      : '<p class="muted small srch-none">Nothing by that name. Try a word like domain, password, update, serveo.</p>';
+  };
+  const go = (i) => {
+    const hit = hits[i];
+    if (!hit) return;
+    close();
+    const [, s, , extra] = hit;
+    if (extra && extra.startsWith("/")) { location.href = extra; return; }
+    if (extra && extra.startsWith("log:")) { S.log = extra.slice(4); render(); loadLog(S.log); }
+    if (s === "advanced") { S.advOpen = true; render(); }
+    const el = s === "advanced" ? document.querySelector(".adv-set") : document.getElementById(s);
+    if (!el) return;
+    el.scrollIntoView({ block: "start", behavior: "smooth" });
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  };
+  q.addEventListener("input", () => { sel = 0; draw(); });
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { sel = Math.min(sel + 1, hits.length - 1); draw(); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { sel = Math.max(sel - 1, 0); draw(); e.preventDefault(); }
+    else if (e.key === "Enter") go(sel);
+    else if (e.key === "Escape") close();
+  });
+  list.addEventListener("click", (e) => { const b = e.target.closest(".srch-hit"); if (b) go(Number(b.dataset.i)); });
+  scrim.addEventListener("mousedown", (e) => { if (e.target === scrim) close(); });
+  draw();
+  q.focus();
+}
+const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if ((e.key === "/" && !typing) || (e.key.toLowerCase() === "k" && (e.ctrlKey || e.metaKey))) { e.preventDefault(); searchOpen(); }
+});
+
 // ------------------------------------------------------------------ termix
 function termixBody() {
   const t = S.termix;
@@ -190,8 +304,10 @@ function modulesBody() {
       <span class="mod-ico" aria-hidden="true">⇄</span>
       <div class="grow"><b>Serveo link</b> ${sv.url ? `<span class="pill ok">up</span>` : sv.on ? `<span class="pill">connecting</span>` : ""}
         <p class="muted small">A public HTTPS address for this dashboard through serveo.net: no account, no domain. Handy for the first run or a phone.
-        It goes through this gate like everything else: the sign-in page, then your password.</p>
-        ${sv.url ? `<p class="mono small"><a class="link" href="${h(sv.url)}" target="_blank" rel="noopener">${h(sv.url)}</a></p>` : sv.on && sv.error ? `<p class="err-msg">${h(sv.error)}</p>` : ""}</div>
+        It goes through this gate like everything else: the sign-in page, then your password. Serveo gives it a new name each time Aegis restarts.</p>
+        ${sv.url ? `<p class="mono small"><a class="link" href="${h(sv.url)}" target="_blank" rel="noopener">${h(sv.url)}</a></p>` : sv.on && sv.error ? `<p class="err-msg">${h(sv.error)}</p>` : ""}
+        ${sv.on && S.me?.domain ? `<label class="row sub-switch"><span class="switch"><input type="checkbox" id="modServeoFwd" ${sv.forward !== false ? "checked" : ""}><i></i></span>
+          <span class="small">Send its visitors on to <span class="mono">${h(S.me.domain.mainHost)}</span> <span class="faint">(off: the serveo link is a dashboard of its own, handy where the domain doesn't load, like on this machine's own network)</span></span></label>` : ""}</div>
       <label class="switch" title="${sv.on ? "On" : "Off"}"><input type="checkbox" id="modServeo" ${sv.on ? "checked" : ""} aria-label="Serveo link on or off"><i></i></label>
     </div>
     <div class="mod">
@@ -233,9 +349,11 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && ["label", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId)) return;   // never repaint under typing
+  if (focusId && (["label", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
-    <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div></div>
+    <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
+      <div class="spacer"></div><button class="btn srch-btn" data-act="search" title="Search all settings (/ or Ctrl+K)">${SEARCH}<span>Search all settings</span><kbd>/</kbd></button></div>
     ${sec("signin", "Sign-in", "What the sign-in page says, and how long a sign-in lasts.", signinBody())}
     ${sec("updates", "Updates", "New versions of Aegis × Burrow, by hand or by themselves.", updatesBody())}
     ${sec("changelog", "Changelog", "What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture.", changelogBody())}
@@ -243,7 +361,8 @@ function render() {
     ${sec("domain", "Domain", "Where the dashboard and the tunnels live.", domainBody())}
     ${sec("termix", "Termix", "Optional. A terminal for this machine and your servers, behind the same login.", termixBody())}
     ${sec("account", "Login", "One login for the dashboard, Termix and every protected tunnel.", accountBody())}
-    ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}`;
+    ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
+    ${advancedBody()}`;
   wireForms();
   if (location.hash && !S.scrolled) { S.scrolled = true; document.querySelector(location.hash)?.scrollIntoView({ block: "start" }); }
 }
@@ -299,6 +418,11 @@ function wireForms() {
     try { S.me = await post("/__gate/api/prefs", { modules: { burrow: mb.checked } }); toast(mb.checked ? "Burrow is on" : "Burrow is off"); chrome("settings"); render(); }
     catch (ex) { toast(ex.message); mb.checked = !mb.checked; }
   });
+  const mf = $("#modServeoFwd");
+  if (mf) mf.addEventListener("change", async () => {
+    try { S.me = await post("/__gate/api/prefs", { serveoForward: mf.checked }); toast(mf.checked ? `The serveo link now sends visitors to ${S.me.domain.mainHost}` : "The serveo link is now a dashboard of its own"); render(); }
+    catch (ex) { toast(ex.message); mf.checked = !mf.checked; }
+  });
   const ms = $("#modServeo");
   if (ms) ms.addEventListener("change", async () => {
     try {
@@ -312,6 +436,26 @@ function wireForms() {
   if (au) au.addEventListener("change", async () => {
     try { S.me = await post("/__gate/api/prefs", { autoUpdate: au.checked }); if (S.upd) S.upd.auto = au.checked; toast(au.checked ? "Updates install by themselves" : "Updates wait for you"); render(); }
     catch (ex) { toast(ex.message); au.checked = !au.checked; }
+  });
+  const adv = document.querySelector(".adv-set");
+  if (adv) adv.addEventListener("toggle", () => { S.advOpen = adv.open; });
+  for (const row of document.querySelectorAll(".mnt")) {
+    const id = row.dataset.mount;
+    row.querySelector(".mnt-seg").addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      S.mountDraft = { ...(S.mountDraft || {}), [id]: b.dataset.mnt === "path" ? ($(`#mnt-${id}`)?.value || S.me?.mounts?.[id] || MOUNTS.find((m) => m.id === id).def) : null };
+      render();
+    });
+    const inp = $(`#mnt-${id}`);
+    if (inp) inp.addEventListener("input", () => { S.mountDraft = { ...(S.mountDraft || {}), [id]: inp.value }; });
+  }
+  const mg = $("#mntGo");
+  if (mg) mg.addEventListener("click", async () => {
+    const body = {};
+    for (const m of MOUNTS) if (S.mountDraft && m.id in S.mountDraft) body[m.id] = S.mountDraft[m.id];
+    if (!Object.keys(body).length) { toast("Nothing changed"); return; }
+    try { S.me = await post("/__gate/api/prefs", { mounts: body }); S.mountDraft = null; toast("Saved. The apps answer at their new places now."); render(); }
+    catch (ex) { $("#mntErr").textContent = ex.message; }
   });
   const pf = $("#pwForm");
   if (pf) pf.addEventListener("submit", async (e) => {
@@ -366,6 +510,7 @@ document.addEventListener("click", async (e) => {
     } else if (act === "cancel-login") { await post("/__gate/api/cf/cancel"); load(); }
     else if (act === "forget") { await post("/__gate/api/cf/forget"); load(); }
     else if (act === "upd-check") checkUpdates(true);
+    else if (act === "search") searchOpen();
     else if (act === "upd-go") {
       if (!confirm(`Install Aegis × Burrow v${S.upd.latest}? It restarts for a few seconds; everything you set up is kept.`)) return;
       S.updPhase = "Downloading…"; render();

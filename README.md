@@ -144,7 +144,7 @@ Under Selkies Forge, or with no keyboard (`curl … \| bash` in a script), nothi
 Right after you create your login:
 
 - **Burrow comes with Aegis.** It's on by default. Untick it here, or switch it off later under *Settings → Modules*. Your tunnels are kept while it's off.
-- **Install the full pack?** Three cards. Termix and Burrow start ticked; **Selkies Forge is only installed if you tick it.** What's already here is found and linked rather than installed twice: Termix on any port (Burrow's port scan, or a page titled Termix), and a Forge that's already installed.
+- **Install the full pack?** Three cards. Termix and Burrow start ticked; **Selkies Forge is only installed if you tick it.** What's already here is found and linked rather than installed twice: Termix on any port (Burrow's port scan, or a page titled Termix), and a Selkies Forge that's installed or answering on any port. An older standalone Burrow (from before the merge) is pointed out too, with how to remove it.
 
   | | |
   |---|---|
@@ -181,6 +181,17 @@ Everything else lives in **Settings**:
 | **Termix** | Install, open, remove (its data volume is kept) |
 | **Login** | Your username and password |
 | **Connected apps** | Apps that plugged in |
+| **Advanced** *(folded away at the bottom)* | **Where apps live**: serve Termix or Selkies Forge under a path of the dashboard, like `/__gate/termix`, instead of at the root (Termix) or its own address (the Forge) |
+
+**Search all settings**: the button at the top of Settings, or <kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd>, finds any setting by the words you'd use for it (`password`, `subdomain`, `auto-update`, `path`…) and takes you there.
+
+### Apps under a path
+
+Termix normally answers at the root of the dashboard's address (the home page stays at `/`), and Selkies Forge at its own address. Under *Settings → Advanced → Where apps live* either one can move under a path instead, like `https://private-termix.example.com/__gate/termix/` or `/__gate/forge/`, behind the same login:
+
+- **Termix** is told its base path (its page carries a `termix-base-path` setting), so its API and terminals follow it there. The root then always shows the home page.
+- **Selkies Forge** is served through the gate; what its page asks for at absolute paths (`/api/…`, `/app.js`) is recognised by where it came from. Its own address keeps working on the machine.
+- Paths are `/name` or `/__gate/name`; Aegis's own pages (`/__gate/login`, `/__gate/settings`…) can't be taken, and two apps can't share one. Burrow's tunnels always keep addresses of their own.
 
 ## 🕳️ Burrow, the engine
 
@@ -226,7 +237,8 @@ Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts, ev
 
 Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it up. That gives the dashboard a public `https://…serveousercontent.com` address, from a key of its own in `data/serveo/` so the name stays the same.
 
-- **When it's on.** By default, so a first run is reachable from your phone. Once a domain is linked, opening the serveo link sends you on to the domain (signed in, if you were). Switch it off in *Settings → Modules* or with `aegis serveo off`.
+- **When it's on.** By default, so a first run is reachable from your phone. Once a domain is linked, opening the serveo link sends you on to the domain (signed in, if you were); switch *Send its visitors on to the domain* off under *Settings → Modules* to keep it a dashboard of its own (handy where the domain doesn't load, like your own network). Switch the link off there too, or with `aegis serveo off`.
+- **Its name changes.** Serveo gives it a new random name every time Aegis restarts; *Settings → Modules* and `aegis serveo url` show the current one.
 - **It goes through the same gate as everything else.** Serveo's visitors count as remote, never as "this machine", even though serveo connects from loopback. The setup page is open from anywhere for 30 minutes after Aegis starts (and from this machine any time; `aegis restart` opens the 30 minutes again), sign-in needs your password, and the lockout counts each visitor's real address.
 - **Serveo's warning page.** Serveo shows its own *Browser Warning* the first time a browser opens a free tunnel; press *Continue to Site*.
 

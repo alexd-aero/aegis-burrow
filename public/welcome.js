@@ -35,8 +35,10 @@ function picker() {
     return `<button type="button" class="card pk${on ? " on" : ""}" data-pick="${p.id}" aria-pressed="${on}">
       <span class="pk-tick" aria-hidden="true">${ICON.check}</span>
       <img class="pk-logo" src="${p.logo}" alt="" width="52" height="52">
-      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${have ? ' <span class="pill ok">installed</span>' : ""}${found ? ` <span class="pill ok">found on port ${found.port}</span>` : ""}</b>
-      <span>${found ? "Already running here: it will be linked, not installed again. Use your own Termix account." : h(p.text)}</span>
+      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${have ? (p.id === "forge" && st.found?.forge?.port ? ` <span class="pill ok">running on port ${st.found.forge.port}</span>` : ' <span class="pill ok">installed</span>') : ""}${found ? ` <span class="pill ok">found on port ${found.port}</span>` : ""}</b>
+      <span>${found ? "Already running here: it will be linked, not installed again. Use your own Termix account."
+        : p.id === "burrow" && st.found?.oldBurrow ? `An older standalone Burrow${st.found.oldBurrow.version ? " " + h(st.found.oldBurrow.version) : ""} is also here (${h(st.found.oldBurrow.home)}). This one replaces it; its tunnels aren't moved over. Remove it when you're ready: ${h(st.found.oldBurrow.cli)} uninstall`
+        : h(p.text)}</span>
     </button>`;
   };
   app.innerHTML = `${head("Set up your gate")}

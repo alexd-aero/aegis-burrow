@@ -10,12 +10,24 @@
 // remembered (state.json: pack), so the welcome page only offers it once.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { findByTitle } from "./termix.mjs";
 
 const FORGE_INSTALL = "https://raw.githubusercontent.com/adatskov-wcpss/animated-fiesta/main/docker.sh";
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r/g;
+
+// The standalone Burrow from before the merge (its own repo, retired): its
+// discovery file says where it lives. Aegis × Burrow replaces it.
+export function oldBurrow() {
+  const cfg = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "burrow", "burrow.json");
+  try {
+    const d = JSON.parse(readFileSync(cfg, "utf8"));
+    if (!d.home || !existsSync(join(d.home, "app"))) return null;
+    return { home: d.home, version: d.version || null, url: d.url || null, cli: join(d.home, "app", "bin", "burrow") };
+  } catch { return null; }
+}
 
 export function forgeInstalled() {
   const home = process.env.FORGE_HOME || join(homedir(), ".selkies-forge");
@@ -35,7 +47,9 @@ export class Pack {
   // what is already on this machine (Termix on any port, a Forge)
   async detect() {
     const termix = this.settings.get("termix") ? null : await this.termix.detect(this.tunnels).catch(() => null);
-    this.found = { termix, forge: forgeInstalled(), at: Date.now() };
+    // a Forge: its install folder, or one answering on any port (another HOME, a container…)
+    const forge = forgeInstalled() ? { installed: true } : await findByTitle(this.tunnels, /selkies forge/i, /selkies|forge/i).catch(() => null);
+    this.found = { termix, forge, oldBurrow: oldBurrow(), at: Date.now() };
     return this.found;
   }
 
@@ -45,7 +59,7 @@ export class Pack {
       decided: !!p.decided, skipped: !!p.skipped, at: p.at || null,
       burrow: (this.settings.get("modules") || {}).burrow !== false,
       termix: !!this.settings.get("termix"),
-      forge: forgeInstalled(),
+      forge: forgeInstalled() || !!this.found?.forge,
       found: this.found,
       job: this.job ? { ...this.job, steps: this.job.steps.map((s) => ({ ...s, lines: s.lines.slice(-6) })) } : null,
     };
@@ -120,7 +134,7 @@ export class Pack {
       if (choice.forge) {
         const f = step("forge");
         f.state = "running";
-        if (forgeInstalled()) { say(f, "Selkies Forge is already installed."); f.state = "done"; }
+        if (forgeInstalled() || this.found?.forge) { say(f, this.found?.forge?.port ? `Selkies Forge is already running on port ${this.found.forge.port}.` : "Selkies Forge is already installed."); f.state = "done"; }
         else {
           say(f, "running the Selkies Forge installer (unattended)…");
           const code = await new Promise((resolve) => {
