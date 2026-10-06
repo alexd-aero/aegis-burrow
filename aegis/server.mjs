@@ -42,6 +42,7 @@ import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Burrow } from "../burrow/index.mjs";
+import { checkLock } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
@@ -58,6 +59,7 @@ const TLS = settings.get("tls");
 const COOKIE = settings.get("cookie") || "__Host-aegis";          // also the AEAD label of the token
 const PLAIN_COOKIE = "aegis";                                      // the same token on plain HTTP
 const GO = "aegis-go";                                             // one-shot: "the next / is Termix"
+const UNLOCK = "aegis-unlock";                                     // a tunnel's own password was entered (AEAD label too)
 // Configurable under Settings → Sign-in (data/state.json).
 const sessionTtl = () => Math.max(1, Math.min(365, Number(settings.get("sessionDays")) || 30)) * 864e5;
 const SESSION_RENEW_MS = 24 * 60 * 60 * 1000;
@@ -84,7 +86,7 @@ const SESSION_KEY = loadKey();
 const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-for (const f of ["login.html", "setup.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
+for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
                  "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "ui.css", "login.css",
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
@@ -186,7 +188,7 @@ function parseCookies(header) {
 
 function stripGateCookie(header) {
   if (!header) return header;
-  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO].map((n) => n + "=");
+  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK].map((n) => n + "=");
   const kept = header.split(";").map((p) => p.trim()).filter((p) => p && !ours.some((n) => p.startsWith(n)));
   return kept.length ? kept.join("; ") : undefined;
 }
@@ -254,6 +256,42 @@ function renewalCookie(req) {
   const s = sessionOf(req);
   if (!s || s.exp - Date.now() > sessionTtl() - SESSION_RENEW_MS) return null;
   return sessionCookie(req, s.sid || b64u(randomBytes(12)));
+}
+
+// ---------- a tunnel's own password ----------
+// A tunnel with access "password" opens with its own password (Burrow keeps
+// the scrypt hash, t.lock) or with the Aegis login. The cookie is bound to the
+// tunnel, its host and the password's epoch: a new password locks everyone out.
+
+const unlockName = (req) => (isSecure(req) ? "__Host-" + UNLOCK : UNLOCK);
+const unlockCookie = (req, t) => `${unlockName(req)}=${seal({ p: t.port, h: hostOf(req), e: t.lock.epoch, exp: Date.now() + sessionTtl() }, UNLOCK)}; ${cookieAttrs(req, sessionTtl() / 1000)}`;
+function unlocked(req, t) {
+  const s = t.lock && unseal(parseCookies(req.headers.cookie)[unlockName(req)] || "", UNLOCK);
+  return !!(s && s.p === t.port && s.h === hostOf(req) && s.e === t.lock.epoch && s.exp > Date.now());
+}
+// anyone (public), the Aegis login (login, and password too), or its own password
+const mayOpen = (req, t) => t.access === "public" || isAuthed(req) || (t.access === "password" && unlocked(req, t));
+
+function unlockPage(res, t, host) {
+  const html = FILES["unlock.html"].toString().replaceAll("{{name}}", esc(t.name || t.site?.host || `tunnel-${t.port}`))
+    .replaceAll("{{host}}", esc(host)).replaceAll("{{title}}", esc(settings.get("title")));
+  send(res, 200, html, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": GATE_CSP });
+}
+
+async function unlockRoute(t, req, res, url, host) {
+  if (req.method === "GET") {
+    if (mayOpen(req, t)) return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/") });
+    return unlockPage(res, t, host);
+  }
+  if (req.method !== "POST") return send(res, 405, "");
+  const ip = clientIp(req);
+  if (tooManyFails(ip)) { log("unlock throttled", ip, host); return sendJson(res, 429, { error: "Too many attempts. Try again in 15 minutes." }); }
+  let f;
+  try { f = await unwrapSealed(await readJsonBody(req)); }
+  catch { recordFail(ip); return sendJson(res, 400, { error: "Secure handshake failed. Reload and try again." }); }
+  if (!checkLock(t.lock, f.password)) { recordFail(ip); log("unlock wrong password", ip, host); return sendJson(res, 401, { error: "Wrong password." }); }
+  fails.delete(ip); log("unlock ok", ip, host);
+  return sendJson(res, 200, { ok: true, next: safeNext(f.next, "/") }, { "Set-Cookie": unlockCookie(req, t) });
 }
 
 // ---------- single sign-on tickets (dashboard -> tunnel host) ----------
@@ -526,6 +564,7 @@ function me(req) {
     login: { subtitle: (settings.get("login") || {}).subtitle || "Secure channel" },
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
+    experimental: { sites: !!(settings.get("experimental") || {}).sites },
     serveo: { ...serveo.state(), forward: serveoForward() },
     mounts: { ...(settings.get("mounts") || {}) }, mountable: { termix: !!settings.get("termix"), "selkies-forge": !!listIntegrations().find((i) => i.kind === "selkies-forge" && i.url) },
     update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
@@ -568,6 +607,11 @@ function savePrefs(p) {
   if ("serveo" in p) setServeo(p.serveo !== false);
   if ("autoUpdate" in p) updater.setAuto(!!p.autoUpdate);
   if ("serveoForward" in p) patch.serveoForward = p.serveoForward !== false;
+  if ("experimental" in p) {
+    const x = { ...(settings.get("experimental") || {}) };
+    if (typeof p.experimental?.sites === "boolean") x.sites = p.experimental.sites;
+    patch.experimental = x;
+  }
   if ("mounts" in p) {
     const next = { ...(settings.get("mounts") || {}) };
     for (const [id, v] of Object.entries(p.mounts || {})) {
@@ -605,7 +649,17 @@ async function handleApi(req, res, path, url) {
       return sendJson(res, 200, pack.run(choice));
     }
     // Burrow: the tunnel API (burrow/index.mjs)
-    const br = await burrow.handle(req.method, path.slice("/__gate/api".length), () => readJsonBody(req));
+    // a tunnel's own password comes sealed, like the login (sealedPassword)
+    const tunnelBody = async () => {
+      const b = await readJsonBody(req);
+      if (b && b.sealedPassword) {
+        try { b.password = String((await unwrapSealed(b.sealedPassword)).password || ""); }
+        catch { throw new Error("Secure handshake failed. Reload and try again."); }
+        delete b.sealedPassword;
+      }
+      return b;
+    };
+    const br = await burrow.handle(req.method, path.slice("/__gate/api".length), tunnelBody);
     if (br) return br.body !== undefined ? send(res, br.status, br.body, br.headers) : sendJson(res, br.status, br.json);
     if (path === "/__gate/api/addon" && req.method === "GET") {
       const v = addonView({ tunnels, control: burrow.controlView(), burrow: burrow.status() });
@@ -897,15 +951,18 @@ function notFoundPage(res, why) {
               why === "paused" ? "Its owner switched it off for now." : "Nothing is published on this address.");
 }
 
-function tunnelRequest(port, req, res, path, url, host) {
+async function tunnelRequest(port, req, res, path, url, host) {
   const t = tunnels.get(port);
   if (!t) return notFoundPage(res, "none");
+  if (path === "/__gate/unlock" && t.access === "password" && t.enabled) return unlockRoute(t, req, res, url, host);
   if (path.startsWith("/__gate/")) return handleGate(req, res, path, url, host, false);
   if (!t.enabled) return notFoundPage(res, "paused");
-  if (t.access === "login" && !isAuthed(req)) {
+  if (!mayOpen(req, t)) {
     const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
-    if (!wantsHtml) return sendJson(res, 401, { error: "login required" });
-    return send(res, 302, "", { Location: mainHost() ? ssoUrl(host, req.url) : "/__gate/login?next=" + encodeURIComponent(safeNext(req.url, "/")) });
+    if (!wantsHtml) return sendJson(res, 401, { error: t.access === "password" ? "password required" : "login required" });
+    const next = encodeURIComponent(safeNext(req.url, "/"));
+    if (t.access === "password") return send(res, 302, "", { Location: "/__gate/unlock?next=" + next });
+    return send(res, 302, "", { Location: mainHost() ? ssoUrl(host, req.url) : "/__gate/login?next=" + next });
   }
   tunnels.proxy(port, req, res, { stripCookie: stripGateCookie });
 }
@@ -919,7 +976,7 @@ async function handler(req, res) {
   const path = url.pathname;
   try {
     const port = burrow.matchHost(host);
-    if (port !== null) return tunnelRequest(port, req, res, path, url, host);
+    if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,
     // carrying a signed-in session along (a 60 s single-use ticket).
     if (host === serveo.host() && mainHost() && serveoForward() && req.method === "GET" && isPageLoad(req)) {
@@ -986,7 +1043,7 @@ server.on("upgrade", (req, socket, head) => {
   if (port !== null) {
     const t = tunnels.get(port);
     if (!t || !t.enabled) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
-    if (t.access === "login" && !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
+    if (!mayOpen(req, t)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
   if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
@@ -1022,6 +1079,7 @@ async function overview() {
     termix: tx ? { upstream: tx.upstream, container: tx.container || null } : null,
     forge: forge ? { version: forge.version, url: forge.url, linked: !!forge.addon } : null,
     pack: (({ decided, skipped }) => ({ decided, skipped }))(pack.status()),
+    experimental: { sites: !!(settings.get("experimental") || {}).sites },
     update: { current: u.current, latest: u.latest, available: u.available, checked: u.checked, auto: u.auto, error: u.error, entries: (u.entries || []).slice(0, 8) },
   };
 }

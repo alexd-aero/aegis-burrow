@@ -106,6 +106,9 @@ button[type=submit]:focus-visible { outline: 2px solid #fff; outline-offset: 3px
 button[type=submit]:disabled { background: #1d1f22; color: #6b7078; box-shadow: none; cursor: default; }
 .spin { display: none; width: 15px; height: 15px; margin: 0 auto; border: 1.5px solid #3a3d42; border-top-color: #c9ccd1; border-radius: 50%; animation: spin .7s linear infinite; }
 
+.alt { margin: 4px 0 0; font-size: 12px; color: var(--muted); text-align: center; }
+.alt a { color: inherit; text-underline-offset: 3px; }
+.alt a:hover { color: #e8eaed; }
 #msg { min-height: 20px; margin-top: 12px; font: 12px var(--mono); color: var(--muted); }
 
 footer {

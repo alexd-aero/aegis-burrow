@@ -15,7 +15,7 @@ const fmtMs = (ms) => ms == null ? "–" : ms < 1000 ? Math.round(ms) + " ms" : 
 const ago = (t) => { if (!t) return "never"; const s = Math.max(0, (Date.now() - t) / 1000); return s < 5 ? "now" : s < 60 ? Math.floor(s) + "s ago" : s < 3600 ? Math.floor(s / 60) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago"; };
 const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const flag = (cc) => /^[A-Z]{2}$/.test(cc || "") && cc !== "XX" && cc !== "T1" ? String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0))) : "";
-const displayName = (t) => t.name || t.title || `tunnel-${t.port}`;
+const displayName = (t) => t.name || t.title || (t.site ? t.site.url.replace(/^https:\/\//, "") : `tunnel-${t.port}`);
 
 const ICON = {
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>',
@@ -37,6 +37,7 @@ const ICON = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 5.5V11c0 4.6 3 8.3 7 10 4-1.7 7-5.4 7-10V5.5z"/></svg>',
+  key: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.7-8.7M17 6l3 3M14.5 8.5l2 2"/></svg>',
   term: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M12 16h7"/></svg>',
 };
 
@@ -112,8 +113,11 @@ function statusPill(t) {
   if (t.health.up === null) return '<span class="pill">checking</span>';
   return `<span class="pill ok"><i class="dot ok"></i>live · ${fmtMs(t.health.ms)}</span>`;
 }
-const accessPill = (t) => t.access === "public"
-  ? `<span class="pill warn">${ICON.globe} public</span>` : `<span class="pill lock">${ICON.lock} login</span>`;
+const accessPill = (t) => t.access === "public" ? `<span class="pill warn">${ICON.globe} public</span>`
+  : t.access === "password" ? `<span class="pill lock">${ICON.key} password</span>` : `<span class="pill lock">${ICON.lock} login</span>`;
+// where it goes: a port, or a Pages site
+const targetPill = (t) => t.kind === "site" ? `<span class="pill site">${h(PROVIDER[t.site.provider] || "Pages")} · ${h(t.site.url.replace(/^https:\/\//, "").replace(/\/$/, ""))}</span>`
+  : `<span class="pill">→ ${h(t.targetHost)}:${t.targetPort}</span>`;
 
 function card(t) {
   return `<article class="card tcard${t.enabled ? "" : " off"}" data-act="open" data-port="${t.port}">
@@ -126,7 +130,7 @@ function card(t) {
       </div>
       <label class="switch" title="${t.enabled ? "On" : "Off"}" data-stop><input type="checkbox" data-act="toggle" data-port="${t.port}" ${t.enabled ? "checked" : ""} aria-label="Tunnel on or off"><i></i></label>
     </div>
-    <div class="t-meta">${statusPill(t)}${accessPill(t)}<span class="pill">→ ${h(t.targetHost)}:${t.targetPort}</span>${t.wsActive ? `<span class="pill">${t.wsActive} ws</span>` : ""}</div>
+    <div class="t-meta">${statusPill(t)}${accessPill(t)}${targetPill(t)}${t.wsActive ? `<span class="pill">${t.wsActive} ws</span>` : ""}</div>
     ${spark(t.spark)}
     <div class="t-nums">
       <div><b>${fmtN(t.reqPerMin)}</b><span>req/min</span></div>
@@ -674,13 +678,15 @@ function renderDetail() {
         <h1>${h(displayName(d))}</h1>
         <div class="t-url" style="margin-top:4px"><a href="${h(d.url)}" target="_blank" rel="noopener">${h(d.url)}</a>
           <button class="copy" data-act="copy" data-text="${h(d.url)}" aria-label="Copy link">${ICON.copy}</button></div>
-        <div class="t-meta" style="margin-top:10px">${statusPill(d)}${accessPill(d)}<span class="pill">→ ${h(d.target)}</span></div>
+        <div class="t-meta" style="margin-top:10px">${statusPill(d)}${accessPill(d)}${targetPill(d)}</div>
       </div>
       <div class="row" style="flex-wrap:wrap">
         <div class="seg" role="group" aria-label="Who can open it">
           <button data-act="access" data-v="login" class="${d.access === "login" ? "on" : ""}">Login</button>
-          <button data-act="access" data-v="public" class="${d.access === "public" ? "on" : ""}">Public</button>
+          <button data-act="access" data-v="password" class="${d.access === "password" ? "on" : ""}">Password</button>
+          ${d.kind === "site" ? "" : `<button data-act="access" data-v="public" class="${d.access === "public" ? "on" : ""}">Public</button>`}
         </div>
+        ${d.access === "password" ? `<button class="btn sm" data-act="password">${ICON.key} Change password</button>` : ""}
         <label class="switch" title="On/off"><input type="checkbox" data-act="toggle" data-port="${d.port}" ${d.enabled ? "checked" : ""} aria-label="Tunnel on or off"><i></i></label>
         <a class="btn sm" href="${h(d.url)}" target="_blank" rel="noopener">${ICON.ext} Open</a>
         <button class="btn sm" data-act="edit">${ICON.edit} Edit</button>
@@ -718,10 +724,11 @@ function renderDetail() {
         <div class="legend"><span><i style="background:#e8eaed"></i>served</span><span><i style="background:#7aa7ff"></i>received</span></div></section>
       <section class="card panel"><h3>Target</h3>
         <dl class="kv">
-          <dt>Address</dt><dd>${h(d.target)}</dd>
+          <dt>${d.kind === "site" ? "Serves" : "Address"}</dt><dd>${d.kind === "site" ? `<a class="link" href="${h(d.target)}" target="_blank" rel="noopener">${h(d.target)}</a>` : h(d.target)}</dd>
+          <dt>Who</dt><dd>${d.access === "public" ? "anyone with the link" : d.access === "password" ? `its own password${d.lockSet ? ` (set ${ago(d.lockSet)})` : ""}, or your login` : "your Aegis login"}</dd>
           <dt>Health</dt><dd>${d.health.up === null ? "checking" : d.health.up ? `up · ${fmtMs(d.health.ms)}` : "down"}${d.healthSince ? ` · since ${ago(d.healthSince)}` : ""}</dd>
           <dt>Checked</dt><dd>${ago(d.health.checked)}</dd>
-          <dt>Host header</dt><dd>${d.preserveHost ? "kept (tunnel name)" : "rewritten to target"}</dd>
+          <dt>Host header</dt><dd>${d.kind === "site" ? "the site's own; nothing about visitors is passed on" : d.preserveHost ? "kept (tunnel name)" : "rewritten to target"}</dd>
           <dt>DNS</dt><dd>${d.dns && d.dns.ok ? "proxied CNAME" : h(d.dns && d.dns.error || "pending")}</dd>
           <dt>Created</dt><dd>${new Date(d.created).toLocaleString()}</dd>
           <dt>WebSockets</dt><dd>${fmtN(d.totals.ws)} total</dd>
@@ -849,46 +856,126 @@ function previewText(port, sub) {
   return `https://<b>tunnel-${h(port)}</b>${h(rest)}`;
 }
 
+// Who can open it: the Aegis login (the default), a password of its own, or anyone.
+const ACCESS = [["login", "Aegis login"], ["password", "Own password"], ["public", "Public"]];
+const accessSeg = (id, cur, site) => `<div class="seg" id="${id}">${ACCESS.filter(([v]) => !(site && v === "public"))
+  .map(([v, l]) => `<button type="button" data-v="${v}" class="${cur === v ? "on" : ""}">${l}</button>`).join("")}</div>`;
+const pwFields = (locked) => `<div class="pw-box" id="fPwBox">
+    <div class="row flexwrap">
+      <label class="field grow"><span>Password <span class="faint">(8+ characters${locked ? "; empty keeps the current one" : ""})</span></span><input class="input" id="fPw" type="password" autocomplete="new-password" placeholder="${locked ? "unchanged" : ""}"></label>
+      <label class="field grow"><span>Repeat it</span><input class="input" id="fPw2" type="password" autocomplete="new-password"></label>
+    </div>
+    <p class="faint small pw-note">${ICON.key} Whoever has it gets in; your Aegis login works too. Sealed with ML-KEM-768 + X25519 on its way, kept only as a scrypt hash.</p>
+  </div>`;
+// the password fields -> {sealedPassword} (or {} to keep it), or throws with what's wrong
+async function sealedPw(m, needed) {
+  const pw = m.querySelector("#fPw").value, pw2 = m.querySelector("#fPw2").value;
+  if (!pw && !needed) return {};
+  if (pw.length < 8) throw new Error("Use at least 8 characters for the password.");
+  if (pw !== pw2) throw new Error("The two passwords differ.");
+  if (!window.AegisSeal) throw new Error("The sealing script didn't load. Reload the page.");
+  return { sealedPassword: await window.AegisSeal({ password: pw }) };
+}
+// what people paste -> what Burrow will serve (the server has the last word)
+function siteGuess(v) {
+  v = String(v || "").trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  let m = /^(github|gitlab)\.com\/([^/]+)(?:\/(.*))?$/i.exec(v);
+  if (m) {
+    const host = `${m[2].toLowerCase()}.${m[1].toLowerCase()}.io`;
+    let rest = (m[3] || "").split(m[1].toLowerCase() === "github" ? /\/(?:tree|blob)\// : /\/-\//)[0].replace(/\.git$/i, "").replace(/\/+$/, "");
+    if (m[1].toLowerCase() === "github") rest = rest.split("/")[0];
+    return { provider: m[1].toLowerCase(), url: `${host}/${rest && rest.toLowerCase() !== host ? rest + "/" : ""}` };
+  }
+  m = /^([a-z0-9-]+\.(github|gitlab)\.io)(\/.*)?$/i.exec(v);
+  if (m) return { provider: m[2].toLowerCase(), url: `${m[1].toLowerCase()}${(m[3] || "/").replace(/\/*$/, "/")}` };
+  return null;
+}
+const PROVIDER = { github: "GitHub Pages", gitlab: "GitLab Pages" };
+
 async function tunnelForm(edit, preset) {
   const t = edit || { access: "login", targetHost: "127.0.0.1", scheme: "auto", preserveHost: false, ...(preset || {}) };
   if (!S.pattern) { try { const r = await api("/__gate/api/tunnels"); S.mode = r.mode; S.pattern = r.pattern; } catch { /* the form still works */ } }
+  const isSite = edit && t.kind === "site";
+  const canSite = !edit && !!S.me?.experimental?.sites;
+  const st = { site: isSite, access: t.access || "login" };
   openModal(`
-    <h2>${edit ? `Edit tunnel-${t.port}` : "New tunnel"}</h2>
-    <p>${edit ? "Change where it points or who can open it." : "Give a port its own HTTPS address. Login-protected unless you make it public."}</p>
+    <h2>${edit ? `Edit ${h(isSite ? displayName(t) : "tunnel-" + t.port)}` : "New tunnel"}</h2>
+    <p id="fLead">${edit ? (isSite ? "Change the site, its address, or who can open it." : "Change where it points or who can open it.") : "Give a port its own HTTPS address. Behind your Aegis login unless you pick otherwise."}</p>
     <form id="tf" autocomplete="off">
-      ${edit ? "" : `<label class="field"><span>Port</span><input class="input mono" id="fPort" inputmode="numeric" placeholder="3000" value="${h(t.port || "")}" required>
+      ${canSite ? `<section class="srt" id="fSrt">
+        <label class="srt-head"><span class="srt-ico">${ICON.shield}</span>
+          <span class="grow"><span class="srt-t"><b>Secure reverse tunneling mode</b><span class="pill exp">experimental</span></span>
+            <span class="faint small">Serve a GitHub or GitLab Pages site on a subdomain of yours, behind a password, through Burrow.</span></span>
+          <span class="switch"><input type="checkbox" id="fSiteOn" aria-label="Secure reverse tunneling mode"><i></i></span></label>
+      </section>` : ""}
+      <div id="fSiteBox" ${st.site ? "" : "hidden"}>
+        <label class="field"><span>The site <span class="faint">(GitHub or GitLab Pages)</span></span>
+          <input class="input mono" id="fSite" value="${h(isSite ? t.site.url : "")}" placeholder="you.github.io/project or github.com/you/project" spellcheck="false" autocapitalize="none"></label>
+        <div class="site-guess faint small" id="fGuess"></div>
+      </div>
+      <div id="fPortBox" ${st.site ? "hidden" : ""}>
+      ${edit ? "" : `<label class="field"><span>Port</span><input class="input mono" id="fPort" inputmode="numeric" placeholder="3000" value="${h(t.port || "")}">
         <div class="chips" id="portChips"><span class="faint mono" style="font-size:11.5px">finding open ports…</span></div></label>`}
       <div class="row">
         <label class="field grow"><span>Target host</span><input class="input mono" id="fHost" value="${h(t.targetHost)}" placeholder="127.0.0.1"></label>
         <label class="field" style="width:120px"><span>Target port</span><input class="input mono" id="fTPort" inputmode="numeric" value="${edit ? t.targetPort : ""}" placeholder="same"></label>
       </div>
+      </div>
       <label class="field"><span>Name <span class="faint">(optional; the page title is used otherwise)</span></span><input class="input" id="fName" maxlength="60" value="${h(t.name || "")}"></label>
-      <label class="field"><span>Address <span class="faint">(optional; ${S.mode === "domain" ? "your own subdomain, empty for the default" : "used once a domain is linked"})</span></span>
+      <label class="field"><span>Address <span class="faint" id="fSubHint"></span></span>
         <div class="addr"><input class="input mono" id="fSub" maxlength="40" value="${h(t.sub || "")}" placeholder="${h(S.mode === "domain" ? defaultLabel(t.port) : "grafana")}" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zoneName() || "your-domain")}</span></div></label>
-      <div class="field"><span>Who can open it</span>
-        <div class="seg" id="fAccess"><button type="button" data-v="login" class="${t.access !== "public" ? "on" : ""}">Login required</button><button type="button" data-v="public" class="${t.access === "public" ? "on" : ""}">Public</button></div></div>
-      <details class="adv"><summary>Advanced</summary>
+      <div class="field"><span>Who can open it</span><div id="fAccessBox">${accessSeg("fAccess", st.access, st.site)}</div></div>
+      ${pwFields(!!t.locked)}
+      <details class="adv" id="fAdv" ${st.site ? "hidden" : ""}><summary>Advanced</summary>
         <div class="row">
           <label class="field grow"><span>Target speaks</span><select class="input" id="fScheme">
             <option value="auto">detect (HTTP or HTTPS)</option><option value="http" ${t.scheme === "http" && edit ? "selected" : ""}>HTTP</option><option value="https" ${t.scheme === "https" && edit ? "selected" : ""}>HTTPS</option></select></label>
         </div>
         <label class="row" style="gap:10px;margin-bottom:14px"><span class="switch"><input type="checkbox" id="fPreserve" ${t.preserveHost ? "checked" : ""}><i></i></span><span style="font-size:13px">Keep the tunnel's Host header <span class="faint">(for apps that need their public name)</span></span></label>
       </details>
-      <div class="preview" id="fPreview">${previewText(t.port || "PORT", t.sub)}</div>
+      <div class="preview" id="fPreview"></div>
       <div class="err-msg" id="fErr"></div>
       <div class="modal-actions"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="fGo">${edit ? "Save" : "Create tunnel"}</button></div>
     </form>`, (m) => {
-    const access = { v: t.access === "public" ? "public" : "login" };
-    m.querySelector("#fAccess").addEventListener("click", (e) => {
+    const portEl = m.querySelector("#fPort"), subEl = m.querySelector("#fSub"), siteEl = m.querySelector("#fSite");
+    const draw = () => {
+      m.querySelector("#fSiteBox").hidden = !st.site;
+      m.querySelector("#fPortBox").hidden = st.site;
+      m.querySelector("#fAdv").hidden = st.site;
+      if (st.site && st.access === "public") st.access = "login";
+      m.querySelector("#fAccessBox").innerHTML = accessSeg("fAccess", st.access, st.site);
+      m.querySelector("#fPwBox").hidden = st.access !== "password";
+      m.querySelector("#fSubHint").textContent = st.site
+        ? (S.mode === "domain" ? "(the subdomain it gets, like docs)" : "(used once a domain is linked)")
+        : `(optional; ${S.mode === "domain" ? "your own subdomain, empty for the default" : "used once a domain is linked"})`;
+      subEl.placeholder = st.site ? "docs" : S.mode === "domain" ? defaultLabel(t.port) : "grafana";
+      if (!edit) {
+        m.querySelector("#fGo").textContent = st.site ? "Serve the site" : "Create tunnel";
+        m.querySelector("#fLead").textContent = st.site ? "Burrow fetches the site from GitHub or GitLab and serves it on your address, only to whoever has the login or the password."
+          : "Give a port its own HTTPS address. Behind your Aegis login unless you pick otherwise.";
+      }
+      upd();
+    };
+    const upd = () => {
+      const sub = subEl.value.trim().toLowerCase(), pv = m.querySelector("#fPreview");
+      if (st.site) {
+        const g = siteGuess(siteEl.value);
+        m.querySelector("#fGuess").innerHTML = g ? `${h(PROVIDER[g.provider])} · <span class="mono">https://${h(g.url)}</span>` : siteEl.value.trim() ? "GitHub or GitLab Pages addresses only, for now." : "";
+        const at = S.mode === "domain" ? (sub ? `https://<b>${h(sub)}</b>.${h(zoneName())}` : `https://<b>…</b>.${h(zoneName())}`) : "a random <b>https://….trycloudflare.com</b> address";
+        pv.innerHTML = `${at} <span class="faint">serves</span> ${g ? `<span class="mono">${h(g.url)}</span>` : "the site"} <span class="faint">· ${st.access === "password" ? "behind its own password" : "behind your Aegis login"}</span>`;
+      } else pv.innerHTML = previewText(edit ? t.port : (portEl?.value || "").trim() || "PORT", sub);
+    };
+    m.querySelector("#fSiteOn")?.addEventListener("change", (e) => { st.site = e.target.checked; draw(); (st.site ? siteEl : portEl)?.focus(); });
+    m.querySelector("#fAccessBox").addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
-      access.v = b.dataset.v; m.querySelectorAll("#fAccess button").forEach((x) => x.classList.toggle("on", x === b));
+      st.access = b.dataset.v; draw();
+      if (st.access === "password") m.querySelector("#fPw").focus();
     });
-    const portEl = m.querySelector("#fPort");
-    const subEl = m.querySelector("#fSub");
-    const upd = () => { const p = edit ? t.port : (portEl?.value || "").trim(); const pv = m.querySelector("#fPreview"); if (pv) pv.innerHTML = previewText(p || "PORT", subEl.value.trim().toLowerCase()); };
     portEl?.addEventListener("input", upd);
     subEl.addEventListener("input", upd);
-    portEl?.focus();
+    siteEl.addEventListener("input", upd);
+    draw();
+    (isSite ? siteEl : portEl)?.focus();
     if (!edit) {
       (S.ports ? Promise.resolve({ ports: S.ports }) : api("/__gate/api/ports")).then(({ ports }) => {
         S.ports = ports;
@@ -907,37 +994,66 @@ async function tunnelForm(edit, preset) {
     }
     m.querySelector("#tf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const err = m.querySelector("#fErr"), btn = m.querySelector("#fGo");
-      err.textContent = ""; btn.disabled = true; btn.textContent = edit ? "Saving…" : "Creating…";
-      const scheme = m.querySelector("#fScheme").value;
-      const body = { targetHost: m.querySelector("#fHost").value.trim() || "127.0.0.1",
-                     targetPort: m.querySelector("#fTPort").value.trim() || undefined,
-                     name: m.querySelector("#fName").value.trim(), access: access.v,
-                     preserveHost: m.querySelector("#fPreserve").checked, sub: subEl.value.trim().toLowerCase() || null };
-      if (scheme !== "auto") body.scheme = scheme;
+      const err = m.querySelector("#fErr"), btn = m.querySelector("#fGo"), label = btn.textContent;
+      err.textContent = ""; btn.disabled = true; btn.textContent = edit ? "Saving…" : st.site ? "Checking the site…" : "Creating…";
       try {
-        let res;
-        if (edit) res = await api(`/__gate/api/tunnels/${t.port}`, { method: "PATCH", body: JSON.stringify(body) });
-        else res = await api("/__gate/api/tunnels", { method: "POST", body: JSON.stringify({ port: portEl.value.trim(), ...body }) });
+        const sub = subEl.value.trim().toLowerCase() || null;
+        if (!edit && !st.site && !(portEl.value || "").trim()) throw new Error("Pick a port.");
+        if (st.site && !siteEl.value.trim()) throw new Error("Enter the site's address.");
+        if (st.site && S.mode === "domain" && !sub) throw new Error("Give the site an address of its own, like docs.");
+        const pw = st.access === "password" ? await sealedPw(m, !(t.locked && edit)) : {};
+        let body = { name: m.querySelector("#fName").value.trim(), access: st.access, sub, ...pw };
+        if (st.site) body.site = siteEl.value.trim();
+        else {
+          const scheme = m.querySelector("#fScheme").value;
+          Object.assign(body, { targetHost: m.querySelector("#fHost").value.trim() || "127.0.0.1",
+                                targetPort: m.querySelector("#fTPort").value.trim() || undefined,
+                                preserveHost: m.querySelector("#fPreserve").checked });
+          if (scheme !== "auto") body.scheme = scheme;
+          if (!edit) body.port = portEl.value.trim();
+        }
+        const res = edit ? await api(`/__gate/api/tunnels/${t.port}`, { method: "PATCH", body: JSON.stringify(body) })
+                         : await api("/__gate/api/tunnels", { method: "POST", body: JSON.stringify(body) });
         S.ports = null;
         closeModal();
-        toast(edit ? "Saved" : `tunnel-${res.port} is live`);
+        toast(edit ? "Saved" : st.site ? `${res.host || "The site"} is live behind ${res.access === "password" ? "its password" : "your login"}` : `tunnel-${res.port} is live`);
         go("detail", res.port);
       } catch (ex) {
-        err.textContent = ex.message; btn.disabled = false; btn.textContent = edit ? "Save" : "Create tunnel";
+        err.textContent = ex.message; btn.disabled = false; btn.textContent = label;
       }
     });
   });
 }
 
+// Set or change a tunnel's own password (and switch it to that).
+function passwordForm(d) {
+  openModal(`<h2>${d.locked ? "Change the password" : "A password of its own"}</h2>
+    <p>${h(d.host || displayName(d))} then opens with this password. Your Aegis login keeps working there too.${d.locked ? " Whoever has the old one has to enter the new one." : ""}</p>
+    <form id="pwf" autocomplete="off">${pwFields(false)}
+      <div class="err-msg" id="pErr"></div>
+      <div class="modal-actions"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="pGo">${d.locked ? "Change it" : "Set it"}</button></div>
+    </form>`, (m) => {
+    m.querySelector("#fPw").focus();
+    m.querySelector("#pwf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const b = m.querySelector("#pGo"), label = b.textContent;
+      b.disabled = true; b.textContent = "Sealing…";
+      try {
+        await patch(d.port, { access: "password", ...(await sealedPw(m, true)) });
+        closeModal(); toast("It opens with its own password now"); refresh();
+      } catch (ex) { m.querySelector("#pErr").textContent = ex.message; b.disabled = false; b.textContent = label; }
+    });
+  });
+}
+
 function confirmDelete(t) {
-  openModal(`<h2>Delete tunnel-${t.port}?</h2>
-    <p><span class="mono">${h(t.host || "Its address")}</span> stops working right away, open connections are closed, and its DNS record is removed. Whatever runs on port ${t.targetPort} is not touched.</p>
+  openModal(`<h2>Delete ${h(t.kind === "site" ? displayName(t) : "tunnel-" + t.port)}?</h2>
+    <p><span class="mono">${h(t.host || "Its address")}</span> stops working right away, open connections are closed, and its DNS record is removed. ${t.kind === "site" ? `The site itself, on ${h(PROVIDER[t.site.provider] || "Pages")}, is not touched.` : `Whatever runs on port ${t.targetPort} is not touched.`}</p>
     <div class="err-msg" id="dErr"></div>
     <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn danger" id="dGo">Delete tunnel</button></div>`, (m) => {
     m.querySelector("#dGo").addEventListener("click", async () => {
       const b = m.querySelector("#dGo"); b.disabled = true; b.textContent = "Deleting…";
-      try { await api(`/__gate/api/tunnels/${t.port}`, { method: "DELETE" }); closeModal(); toast(`tunnel-${t.port} deleted`); go("list"); }
+      try { await api(`/__gate/api/tunnels/${t.port}`, { method: "DELETE" }); closeModal(); toast(`${t.kind === "site" ? displayName(t) : "tunnel-" + t.port} deleted`); go("list"); }
       catch (ex) { m.querySelector("#dErr").textContent = ex.message; b.disabled = false; b.textContent = "Delete tunnel"; }
     });
   });
@@ -975,7 +1091,13 @@ document.addEventListener("click", async (e) => {
     else if (act === "copy") { e.stopPropagation(); await navigator.clipboard.writeText(el.dataset.text); toast("Link copied"); }
     else if (act === "edit") tunnelForm(S.detail);
     else if (act === "delete") confirmDelete(S.detail);
-    else if (act === "access") { await patch(port, { access: el.dataset.v }); toast(el.dataset.v === "public" ? "Anyone with the link can open it" : "Login required"); refresh(); }
+    else if (act === "access") {
+      const v = el.dataset.v;
+      if (v === "password" && !S.detail?.locked) { passwordForm(S.detail); return; }
+      await patch(port, { access: v });
+      toast(v === "public" ? "Anyone with the link can open it" : v === "password" ? "It opens with its own password (or your login)" : "Login required"); refresh();
+    }
+    else if (act === "password") passwordForm(S.detail);
     else if (act === "kick") { const r = await api(`/__gate/api/tunnels/${port}/kick`, { method: "POST", body: JSON.stringify({ ip: el.dataset.ip }) }); toast(`Closed ${r.kicked} connection${r.kicked === 1 ? "" : "s"}`); refresh(); }
     else if (act === "block") { await patch(port, { block: el.dataset.ip }); toast(`${el.dataset.ip} blocked`); refresh(); }
     else if (act === "unblock") { await patch(port, { unblock: el.dataset.ip }); toast(`${el.dataset.ip} unblocked`); refresh(); }
@@ -1021,5 +1143,5 @@ document.addEventListener("error", (e) => {
   if (img.tagName === "IMG" && img.dataset.fallback) img.parentElement.textContent = img.dataset.fallback;
 }, true);
 
-chrome("tunnels");
+chrome("tunnels").then((me) => { S.me = me; });
 fromHash();

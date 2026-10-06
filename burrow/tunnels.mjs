@@ -2,7 +2,7 @@
 //
 // A tunnel publishes one local (or LAN) port on its own HTTPS address. Burrow
 // has no login of its own: Aegis, in front of it, decides who gets through
-// (a tunnel is login-protected unless it is public).
+// (the Aegis login by default, a password of its own, or no lock: public).
 //
 // With a linked domain (cloudflare.mjs) the address is
 //   https://tunnel-<PORT>-<label>.<zone>        e.g. tunnel-3000-aegis.example.com
@@ -16,6 +16,16 @@
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
 //
+// Who may open a tunnel (t.access) is for Aegis to enforce: "login" (the Aegis
+// login, the default), "password" (a password of the tunnel's own, t.lock: a
+// scrypt hash kept here, never the password), or "public".
+//
+// A site (t.kind "site", experimental: "secure reverse tunneling") is a
+// GitHub or GitLab Pages site served on a subdomain of the user's own, behind
+// that password: https://docs.example.com -> https://you.github.io/project/.
+// It has no port, so its key is a number above 65535 (70001…), and it is never
+// public (a public copy would be the Pages site itself).
+//
 // Everything a tunnel does is counted here: requests, bytes, status codes,
 // latency, WebSockets, and every client that used it.
 
@@ -24,6 +34,7 @@ import { request as httpsRequest, Agent as HttpsAgent } from "node:https";
 import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { execFile } from "node:child_process";
+import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -40,6 +51,63 @@ const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
 const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 256, rejectUnauthorized: false });
+// a site out on the internet: its certificate is checked
+const siteAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
+
+const SITE_BASE = 70000;        // site keys: 70001…99999 (the API takes 1-5 digits)
+const SITE_HOST = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?\.(github|gitlab)\.io$/;
+const SITE_PATH = /^\/(?:[A-Za-z0-9._~%-]+\/)*$/;
+const PASS_MIN = 8;
+const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+export const accessOf = (v) => (v === "public" || v === "password" ? v : "login");
+
+// Where a GitHub or GitLab Pages site really is, from what people paste:
+//   github.com/you/project      -> https://you.github.io/project/
+//   github.com/you/you.github.io -> https://you.github.io/
+//   gitlab.com/group/sub/project -> https://group.gitlab.io/sub/project/
+//   you.github.io/project, group.gitlab.io/… as they are
+export function parseSite(input) {
+  let s = String(input || "").trim();
+  if (!s) throw new Error("Enter the address of a GitHub or GitLab Pages site.");
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  let u;
+  try { u = new URL(s); } catch { throw new Error("That doesn't look like an address."); }
+  const host = u.hostname.toLowerCase().replace(/^www\./, "");
+  const parts = u.pathname.split("/").filter(Boolean);
+  const site = (provider, h, path) => {
+    const base = path.length ? `/${path.join("/")}/` : "/";
+    if (!SITE_HOST.test(h)) throw new Error(`${h} isn't a Pages address Burrow knows.`);
+    if (!SITE_PATH.test(base)) throw new Error("That path has characters a Pages site can't have.");
+    return { provider, host: h, base, url: `https://${h}${base}` };
+  };
+  if (host === "github.com" || host === "gitlab.com") {
+    const provider = host.split(".")[0];
+    // a repository's own path ends where GitHub's /tree/… or GitLab's /-/… starts
+    const end = provider === "github" ? Math.min(parts.length, 2) : (parts.indexOf("-") >= 0 ? parts.indexOf("-") : parts.length);
+    const [owner, ...rest] = parts.slice(0, end).map((p) => p.replace(/\.git$/i, ""));
+    if (!owner) throw new Error(`Add the ${provider === "github" ? "repository" : "project"}, like ${host}/you/project.`);
+    const h = `${owner.toLowerCase()}.${provider}.io`;
+    return site(provider, h, rest.length === 1 && rest[0].toLowerCase() === h ? [] : rest);
+  }
+  const m = SITE_HOST.exec(host);
+  if (m) return site(m[1], host, parts);
+  throw new Error("GitHub and GitLab Pages sites only, for now: you.github.io/project, github.com/you/project, or the GitLab ones.");
+}
+
+// A tunnel's own password: Burrow keeps a scrypt hash, Aegis checks it.
+export function makeLock(password) {
+  const pw = String(password ?? "");
+  if (pw.length < PASS_MIN) throw new Error(`A tunnel password is at least ${PASS_MIN} characters.`);
+  if (pw.length > 256) throw new Error("That password is too long.");
+  const salt = randomBytes(16);
+  return { salt: salt.toString("base64url"), hash: scryptSync(pw, salt, 32, SCRYPT).toString("base64url"),
+           epoch: randomBytes(6).toString("base64url"), set: Date.now() };
+}
+export function checkLock(lock, password) {
+  if (!lock || typeof password !== "string" || !password || password.length > 256) return false;
+  const want = Buffer.from(lock.hash, "base64url");
+  return timingSafeEqual(scryptSync(password, Buffer.from(lock.salt, "base64url"), 32, SCRYPT), want);
+}
 
 const now = () => Date.now();
 const minuteOf = (t) => Math.floor(t / 60000);
@@ -197,11 +265,21 @@ export class TunnelManager {
     return sub;
   }
 
+  // Is a Pages site really there? (a typo, or Pages switched off, shows up now and not as a 404 later)
+  async checkSite(site) {
+    let r;
+    try { r = await fetch(site.url, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(10000), headers: { "user-agent": "burrow/1 (site check)" } }); }
+    catch (e) { throw new Error(`Can't reach ${site.host}: ${e.cause?.code || e.message}.`); }
+    if (r.status === 404) throw new Error(`Nothing at ${site.url} (404). Is ${site.provider === "github" ? "GitHub" : "GitLab"} Pages switched on for it?`);
+  }
+
   async create(spec) {
+    if (spec.site) return this.createSite(spec);
     const port = Number(spec.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Pick a port from 1 to 65535.");
     if (this.forbidden.has(port)) throw new Error("That is Aegis itself.");
     if (this.tunnels.has(port)) throw new Error(`tunnel-${port} already exists.`);
+    const { access, lock } = this.checkAccess(null, spec);
     const targetHost = String(spec.targetHost || "127.0.0.1").trim() || "127.0.0.1";
     if (!/^[a-zA-Z0-9.\-:\[\]]{1,253}$/.test(targetHost)) throw new Error("That target host does not look right.");
     const targetPort = Number(spec.targetPort || port);
@@ -212,10 +290,32 @@ export class TunnelManager {
       port, targetHost, targetPort,
       scheme: ["http", "https"].includes(spec.scheme) ? spec.scheme : await this.detectScheme(targetHost, targetPort),
       name: String(spec.name || "").slice(0, 60),
-      access: spec.access === "public" ? "public" : "login",
+      access, lock,
       preserveHost: !!spec.preserveHost,
       enabled: true, created: now(), blocked: [], dns: null,
     };
+    return this.add(t);
+  }
+
+  // Secure reverse tunneling: a Pages site on a subdomain of ours, behind a password.
+  async createSite(spec) {
+    const site = parseSite(spec.site);
+    let port = SITE_BASE + 1;
+    while (this.tunnels.has(port)) port++;
+    if (port > 99999) throw new Error("That's a lot of sites. Remove one first.");
+    if (this.domain && !spec.sub) throw new Error("Give the site an address of its own, like docs.");
+    const sub = await this.checkSub(port, spec.sub);
+    const { access, lock } = this.checkAccess({ kind: "site" }, spec);
+    await this.checkSite(site);
+    return this.add({
+      sub, port, kind: "site", site, targetHost: site.host, targetPort: 443, scheme: "https",
+      name: String(spec.name || "").slice(0, 60) || `${site.host}${site.base.slice(0, -1)}`,
+      access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
+    });
+  }
+
+  async add(t) {
+    const port = t.port;
     this.tunnels.set(port, t);
     this.runtime(port);
     this.save();
@@ -223,19 +323,39 @@ export class TunnelManager {
     this.save();
     this.refreshFavicon(port, true);
     this.healthOne(port);
-    this.log("tunnels: created", port, "->", `${t.scheme}://${t.targetHost}:${t.targetPort}`, t.access);
+    this.log("tunnels: created", port, "->", t.site ? t.site.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, t.access);
     return this.summary(t);
+  }
+
+  // Who may open it, after this change: {access, lock}. Throws before anything changes.
+  checkAccess(t, patch) {
+    const access = "access" in patch ? accessOf(patch.access) : (t?.access || "login");
+    const lock = patch.password ? makeLock(patch.password) : t?.lock || null;
+    if (t?.kind === "site" && access === "public") throw new Error("A site behind Burrow is behind a password: the login, or one of its own.");
+    if (access === "password" && !lock) throw new Error("Set a password for this tunnel.");
+    return { access, lock };
   }
 
   async update(port, patch) {
     const t = this.get(port);
     if (!t) throw new Error("No such tunnel.");
+    if (t.kind === "site" && "sub" in patch && this.domain && !patch.sub) throw new Error("A site needs an address of its own.");
     if ("enabled" in patch) {
       t.enabled = !!patch.enabled;
       if (!t.enabled) this.kick(port, null);
     }
-    if ("access" in patch) t.access = patch.access === "public" ? "public" : "login";
+    if ("access" in patch || patch.password) {
+      const { access, lock } = this.checkAccess(t, patch);
+      if (lock !== t.lock) this.log("tunnels:", t.port, "has a new password; whoever had the old one is out");
+      t.access = access; t.lock = lock;
+    }
     if ("name" in patch) t.name = String(patch.name || "").slice(0, 60);
+    if (t.kind === "site") {
+      if ("site" in patch) {
+        const site = parseSite(patch.site);
+        if (site.url !== t.site.url) { await this.checkSite(site); t.site = site; t.targetHost = site.host; this.refreshFavicon(port, true); }
+      }
+    } else {
     if ("preserveHost" in patch) t.preserveHost = !!patch.preserveHost;
     if ("scheme" in patch && ["http", "https"].includes(patch.scheme)) t.scheme = patch.scheme;
     if ("targetHost" in patch || "targetPort" in patch) {
@@ -243,6 +363,7 @@ export class TunnelManager {
       if (patch.targetPort) t.targetPort = Number(patch.targetPort);
       t.scheme = await this.detectScheme(t.targetHost, t.targetPort);
       this.refreshFavicon(port, true);
+    }
     }
     if (patch.block) { if (!t.blocked.includes(patch.block)) t.blocked.push(patch.block); this.kick(port, patch.block); }
     if (patch.unblock) t.blocked = t.blocked.filter((ip) => ip !== patch.unblock);
@@ -332,8 +453,10 @@ export class TunnelManager {
     return {
       port: t.port, url: this.urlFor(t.port), host: this.hostFor(t.port), mode: this.mode,
       quick: quick ? { state: quick.state, error: quick.error } : null,
-      target: `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
+      kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
+      target: t.site ? t.site.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
+      locked: !!t.lock, lockSet: t.lock?.set || null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
       health: { up: rt.health.up, ms: rt.health.ms, checked: rt.health.checked },
@@ -406,7 +529,36 @@ export class TunnelManager {
     if (rt.recent.length > RECENT) rt.recent.shift();
   }
 
+  // A site's path: its pages live under base (/project/), ours start at /.
+  // Absolute links the site makes itself (/project/x) are kept as they are.
+  sitePath(t, p) {
+    const base = t.site.base;
+    if (base === "/" || p === base.slice(0, -1) || p.startsWith(base) || p.startsWith(base.slice(0, -1) + "?")) return p;
+    return base + p.replace(/^\//, "");
+  }
+  // ...and the way back, for a redirect: https://you.github.io/project/x -> /x
+  siteLocation(t, loc) {
+    try {
+      const u = new URL(loc, `https://${t.site.host}/`);
+      if (u.hostname !== t.site.host) return loc;
+      let p = u.pathname;
+      if (t.site.base !== "/" && (p + "/").startsWith(t.site.base)) p = "/" + p.slice(t.site.base.length);
+      return p + u.search + u.hash;
+    } catch { return loc; }
+  }
+  siteHeaders(t, req) {
+    const h = {};
+    // nothing about the visitor or Cloudflare goes on to GitHub or GitLab
+    for (const [k, v] of Object.entries(req.headers)) if (!/^(cf-|x-forwarded-|x-real-ip$|true-client-ip$|cdn-loop$)/i.test(k)) h[k] = v;
+    h.host = t.site.host;
+    const pub = `https://${String(req.headers.host || "").toLowerCase()}`, up = `https://${t.site.host}`;
+    if (h.origin && h.origin.toLowerCase() === pub) h.origin = up;
+    if (h.referer && (h.referer.toLowerCase() + "/").startsWith(pub + "/")) h.referer = up + this.sitePath(t, h.referer.slice(pub.length) || "/");
+    return h;
+  }
+
   upstreamHeaders(t, req, extra) {
+    if (t.kind === "site") return this.siteHeaders(t, req);
     const h = { ...req.headers, ...extra };
     if (!t.preserveHost) {
       h.host = `${t.targetHost}:${t.targetPort}`;
@@ -441,11 +593,14 @@ export class TunnelManager {
     const headers = this.upstreamHeaders(t, req, {});
     const cookie = stripCookie(headers.cookie);
     if (cookie) headers.cookie = cookie; else delete headers.cookie;
+    const site = t.kind === "site";
     const mod = t.scheme === "https" ? httpsRequest : httpRequest;
-    const up = mod({ host: t.targetHost, port: t.targetPort, method: req.method, path: req.url, headers,
-                     agent: t.scheme === "https" ? httpsAgent : httpAgent, timeout: 120000 }, (upRes) => {
+    const up = mod({ host: t.targetHost, port: t.targetPort, method: req.method, path: site ? this.sitePath(t, req.url) : req.url, headers,
+                     agent: site ? siteAgent : t.scheme === "https" ? httpsAgent : httpAgent, timeout: 120000 }, (upRes) => {
       status = upRes.statusCode;
-      res.writeHead(upRes.statusCode, upRes.headers);
+      const out = { ...upRes.headers };
+      if (site && out.location) out.location = this.siteLocation(t, out.location);
+      res.writeHead(upRes.statusCode, out);
       upRes.on("data", (d) => { outB += d.length; });
       upRes.pipe(res);
       upRes.on("end", () => finish());
@@ -469,6 +624,7 @@ export class TunnelManager {
     const t = this.get(port), rt = this.runtime(port);
     const c = this.client(rt, req);
     if (t.blocked.includes(c.ip)) { socket.end("HTTP/1.1 403 Forbidden\r\n\r\n"); return; }
+    if (t.kind === "site") { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }   // Pages sites have no WebSockets
     const headers = this.upstreamHeaders(t, req, {});
     const cookie = stripCookie(headers.cookie);
     if (cookie) headers.cookie = cookie; else delete headers.cookie;
@@ -547,13 +703,15 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
   fetchTarget(t, path, limit) {
     return new Promise((resolve) => {
       const mod = t.scheme === "https" ? httpsRequest : httpRequest;
-      const req = mod({ host: t.targetHost, port: t.targetPort, path, method: "GET", timeout: 5000, rejectUnauthorized: false,
-                        headers: { host: (t.preserveHost && this.hostFor(t.port)) || `${t.targetHost}:${t.targetPort}`,
+      const site = t.kind === "site";
+      const req = mod({ host: t.targetHost, port: t.targetPort, path: site ? this.sitePath(t, path) : path, method: "GET", timeout: 5000,
+                        rejectUnauthorized: site, agent: site ? siteAgent : undefined,
+                        headers: { host: site ? t.site.host : (t.preserveHost && this.hostFor(t.port)) || `${t.targetHost}:${t.targetPort}`,
                                    "user-agent": "aegis/1 (favicon)", accept: "*/*" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && limit > 0) {
           res.resume();
           try {
-            const u = new URL(res.headers.location, `${t.scheme}://${t.targetHost}:${t.targetPort}${path}`);
+            const u = new URL(site ? this.siteLocation(t, res.headers.location) : res.headers.location, `${t.scheme}://${t.targetHost}:${t.targetPort}${path}`);
             if (u.hostname === t.targetHost || u.hostname === "localhost" || u.hostname === this.hostFor(t.port)) {
               return resolve(this.fetchTarget(t, u.pathname + u.search, limit - 1));
             }

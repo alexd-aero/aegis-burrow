@@ -50,6 +50,7 @@ function wire() {
   const peek = document.getElementById("peek");
   const caps = document.getElementById("caps");
   const setup = document.body.dataset.mode === "setup";
+  const unlock = document.body.dataset.mode === "unlock";      // a tunnel's own password: no username
 
   function setState(state, text = "") {
     // restart the shake animation on repeated errors
@@ -74,8 +75,9 @@ function wire() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const username = form.username.value.trim();
-    if (!username || !pw.value) return setState("err", "Enter a username and a password.");
+    const username = unlock ? "" : form.username.value.trim();
+    if (unlock && !pw.value) return setState("err", "Enter the password.");
+    if (!unlock && (!username || !pw.value)) return setState("err", "Enter a username and a password.");
     if (setup) {
       if (!/^[A-Za-z0-9._@-]{2,64}$/.test(username)) return setState("err", "Username: 2-64 letters, digits, . _ @ -");
       if (pw.value.length < 10) return setState("err", "Use at least 10 characters.");
@@ -86,14 +88,15 @@ function wire() {
     try {
       const q = new URLSearchParams(location.search);
       const fields = setup ? { username, password: pw.value, token: q.get("t") || "" }
+                   : unlock ? { password: pw.value, next: q.get("next") || "" }
                            : { username, password: pw.value, next: q.get("next") || "" };
       const sealed = await seal(fields);
       msg.textContent = setup ? "Saving…" : "Verifying…";
-      const r = await fetch(setup ? "/__gate/setup" : "/__gate/auth", {
+      const r = await fetch(setup ? "/__gate/setup" : unlock ? "/__gate/unlock" : "/__gate/auth", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sealed),
       });
       const j = await r.json().catch(() => ({}));
-      if (r.ok) { setState("ok", setup ? "You're in." : "Access granted."); setTimeout(() => location.replace(j.next || "/"), 450); return; }
+      if (r.ok) { setState("ok", setup ? "You're in." : unlock ? "Unlocked." : "Access granted."); setTimeout(() => location.replace(j.next || "/"), 450); return; }
       setState("err", j.error || "Access denied.");
       pw.select();
     } catch (err) {

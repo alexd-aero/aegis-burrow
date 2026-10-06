@@ -485,6 +485,26 @@ cmd_logs() {
 }
 
 # ---------------------------------------------------------------- burrow
+# A tunnel's own password: asked twice on a terminal, or the first line of
+# stdin when that is a pipe. Never an argument (ps would show it).
+tunnel_password() {
+  local p p2
+  if [ ! -t 0 ]; then IFS= read -r p || true
+  else
+    p="$(ask_secret "Its password (8+ characters)")" || return 1
+    [ "${#p}" -ge 8 ] && { p2="$(ask_secret "Once more")"; [ "$p" = "$p2" ] || { bad "the two passwords differ"; return 1; }; }
+  fi
+  [ "${#p}" -ge 8 ] || { bad "a tunnel password is at least 8 characters"; return 1; }
+  printf '%s' "$p"
+}
+# tunnel_json KEY=VALUE… -> JSON (values from the environment of node, not its arguments)
+tunnel_json() { env "$@" "$NODE" -e '
+  const e = process.env, o = {};
+  for (const k of ["port", "targetPort"]) if (e["T_" + k]) o[k] = +e["T_" + k];
+  for (const k of ["targetHost", "name", "access", "password", "site"]) if (e["T_" + k]) o[k] = e["T_" + k];
+  if ("T_sub" in e) o.sub = e.T_sub || null;
+  process.stdout.write(JSON.stringify(o));'; }
+
 # Burrow, the tunnel engine, through its control socket (burrow_call, below).
 cmd_burrow() {
   local out
@@ -494,16 +514,36 @@ cmd_burrow() {
       "$NODE" -e 'const s=JSON.parse(process.argv[1]);console.log(`  Burrow ${s.version}: ${s.on?"on":"off"}, ${s.tunnels} tunnel${s.tunnels===1?"":"s"} (${s.enabled} live), ${s.mode==="domain"?"tunnel-PORT on "+s.mainHost.split(".").slice(1).join("."):"quick tunnels (trycloudflare.com)"}`)' "$out" ;;
     list)
       out="$(burrow_call GET /tunnels)" || die "$out"
-      "$NODE" -e 'const j=JSON.parse(process.argv[1]);if(!j.tunnels.length)console.log("  no tunnels");for(const t of j.tunnels)console.log(`  ${String(t.port).padEnd(6)}${(t.enabled?"live  ":"paused")}  ${t.access.padEnd(6)}  ${(t.url||"(starting)").padEnd(52)} ${t.name||""}`)' "$out" ;;
+      "$NODE" -e 'const j=JSON.parse(process.argv[1]);if(!j.tunnels.length)console.log("  no tunnels");for(const t of j.tunnels)console.log(`  ${String(t.port).padEnd(6)}${(t.enabled?"live  ":"paused")}  ${t.access.padEnd(8)}  ${(t.url||"(starting)").padEnd(52)} ${t.site?"→ "+t.site.url:t.name||""}`)' "$out" ;;
     on|off)
       out="$(burrow_call POST /module "{\"burrow\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"
       ok "Burrow is $1" ;;
     publish)
-      local port="${2:-}" name="" access=login host=127.0.0.1 sub=""; shift 2 || true
-      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]"
-      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --public) access=public ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
-      out="$(burrow_call POST /tunnels "$("$NODE" -e 'const [p,n,a,h,s]=process.argv.slice(1);process.stdout.write(JSON.stringify({port:+p,targetHost:h,targetPort:+p,name:n,access:a,sub:s||null}))' "$port" "$name" "$access" "$host" "$sub")")" || die "$out"
+      local port="${2:-}" name="" access=login host=127.0.0.1 sub="" pw=""; shift 2 || true
+      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]"
+      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --public) access=public ;; --password) access=password ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
+      if [ "$access" = password ]; then pw="$(tunnel_password)" || exit 1; fi
+      out="$(tunnel_json T_port="$port" T_targetHost="$host" T_targetPort="$port" T_name="$name" T_access="$access" T_sub="$sub" T_password="$pw" | burrow_call POST /tunnels -)" || die "$out"
       ok "published: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way: aegis burrow list)")' "$out")" ;;
+    site)
+      local url="${2:-}" name="" access=login sub="" pw=""; shift 2 || true
+      [ -n "$url" ] || die "aegis burrow site URL --sub NAME [--name N] [--password]   (URL: you.github.io/project, github.com/you/project, gitlab…)"
+      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --password) access=password ;; *) die "unknown option $1" ;; esac; shift; done
+      if [ "$access" = password ]; then pw="$(tunnel_password)" || exit 1; fi
+      spin_start "checking $url"
+      out="$(tunnel_json T_site="$url" T_name="$name" T_access="$access" T_sub="$sub" T_password="$pw" | burrow_call POST /tunnels -)" || { spin_stop; die "$out"; }
+      spin_stop
+      local at; at="$(printf '%s' "$out" | jget url)"
+      ok "serving $(printf '%s' "$out" | jget site.url) at ${B}${MNT}${at:-(its address is on its way: aegis burrow list)}${NC}, behind $([ "$access" = password ] && echo "its own password" || echo "your login")" ;;
+    password)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow password PORT   (sets its own password; asked, or read from stdin)"
+      pw="$(tunnel_password)" || exit 1
+      out="$(tunnel_json T_access=password T_password="$pw" | burrow_call PATCH "/tunnels/$2" -)" || die "$out"
+      ok "$(printf '%s' "$out" | jget host) opens with its own password now (your login works too)" ;;
+    access)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] && [[ "${3:-}" =~ ^(login|password|public)$ ]] || die "aegis burrow access PORT login|password|public"
+      out="$(burrow_call PATCH "/tunnels/$2" "{\"access\":\"$3\"}")" || die "$out"
+      ok "tunnel $2: $3" ;;
     unpublish)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow unpublish PORT"
       out="$(burrow_call DELETE "/tunnels/$2")" || die "$out"
@@ -512,7 +552,7 @@ cmd_burrow() {
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow rename PORT NAME   (NAME \"\" goes back to tunnel-PORT-…)"
       out="$(burrow_call PATCH "/tunnels/$2" "$("$NODE" -e 'process.stdout.write(JSON.stringify({sub:process.argv[1]||null}))' "${3:-}")")" || die "$out"
       ok "tunnel $2: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way)")' "$out")" ;;
-    *) die "aegis burrow status | list | on | off | publish PORT | unpublish PORT | rename PORT NAME" ;;
+    *) die "aegis burrow status | list | on | off | publish PORT | site URL | password PORT | access PORT WHO | unpublish PORT | rename PORT NAME" ;;
   esac
 }
 
@@ -721,6 +761,7 @@ cmd_tunnels() {
   while :; do
     rows="$(cli tunnels)" || die "$rows"
     local -a items=($'new\t+ Publish a port\tpick from what is listening here')
+    [ "$(burrow_call GET /overview | jget experimental.sites)" = true ] && items+=($'site\t+ Secure reverse tunneling\ta GitHub or GitLab Pages site, behind a password (experimental)')
     while IFS= read -r line; do [ -n "$line" ] && items+=("$line"); done <<<"$rows"
     items+=($'back\tBack\t')
     printf '\n'
@@ -728,6 +769,7 @@ cmd_tunnels() {
     case "$ch" in
       back) return 0 ;;
       new) tunnel_new ;;
+      site) tunnel_site ;;
       *) tunnel_one "$ch" ;;
     esac
   done
@@ -747,13 +789,36 @@ tunnel_new() {
   [[ "$port" =~ ^[0-9]{1,5}$ ]] || { bad "that isn't a port"; return 0; }
   name="$(ask "Name (optional)")"
   sub="$(ask "Its own subdomain (optional, like grafana)")"
-  confirm "Public, with no login?" n && access=public
+  access="$(who_menu)" || return 0
+  local pw=""; if [ "$access" = password ]; then pw="$(tunnel_password)" || return 0; fi
   spin_start "publishing $port"
-  out="$(PORT="$port" H="$host" N="$name" S="$sub" A="$access" "$NODE" -e '
-    const e = process.env;
-    process.stdout.write(JSON.stringify({ port: +e.PORT, targetHost: e.H, targetPort: +e.PORT, name: e.N, sub: e.S || null, access: e.A }));' | burrow_call POST /tunnels -)" || { spin_stop; bad "$out"; return 0; }
+  out="$(tunnel_json T_port="$port" T_targetHost="$host" T_targetPort="$port" T_name="$name" T_sub="$sub" T_access="$access" T_password="$pw" | burrow_call POST /tunnels -)" || { spin_stop; bad "$out"; return 0; }
   spin_stop
   ok "tunnel-$port is live: ${B}${MNT}$(printf '%s' "$out" | jget url)${NC}"
+}
+
+# who may open it: the Aegis login (first, the default), its own password, anyone
+who_menu() {
+  local -a items=($'login\tAegis login\tthe one you sign in with (the default)'
+                  $'password\tIts own password\tshare it; your login works there too')
+  [ "${1:-}" = site ] || items+=($'public\tPublic\tanyone with the link')
+  menu_choose "Who can open it?" "${items[@]}"
+}
+
+# Secure reverse tunneling (experimental): a Pages site on a subdomain of yours
+tunnel_site() {
+  local url sub name access pw="" out
+  title "Secure reverse tunneling" "a GitHub or GitLab Pages site, on your domain, behind a password"
+  url="$(ask "The site (you.github.io/project or github.com/you/project)")"; [ -n "$url" ] || return 0
+  sub="$(ask "Its subdomain (like docs)")"
+  name="$(ask "Name (optional)")"
+  access="$(who_menu site)" || return 0
+  if [ "$access" = password ]; then pw="$(tunnel_password)" || return 0; fi
+  spin_start "checking the site"
+  out="$(tunnel_json T_site="$url" T_sub="$sub" T_name="$name" T_access="$access" T_password="$pw" | burrow_call POST /tunnels -)" || { spin_stop; bad "$out"; return 0; }
+  spin_stop
+  local at; at="$(printf '%s' "$out" | jget url)"
+  ok "$(printf '%s' "$out" | jget site.url) is served at ${B}${MNT}${at:-(an address on its way)}${NC}"
 }
 
 tunnel_one() {
@@ -768,7 +833,7 @@ tunnel_one() {
     printf '\n'
     local -a items=(
       $'sub\tChange its address\t'"${sub:+now }${sub:-its own subdomain, like grafana}"
-      "access"$'\t'"$([ "$access" = public ] && echo "Require the login" || echo "Make it public")"$'\t'"$([ "$access" = public ] && echo "anyone can open it now" || echo "no login needed after this")"
+      "access"$'\t'"Who can open it"$'\t'"now: $(case "$access" in public) echo anyone ;; password) echo "its own password" ;; *) echo "the Aegis login" ;; esac)"
       "pause"$'\t'"$([ "$enabled" = true ] && echo "Pause it" || echo "Resume it")"$'\t'"$([ "$enabled" = true ] && echo "stops answering, kept" || echo "answers again")"
       $'open\tOpen it\tin this machine\'s browser'
       $'remove\tUnpublish\tits address goes away'
@@ -778,7 +843,11 @@ tunnel_one() {
       back) return 0 ;;
       sub) local s; s="$(ask "Subdomain (empty: back to tunnel-$port-…)" "$sub")"
            out="$(S="$s" "$NODE" -e 'process.stdout.write(JSON.stringify({sub: process.env.S || null}))' | burrow_call PATCH "/tunnels/$port" -)" && ok "now at $(printf '%s' "$out" | jget url)" || bad "$out" ;;
-      access) out="$(burrow_call PATCH "/tunnels/$port" "{\"access\":\"$([ "$access" = public ] && echo login || echo public)\"}")" && ok "done" || bad "$out" ;;
+      access) local w pw=""; w="$(who_menu "$([ "$(printf '%s' "$js" | jget kind)" = site ] && echo site)")" || continue
+              if [ "$w" = password ]; then
+                if [ "$(printf '%s' "$js" | jget locked)" != true ] || confirm "Set a new password?" n; then pw="$(tunnel_password)" || continue; fi
+              fi
+              out="$(tunnel_json T_access="$w" T_password="$pw" | burrow_call PATCH "/tunnels/$port" -)" && ok "now: $w" || bad "$out" ;;
       pause) out="$(burrow_call PATCH "/tunnels/$port" "{\"enabled\":$([ "$enabled" = true ] && echo false || echo true)}")" && ok "done" || bad "$out" ;;
       open) open_url "$url"; say "$url" ;;
       remove) confirm "Unpublish tunnel-$port?" n && { out="$(burrow_call DELETE "/tunnels/$port")" && ok "tunnel-$port removed" || bad "$out"; return 0; } ;;
@@ -932,7 +1001,10 @@ usage() {
 
   ${B}Burrow, the tunnel engine${NC}  (also: burrow …)
     aegis burrow status | list | on | off
-    aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]
+    aegis burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]
+    aegis burrow password PORT   its own password (asked, or read from stdin)
+    aegis burrow access PORT login|password|public
+    aegis burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (experimental)
     aegis burrow rename PORT NAME | unpublish PORT
 
   ${B}More${NC}

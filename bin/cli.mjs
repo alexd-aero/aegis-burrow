@@ -106,7 +106,8 @@ async function tunnels() {
   const j = await call("GET", "/tunnels");
   for (const t of j.tunnels) {
     const state = !t.enabled ? "paused" : t.health?.up === false ? "target down" : "live";
-    out(`${t.port}\t${t.port}  ${t.name || t.title || "tunnel-" + t.port}\t${state} · ${t.access === "public" ? "public" : "login"} · ${short(t.url) || "address on its way"}`);
+    const label = t.kind === "site" ? `site  ${t.name || short(t.site.url)}` : `${t.port}  ${t.name || t.title || "tunnel-" + t.port}`;
+    out(`${t.port}\t${label}\t${state} · ${t.access} · ${short(t.url) || "address on its way"}`);
   }
 }
 async function ports() {

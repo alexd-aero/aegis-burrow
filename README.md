@@ -111,7 +111,7 @@ Everything the browser does, the terminal does too. It talks to the running gate
 |---|---|
 | `aegis` | The home screen |
 | `aegis setup` | Your login, the pack, a domain: step by step |
-| `aegis tunnels` | Pick a tunnel with the arrow keys: change its subdomain, make it public or login-only, pause it, open it, unpublish it. **+ Publish a port** lists what's listening |
+| `aegis tunnels` | Pick a tunnel with the arrow keys: change its subdomain, choose who can open it (your login, its own password, anyone), pause it, open it, unpublish it. **+ Publish a port** lists what's listening; **+ Secure reverse tunneling** appears when that experiment is on |
 | `aegis domain [link \| rename NAME \| unlink]` | Cloudflare from the terminal: it prints the authorization link (open it on any device) and waits |
 | `aegis passwd` | A new login; every browser signs in again |
 | `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
@@ -201,7 +201,21 @@ Termix normally answers at the root of the dashboard's address (the home page st
 - latency percentiles and status codes;
 - its clients, with kick, block and pause.
 
-Each tunnel is login-protected unless you make it public.
+**Who can open a tunnel** is up to you, per tunnel:
+
+| | |
+|---|---|
+| **Aegis login** (the default) | The login you sign in to the dashboard with. One sign-in covers every tunnel. |
+| **Its own password** | A password just for this tunnel, to share with someone who shouldn't have your login. Your login still works there too. It is sealed in the browser on its way (like the login) and kept only as a scrypt hash; a new password signs out everyone who had the old one. |
+| **Public** | Anyone with the link. |
+
+### Secure reverse tunneling (experimental)
+
+Switch it on under *Settings → Experimental*, and **New tunnel** gets a **Secure reverse tunneling mode**: paste a GitHub or GitLab Pages site (`you.github.io/project`, `github.com/you/project`, `gitlab.com/group/project`…), pick a subdomain like `docs`, and `https://docs.example.com` serves that site, behind your login or a password of its own. It is never public.
+
+Burrow fetches the site from GitHub or GitLab (checking their certificate) and hands it on: the project's path is mapped to `/`, redirects are rewritten, and nothing about your visitors (their IP, Cloudflare's headers) is passed along. Burrow checks that the site exists before it publishes it.
+
+This protects the address on your domain, not the site itself: `you.github.io/project` stays exactly as public as it is now. To keep the content private, keep the site's source private and serve it only this way, or use a host that can lock it.
 
 The engine also answers on **`data/control.sock`**, a Unix socket only your user can open. That is how [Selkies Forge](#-selkies-forge) and the `burrow` command work without a browser:
 
@@ -210,6 +224,9 @@ burrow status                       # Burrow 2.0.0: on, 3 tunnels (3 live), tunn
 burrow list
 burrow publish 8790 --name hello    # login-protected; --public for anyone
 burrow publish 3000 --sub grafana   # at grafana.<your zone>
+burrow publish 8080 --password      # its own password (asked, or the first line of stdin)
+burrow password 8080                # change it; burrow access 8080 login|password|public
+burrow site github.com/you/project --sub docs --password   # a Pages site (experimental)
 burrow rename 3000 dashboards       # move it; "" goes back to tunnel-3000-…
 burrow unpublish 8790
 burrow off / on                     # the module switch (tunnels are kept)
@@ -314,6 +331,7 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 - **Sealing in the browser.** It is pure JavaScript ([noble](https://paulmillr.com/noble/)), so it works on LAN and Tailscale addresses where browsers hide `crypto.subtle`. The pack's Termix password and password changes are sealed the same way.
 - **Passwords** are stored as scrypt (N=2¹⁵), with a configurable lockout.
 - **Sessions** are AES-256-GCM sealed tokens bound to their host. **One login per browser:** login-protected tunnels sign in through the dashboard with single-use 60-second tickets.
+- **A tunnel's own password** is entered on the tunnel's address (sealed the same way), counts toward the same lockout, and opens a cookie bound to that tunnel, its host and the password's version.
 - **TLS.** With `tls` set, the server speaks TLS 1.3 with X25519MLKEM768 and AES-256-GCM only.
 
 ## 📖 Reference
@@ -332,7 +350,7 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 | `aegis start` · `stop` · `restart` · `status [--json]` · `url` · `setup-link` · `logs [-f]` | The usual |
 | `aegis termix install` · `remove` | Termix in Docker, behind the gate |
 | `aegis doctor [--fix]` | Check (and fetch) Node.js and cloudflared; check Docker |
-| `aegis burrow …` = `burrow …` | `status` · `list` · `on` · `off` · `publish PORT [--name N] [--sub NAME] [--public] [--host H]` · `rename PORT NAME` · `unpublish PORT` |
+| `aegis burrow …` = `burrow …` | `status` · `list` · `on` · `off` · `publish PORT [--name N] [--sub NAME] [--public \| --password] [--host H]` · `password PORT` · `access PORT login\|password\|public` · `site URL --sub NAME [--password]` · `rename PORT NAME` · `unpublish PORT` |
 
 </details>
 

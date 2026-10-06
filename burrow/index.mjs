@@ -18,9 +18,14 @@
 // The tunnel API (paths relative to /__gate/api on the dashboard):
 //
 //   GET    /tunnels                  {mode, pattern, tunnels: [summary…]}
-//   POST   /tunnels                  {port, targetHost?, targetPort?, name?, access?, scheme?} -> summary
+//   POST   /tunnels                  {port, targetHost?, targetPort?, name?, sub?, access?, password?, scheme?} -> summary
+//                                     or {site, sub, name?, access?, password?}: a GitHub/GitLab
+//                                     Pages site behind a password (experimental.sites)
 //   GET    /tunnels/PORT             details: stats, charts, clients, recent requests
-//   PATCH  /tunnels/PORT             any of {name, access, enabled, targetHost, targetPort, scheme}
+//   PATCH  /tunnels/PORT             any of {name, sub, access, password, enabled, targetHost, targetPort, scheme, site}
+//
+// access is "login" (the Aegis login, the default), "password" (its own
+// password; Burrow keeps only a scrypt hash) or "public".
 //   DELETE /tunnels/PORT
 //   POST   /tunnels/PORT/kick        {ip?}: drop live connections (one client, or all)
 //   GET    /tunnels/PORT/favicon     the target's icon
@@ -90,7 +95,13 @@ export class Burrow {
     if (!this.on) return { status: 409, json: { error: "Burrow is switched off. Turn it on under Settings → Modules." } };
     const T = this.tunnels;
     if (path === "/tunnels" && method === "GET") return ok({ tunnels: T.list(), now: Date.now(), mode: T.mode, pattern: T.pattern() });
-    if (path === "/tunnels" && method === "POST") return ok(await T.create(await readJson()));
+    if (path === "/tunnels" && method === "POST") {
+      const spec = await readJson();
+      if (spec.site && !(this.settings.get("experimental") || {}).sites) {
+        return { status: 409, json: { error: "Secure reverse tunneling is experimental: switch it on under Settings → Experimental first." } };
+      }
+      return ok(await T.create(spec));
+    }
     if (path === "/ports" && method === "GET") return ok({ ports: await T.ports() });
     const m = /^\/tunnels\/(\d{1,5})(\/favicon|\/kick)?$/.exec(path);
     if (!m) return null;
