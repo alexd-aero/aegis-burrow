@@ -176,7 +176,7 @@ burrow off / on                     # the module switch (tunnels are kept)
 2. adds a proxied CNAME for `aegis.<zone>`;
 3. runs `cloudflared --post-quantum` itself.
 
-Each tunnel gets its own DNS record. *Change the name* moves the dashboard to another subdomain on the same tunnel (tunnels named `tunnel-PORT-…` move with it), and *Unlink* removes the records, the tunnel and the files.
+Each tunnel gets its own DNS record. *Change the name* moves the dashboard to another subdomain on the same tunnel (tunnels named `tunnel-PORT-…` move with it), and *Unlink* removes the records, the tunnel and the files. A domain routed by a cloudflared service you set up yourself can be renamed too: Aegis reads that service's config first and only goes ahead when its ingress already sends the new name here (a `*.<zone>` rule does).
 
 ## ⬆️ Updates
 

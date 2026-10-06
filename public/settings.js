@@ -23,16 +23,17 @@ function domainBody() {
           : c && c.running ? `<span class="pill ok"><i class="dot ok"></i>connected · post-quantum · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>not running</span>'}</div>
       </div>
       ${c && c.log && c.log.length ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
-      ${d.managed && S.renaming ? `<form id="renameForm" class="link-form" autocomplete="off">
+      ${S.renaming ? `<form id="renameForm" class="link-form" autocomplete="off">
           <label class="field"><span>New name for the dashboard</span>
             <div class="addr"><input class="input mono" id="label" value="${h(S.label ?? d.label)}" maxlength="40" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(d.zone)}</span></div></label>
           <div class="preview" id="labelPreview"></div>
-          <p class="faint small">The old address stops working, so this page moves to the new one and you sign in there again. Tunnels named tunnel-PORT-… move with it; tunnels with a name of their own keep it.</p>
+          <p class="faint small">The old address stops working, so this page moves to the new one and you sign in there again. Tunnels named tunnel-PORT-… move with it; tunnels with a name of their own keep it.${d.managed ? "" : " Your own cloudflared service must already send the new name here (a *." + h(d.zone) + " rule in its ingress does); Aegis checks before it changes anything."}</p>
           <div class="err-msg" id="linkErr"></div>
           <div class="row end"><button type="button" class="btn ghost" data-act="rename-cancel">Cancel</button><button class="btn primary" id="linkGo">Rename</button></div>
         </form>`
       : d.managed ? `<div class="row end"><button class="btn" data-act="rename">Change the name</button><button class="btn danger" data-act="unlink">Unlink ${h(d.mainHost)}</button></div>`
-        : '<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis only adds and removes the per-tunnel DNS records.</p>'}`;
+        : `<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis manages the DNS records (the dashboard's and one per tunnel).</p>
+           <div class="row end"><button class="btn" data-act="rename">Change the name</button></div>`}`;
   }
   if (!cf.cloudflared) {
     return `<div class="note-err"><b>cloudflared is not installed.</b> Run <span class="mono">aegis doctor --fix</span> on this machine, or install it from

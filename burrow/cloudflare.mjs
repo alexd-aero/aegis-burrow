@@ -25,7 +25,7 @@
 // whenever the connector restarts.
 
 import { spawn, execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, accessSync, constants } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, accessSync, constants } from "node:fs";
 import { join, delimiter } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -313,18 +313,48 @@ export class Cloudflare {
     return this.state();
   }
 
+  // The ingress hostnames of a cloudflared that runs `tunnelId` and isn't ours
+  // (a service someone set up by hand): read from its --config file, found
+  // through /proc. null when there is no such process or file we can read.
+  externalIngress(tunnelId) {
+    let pids = [];
+    try { pids = readdirSync("/proc").filter((n) => /^\d+$/.test(n)); } catch { return null; }
+    for (const pid of pids) {
+      let args;
+      try { args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0"); } catch { continue; }
+      if (!/cloudflared$/.test(args[0] || "")) continue;
+      const i = args.indexOf("--config");
+      const file = i >= 0 ? args[i + 1] : (args.find((a) => a.startsWith("--config=")) || "").slice(9);
+      if (!file) continue;
+      let yml;
+      try { yml = readFileSync(file, "utf8"); } catch { continue; }
+      if (!new RegExp(`^tunnel:\\s*["']?${tunnelId}`, "m").test(yml)) continue;
+      return { file, hosts: [...yml.matchAll(/^\s*-\s*hostname:\s*["']?([^"'\s#]+)/gm)].map((m) => m[1].toLowerCase()) };
+    }
+    return null;
+  }
+
   // Give the dashboard another name on the same zone and tunnel: the new
   // record first, then the old one goes. Tunnels named after the dashboard
   // (tunnel-PORT-<name>) move with it; ones with a name of their own stay.
+  // A domain routed by a cloudflared Aegis doesn't run can be renamed too,
+  // when that cloudflared already sends the new name here (a "*.zone" rule).
   async rename(label) {
     label = String(label || "").trim().toLowerCase();
     if (!LABEL_RE.test(label)) throw new Error("Use 1-40 letters, digits and dashes (not at the ends).");
     const d = this.domain();
     if (!d) throw new Error("No domain is linked yet.");
-    if (!d.managed) throw new Error("This domain is routed by a cloudflared service Aegis does not manage; rename it there.");
+    if (!d.cert || !d.tunnelId) throw new Error("Aegis has no Cloudflare credentials for this domain; rename it where it was set up.");
     const zoneName = d.zone?.name || d.mainHost.split(".").slice(1).join(".");
     const mainHost = `${label}.${zoneName}`;
     if (mainHost === d.mainHost) return this.state();
+    if (!d.managed) {
+      const ing = this.externalIngress(d.tunnelId);
+      if (!ing) throw new Error("This domain runs through a cloudflared service Aegis can't see. Add the new name to its ingress (or a *." + zoneName + " rule) first.");
+      if (!ing.hosts.includes(mainHost) && !ing.hosts.includes(`*.${zoneName}`)) {
+        throw new Error(`Your cloudflared (${ing.file}) doesn't send ${mainHost} here yet. Add it, or a "*.${zoneName}" rule, to its ingress, restart it, then rename.`);
+      }
+    }
     const cert = decodeCert(d.cert);
     const target = `${d.tunnelId}.cfargotunnel.com`;
     const existing = await cfApi(cert.token, "GET", `/zones/${cert.zoneId}/dns_records?name=${encodeURIComponent(mainHost)}`);
@@ -338,7 +368,7 @@ export class Cloudflare {
     } catch (e) { this.log("cf: could not remove the old dashboard record:", e.message); }
     const domain = { ...d, mainHost, renamed: Date.now() };
     this.settings.set({ domain });
-    this.startConnector();
+    if (d.managed) this.startConnector();
     this.log("cf: renamed", d.mainHost, "->", mainHost);
     await this.onDomain?.(domain, "linked");
     return this.state();
