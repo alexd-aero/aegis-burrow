@@ -876,10 +876,77 @@ server.on("upgrade", (req, socket, head) => {
 
 // ---------- the local control socket (Burrow's, see burrow/index.mjs) ----------
 
+// The command line (bin/aegis) does everything the browser does, through this
+// socket: it is mode 600, so only this machine's user who runs Aegis gets in,
+// the same user who can already read secret.key and data/. That is why the
+// login can be created or changed here without the browser's sealing.
+const USER_RE = /^[A-Za-z0-9._@-]{2,64}$/;
+async function overview() {
+  const d = settings.get("domain"), auth = settings.auth(), integ = listIntegrations();
+  const forge = integ.find((i) => i.kind === "selkies-forge");
+  const tx = settings.get("termix");
+  const u = updater.view();
+  return {
+    app: "aegis-burrow", version: VERSION, started: startedAt, pid: process.pid,
+    setup: !auth, user: auth?.username || null, setupOpen: !auth && Date.now() - startedAt < SETUP_WINDOW_MS,
+    local: LOCAL_URL + "/", mainHost: mainHost(),
+    domain: d ? { mainHost: d.mainHost, managed: !!d.managed, label: d.mainHost.split(".")[0], zone: d.zone?.name || d.mainHost.split(".").slice(1).join(".") } : null,
+    serveo: { ...serveo.state(), wanted: serveoWanted() },
+    burrow: burrow.status(),
+    termix: tx ? { upstream: tx.upstream, container: tx.container || null } : null,
+    forge: forge ? { version: forge.version, url: forge.url, linked: !!forge.addon } : null,
+    pack: (({ decided, skipped }) => ({ decided, skipped }))(pack.status()),
+    update: { current: u.current, latest: u.latest, available: u.available, checked: u.checked, auto: u.auto, error: u.error, entries: (u.entries || []).slice(0, 8) },
+  };
+}
 burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) => {
-  // the dashboard's own extras on the socket: the serveo link (bin/aegis serveo)
-  if (path === "/serveo" && method === "GET") return { status: 200, json: serveo.state() };
-  if (path === "/serveo" && method === "POST") { setServeo((await readJson()).on !== false); return { status: 200, json: serveo.state() }; }
+  const ok = (json) => ({ status: 200, json }), no = (status, error) => ({ status, json: { error } });
+  // the serveo link (aegis serveo)
+  if (path === "/serveo" && method === "GET") return ok(serveo.state());
+  if (path === "/serveo" && method === "POST") { setServeo((await readJson()).on !== false); return ok(serveo.state()); }
+  // the home screen and `aegis status`
+  if (path === "/overview" && method === "GET") return ok(await overview());
+  // aegis setup: the first login, from the terminal
+  if (path === "/setup" && method === "POST") {
+    if (settings.auth()) return no(409, "The login already exists. Change it with: aegis passwd");
+    const f = await readJson(), username = String(f.username || "").trim();
+    if (!USER_RE.test(username)) return no(400, "Username: 2-64 letters, digits, . _ @ -");
+    if (String(f.password || "").length < 10) return no(400, "Use at least 10 characters.");
+    setPassword(username, String(f.password));
+    log("setup: login created for", username, "from the command line");
+    return ok({ ok: true, user: username });
+  }
+  // aegis passwd: a new login; every browser is signed out
+  if (path === "/password" && method === "POST") {
+    if (!settings.auth()) return no(409, "There is no login yet. Create it with: aegis setup");
+    const f = await readJson(), username = String(f.username || settings.auth().username).trim();
+    if (!USER_RE.test(username)) return no(400, "Username: 2-64 letters, digits, . _ @ -");
+    if (String(f.password || "").length < 10) return no(400, "Use at least 10 characters.");
+    setPassword(username, String(f.password));
+    log("password changed from the command line - every session is signed out");
+    return ok({ ok: true, user: username });
+  }
+  // the pack
+  if (path === "/pack" && method === "GET") { await pack.detect(); return ok(pack.status()); }
+  if (path === "/pack" && method === "POST") {
+    const b = await readJson();
+    if (b.skip) { pack.skip(); return ok(pack.status()); }
+    return ok(pack.run(b));
+  }
+  // the domain
+  if (path === "/cf" && method === "GET") return ok(cloudflare.state());
+  if (path === "/cf/login" && method === "POST") return ok(await cloudflare.startLogin());
+  if (path === "/cf/cancel" && method === "POST") return ok(cloudflare.cancelLogin());
+  if (path === "/cf/link" && method === "POST") return ok(await cloudflare.link((await readJson()).label));
+  if (path === "/cf/rename" && method === "POST") return ok(await cloudflare.rename((await readJson()).label));
+  if (path === "/cf/unlink" && method === "POST") return ok(await cloudflare.unlink());
+  // Termix
+  if (path === "/termix" && method === "GET") return ok(await termix.status());
+  // updates
+  if (path === "/update" && method === "GET") return ok(updater.view());
+  if (path === "/update/check" && method === "POST") return ok(await updater.check());
+  if (path === "/update/apply" && method === "POST") { const job = await updater.apply(); return job.state === "error" ? no(500, job.error) : ok({ ...updater.view(), job }); }
+  if (path === "/prefs" && method === "POST") { savePrefs(await readJson()); return ok({ ok: true }); }
   return null;
 });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { burrow.stop(); serveo.stop(); process.exit(0); });

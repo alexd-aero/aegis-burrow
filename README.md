@@ -42,15 +42,23 @@ curl -fsSL https://raw.githubusercontent.com/alexd-aero/aegis-burrow/main/instal
 
 **1 · Install.** The line above finds Node.js 18+ (or downloads a private copy) and `cloudflared` (or downloads it), installs into `~/.local/share/aegis`, and starts a systemd user service.
 
-**2 · Create your login.** The installer prints the one-time setup link twice:
+**2 · Set it up: here, or in a browser.** At the end the installer asks:
 
 ```
-  Create your login, from this machine or anywhere:
+  Where would you like to set it up?
+  ❯ Here, in this terminal               step by step, a minute or two
+    In a browser                         on this machine, or your phone through the serveo link
+```
+
+**In this terminal**, it asks for your login (the password is never echoed), then the pack, then (if you like) a domain, where you authorize Cloudflare from any browser and type the subdomain. **In a browser**, it prints the setup links:
+
+```
+  Create your login in a browser, from this machine or anywhere:
     local   http://127.0.0.1:4310/__gate/setup
     serveo  https://1a2b3c….serveousercontent.com/__gate/setup
 ```
 
-The **serveo** link works from any device, with no account and no domain. Pick a username and password; they're sealed with ML-KEM-768 before they leave the page.
+The **serveo** link works from any device, with no account and no domain; what you type there is sealed with ML-KEM-768 before it leaves the page. `--setup cli` or `--setup browser` skips the question.
 
 **3 · Pick your pack.** Aegis offers Selkies Forge, Termix (with a login you choose right there) and Burrow. Take all of it, some of it, or none.
 
@@ -60,6 +68,12 @@ The **serveo** link works from any device, with no account and no domain. Pick a
 <td width="50%" valign="top">
 
 ```bash
+# the home screen: status, then arrow keys
+aegis
+
+# set it up here, or later again
+aegis setup
+
 # on another port, on your LAN / Tailscale address
 ./install.sh --port 4310 --bind 100.64.0.5
 
@@ -84,6 +98,26 @@ aegis doctor --fix
 </td>
 </tr>
 </table>
+
+## ⌨️ The command line
+
+<p align="center"><img src="docs/screenshots/cli.png" alt="aegis: the home screen in a terminal" width="100%"></p>
+
+`aegis` on its own opens the **home screen**, in the same style as `selkies-cli`: a status block (gate, login, domain, serveo, Burrow, Termix, Selkies Forge, updates), then an arrow-key menu that suggests what's next. Set it up, update, open the dashboard, manage tunnels, link or rename the domain, run the pack, change the login, switch serveo, Burrow or auto-update on and off, restart, read the log, check the machine.
+
+Everything the browser does, the terminal does too. It talks to the running gate over `data/control.sock`, which only your user can open:
+
+| Command | What it does |
+|---|---|
+| `aegis` | The home screen |
+| `aegis setup` | Your login, the pack, a domain: step by step |
+| `aegis tunnels` | Pick a tunnel with the arrow keys: change its subdomain, make it public or login-only, pause it, open it, unpublish it. **+ Publish a port** lists what's listening |
+| `aegis domain [link \| rename NAME \| unlink]` | Cloudflare from the terminal: it prints the authorization link (open it on any device) and waits |
+| `aegis passwd` | A new login; every browser signs in again |
+| `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
+| `aegis open` | The dashboard's links (and opens it, on a desktop) |
+
+Under Selkies Forge, or with no keyboard (`curl … \| bash` in a script), nothing is asked: the links are printed instead.
 
 ## 🧩 Two halves
 
@@ -277,9 +311,11 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 
 | Command | What it does |
 |---|---|
-| `aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start]` | Install, or upgrade in place (keeps the login, settings, tunnels and addons) |
+| `aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli\|browser]` | Install, or upgrade in place (keeps the login, settings, tunnels and addons) |
 | `aegis upgrade` | Copy this checkout's code over the installed one and restart |
-| `aegis update [--check]` | Fetch the newest version from GitHub and install it (or just say whether there is one) |
+| `aegis` · `aegis setup` | The home screen · set it up here (login, pack, domain) |
+| `aegis update [--check]` · `auto on\|off` | Fetch the newest version from GitHub and install it (or just say whether there is one) · install by themselves |
+| `aegis tunnels` · `domain [link\|rename NAME\|unlink]` · `passwd` · `open` | Tunnels with the arrow keys · the domain · a new login · the dashboard's links |
 | `aegis uninstall [--purge]` | Stop and remove; `--purge` also deletes the login, tunnels and Cloudflare credentials |
 | `aegis start` · `stop` · `restart` · `status [--json]` · `url` · `setup-link` · `logs [-f]` | The usual |
 | `aegis termix install` · `remove` | Termix in Docker, behind the gate |

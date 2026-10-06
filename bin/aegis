@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# aegis: install, run and look after Aegis × Burrow.
+# aegis: install, set up, run and look after Aegis × Burrow.
 #
-#   aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start]
-#   aegis upgrade                    copy this checkout's code over the installed one, restart
-#   aegis update [--check]           fetch the newest version from GitHub and install it
-#   aegis uninstall [--purge]        stop and remove; --purge also deletes data and the login
+#   aegis                            the home screen: what's running, what next (arrow keys)
+#   aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli|browser]
+#   aegis setup                      set it up right here: the login, the pack, a domain
+#   aegis status [--json] | open | url | setup-link | logs [-f] | version
 #   aegis start | stop | restart
-#   aegis status [--json]
-#   aegis url | setup-link | logs [-f] | version
+#   aegis tunnels                    manage tunnels with arrow keys
+#   aegis domain [link | rename NAME | unlink]
+#   aegis passwd                     a new login (every browser is signed out)
+#   aegis update [--check] | auto on|off
+#   aegis upgrade                    copy this checkout's code over the installed one, restart
+#   aegis uninstall [--purge]        stop and remove; --purge also deletes data and the login
 #   aegis termix install | remove    Termix in Docker, behind the same login
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared
-#   aegis serveo on | off | url        a public https link to the dashboard (serveo.net)
-#   aegis burrow status | list | on | off
-#   aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]
-#   aegis burrow unpublish PORT      Burrow, the tunnel engine (also: burrow …)
+#   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
+#   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
 #   app/          the code (aegis/, burrow/, public/, bin/), copied from a checkout
@@ -33,10 +35,9 @@ NODE_MIN="18.17.0"
 UNIT="aegis.service"
 
 c() { if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi; }
-say() { printf '  %s %s\n' "$(c '38;5;250' '·')" "$*"; }
-ok() { printf '  %s %s\n' "$(c '38;5;79' '✔')" "$*"; }
-warn() { printf '  %s %s\n' "$(c '38;5;221' '!')" "$*" >&2; }
-die() { printf '  %s %s\n' "$(c '38;5;203' '✘')" "$*" >&2; exit 1; }
+# say ok warn die, banner, spinner, bar, ask, confirm, menu_choose…
+# shellcheck source=ui.sh
+. "$SELF_DIR/ui.sh"
 # progress for Selkies Forge (it reads "::progress N text" lines); harmless elsewhere
 progress() { [ -n "${FORGE_ADDON_ID:-}" ] && echo "::progress $1 $2"; say "$2"; }
 
@@ -158,13 +159,14 @@ wait_serveo() {  # the server opens it a few seconds after it starts
 # links PATH: every address it answers on, one per line, PATH appended
 links() {
   local p="${1:-}" s m; m="$(setting domain.mainHost)"
-  [ -n "$m" ] && printf '    %s  %s\n' "$(c '2' 'domain')" "$(c '1' "https://$m/$p")"
-  printf '    %s   %s\n' "$(c '2' 'local')" "$(c '1' "$(listen_url)/$p")"
+  if [ -n "$m" ]; then linkline domain "https://$m/$p"; fi
+  linkline local "$(listen_url)/$p"
   if serveo_wanted; then
     s="$(serveo_url)"
-    if [ -n "$s" ]; then printf '    %s  %s\n' "$(c '2' 'serveo')" "$(c '1' "$s$p")"
-    else printf '    %s  %s\n' "$(c '2' 'serveo')" "$(c '2' 'not up yet; see: aegis serveo url')"; fi
+    if [ -n "$s" ]; then linkline serveo "$s$p"
+    else printf '    %s%-7s%s %snot up yet; see: aegis serveo url%s\n' "$DIM" serveo "$NC" "$DIM" "$NC"; fi
   fi
+  return 0
 }
 setup_path() { printf '__gate/setup'; }   # no token: open for 30 min after start (aegis restart reopens)
 setup_link() { local t; t="$(setting setupToken)"; printf '%s/__gate/setup%s' "$(listen_url)" "${t:+?t=$t}"; }
@@ -292,7 +294,7 @@ copy_app() {
 
 # ---------------------------------------------------------------- commands
 cmd_install() {
-  local port="" bind="" termix=0 start=1
+  local port="" bind="" termix=0 start=1 setup_mode=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --port) port="$2"; shift ;;
@@ -300,11 +302,13 @@ cmd_install() {
       --home) AEGIS_HOME="$2"; APP="$AEGIS_HOME/app"; shift ;;
       --termix) termix=1 ;;
       --no-start) start=0 ;;
+      --setup) setup_mode="${2:-}"; shift; case "$setup_mode" in cli|browser) ;; *) die "--setup cli | browser" ;; esac ;;
       *) die "unknown option $1" ;;
     esac
     shift
   done
-  echo; echo "  $(c '1' 'Aegis × Burrow') $(c '2' "$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$SRC_DIR/package.json" | head -1)")"; echo
+  if [ -n "${FORGE_ADDON_ID:-}" ]; then echo; echo "  Aegis × Burrow $(src_version)"; echo
+  else banner "$(src_version)"; title "Installing" "into $AEGIS_HOME"; fi
   progress 5 "installing into $AEGIS_HOME"
   mkdir -p "$AEGIS_HOME/data"; chmod 700 "$AEGIS_HOME" "$AEGIS_HOME/data"
   NODE="$(find_node || true)"
@@ -356,8 +360,19 @@ cmd_install() {
   echo
   [ "$start" = 1 ] && serveo_wanted && { progress 100 "opening a serveo link"; wait_serveo || true; }
   if setup_needed; then
-    echo "  Create your login, from this machine or anywhere:"
+    # Set it up here, or in a browser: asked when someone is at the keyboard
+    if [ "$start" = 1 ] && [ "$setup_mode" != browser ] && interactive; then
+      if [ -z "$setup_mode" ]; then
+        title "Set it up" "the login, the pack and (if you like) your own domain"
+        setup_mode="$(menu_choose "Where would you like to set it up?" \
+          $'cli\tHere, in this terminal\tstep by step, a minute or two' \
+          $'browser\tIn a browser\ton this machine, or your phone through the serveo link')" || setup_mode=browser
+      fi
+      if [ "$setup_mode" = cli ]; then cmd_setup; return 0; fi
+    fi
+    echo "  Create your login in a browser, from this machine or anywhere:"
     links "$(setup_path)"
+    dim "The setup page is open from anywhere for 30 minutes (aegis restart opens it again). Or run: aegis setup"
     [ -n "${FORGE_ADDON_ID:-}" ] && echo "::open $(setup_link)"
   else
     echo "  Dashboard:"
@@ -412,10 +427,13 @@ cmd_status() {
     printf '{"state":"%s","version":"%s","url":"%s","dashboard":"%s","setup_needed":%s,"setup_url":"%s","home":"%s","burrow":%s,"serveo":"%s"}\n' \
       "$state" "$ver" "$url" "$dash" "$setup" "$link" "$AEGIS_HOME" "$burrow" "$sv"
   else
-    echo "  Aegis × Burrow ${ver:-?}: $state$([ "$burrow" = false ] && echo " (Burrow off)")"
-    [ -n "$dash" ] && echo "  dashboard: $dash"
-    [ "$setup" = true ] && echo "  create the login: $link"
-    [ "$state" = running ] || [ "$state" = not-installed ] || return 1
+    case "$state" in
+      not-installed) say "Aegis × Burrow is not installed here: aegis install"; return 0 ;;
+      broken) bad "Node.js is missing: aegis doctor --fix"; return 1 ;;
+    esac
+    cli status || true
+    if [ "$state" = running ] && [ "$setup" = true ]; then printf '\n'; info "create the login: ${B}aegis setup${NC} here, or in a browser:"; links "$(setup_path)"; fi
+    if [ "$state" != running ]; then printf '\n'; info "start it: aegis start"; return 1; fi
   fi
 }
 
@@ -467,18 +485,7 @@ cmd_logs() {
 }
 
 # ---------------------------------------------------------------- burrow
-# Burrow, the tunnel engine, through its control socket (data/control.sock).
-burrow_call() {  # burrow_call METHOD PATH [JSON]
-  local sock="$AEGIS_HOME/data/control.sock"
-  [ -S "$sock" ] || die "Burrow isn't answering (no $sock). Is Aegis × Burrow running? aegis status"
-  "$NODE" -e '
-    const [sock, method, path, body] = process.argv.slice(1);
-    const r = require("http").request({ socketPath: require("fs").realpathSync(sock), method, path, headers: { "Content-Type": "application/json", "X-Burrow-Client": "cli" } }, (res) => {
-      let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { process.stdout.write(d + "\n"); process.exit(res.statusCode < 400 ? 0 : 2); });
-    });
-    r.on("error", (e) => { console.error(e.message); process.exit(1); });
-    r.end(body || undefined);' "$sock" "$1" "$2" "${3:-}"
-}
+# Burrow, the tunnel engine, through its control socket (burrow_call, below).
 cmd_burrow() {
   local out
   case "${1:-status}" in
@@ -509,26 +516,444 @@ cmd_burrow() {
   esac
 }
 
-# aegis update: the newest Aegis × Burrow from GitHub, installed over this one
+# ---------------------------------------------------------------- the running server
+# bin/cli.mjs talks to it over data/control.sock (mode 600: this user only).
+cli() { AEGIS_HOME="$AEGIS_HOME" AEGIS_COLOR="$COLOR" "$NODE" "$SELF_DIR/cli.mjs" "$@"; }
+burrow_call() { cli call "$@"; }       # burrow_call METHOD PATH [JSON | -]  (prints the body, or the error)
+jget() { cli get "$1"; }                 # jget KEY < json
+running() { [ -S "$AEGIS_HOME/data/control.sock" ] && cli call GET /status >/dev/null 2>&1; }
+src_version() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$SRC_DIR/package.json" | head -1; }
+app_version() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP/package.json" 2>/dev/null | head -1; }
+ensure_running() {
+  running && return 0
+  spin_start "starting Aegis × Burrow"
+  svc start >/dev/null 2>&1 || true
+  local i; for i in $(seq 1 40); do running && break; sleep 0.5; done
+  spin_stop
+  running || die "Aegis × Burrow isn't answering. See: aegis logs"
+}
+open_url() {  # open a link in this machine's browser, when it has one
+  if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1 & fi
+  return 0
+}
+
+# ---------------------------------------------------------------- aegis setup
+# Everything the browser's first run does, as questions in this terminal.
+cmd_setup() {
+  need_installed
+  interactive || die "aegis setup asks questions: run it in a terminal, or set it up in a browser (aegis setup-link)"
+  ensure_running
+  local out u p p2
+  if setup_needed; then
+    title "1 · Your login" "one username and password for the dashboard, Termix and every protected tunnel"
+    while :; do
+      u="$(ask "Username" "${USER:-admin}")"
+      if [[ "$u" =~ ^[A-Za-z0-9._@-]{2,64}$ ]]; then break; fi
+      bad "2-64 letters, digits, . _ @ -"
+    done
+    while :; do
+      p="$(ask_secret "Password (10+ characters)")"
+      if [ "${#p}" -lt 10 ]; then bad "use at least 10 characters"; continue; fi
+      p2="$(ask_secret "The same again")"
+      if [ "$p" = "$p2" ]; then break; fi
+      bad "the two differ; once more"
+    done
+    # the password goes to the server on stdin, never on a command line
+    out="$(U="$u" P="$p" "$NODE" -e 'process.stdout.write(JSON.stringify({username: process.env.U, password: process.env.P}))' | burrow_call POST /setup -)" || die "$out"
+    p=""; p2=""
+    ok "login created for ${B}$u${NC}"
+  else
+    title "1 · Your login"
+    ok "already set up ($(setting auth.username)); a new one: aegis passwd"
+  fi
+  setup_pack
+  setup_domain
+  title "You're all set" "sign in with your login at any of these"
+  links ""
+  printf '\n  %sCome back any time:%s %saegis%s  %s(the home screen: status, tunnels, domain, updates)%s\n\n' "$B" "$NC" "$MNT" "$NC" "$DIM" "$NC"
+}
+
+setup_pack() {
+  title "2 · The pack" "each part is optional; what's already here is linked, not installed twice"
+  local js out port forge_here termix_set burrow=true termix=null forge=false tu tp
+  spin_start "looking at what's on this machine"
+  js="$(burrow_call GET /pack)" || { spin_stop; die "$js"; }
+  spin_stop
+  port="$(printf '%s' "$js" | jget found.termix.port)"
+  forge_here="$(printf '%s' "$js" | jget forge)"
+  termix_set="$(printf '%s' "$js" | jget termix)"
+  confirm "Keep Burrow on? (any port on its own HTTPS address, behind this login)" y || burrow=false
+  if [ "$termix_set" = true ]; then ok "Termix is already set up"
+  elif [ -n "$port" ]; then
+    if confirm "Termix is running on port $port. Put it behind this login?" y; then termix='{"link":true}'; fi
+  elif docker version >/dev/null 2>&1; then
+    if confirm "Install Termix? (SSH terminals and files in the browser; one Docker container)" n; then
+      info "Termix has accounts of its own; this one becomes its admin"
+      while :; do tu="$(ask "  Termix username" "${USER:-admin}")"; [[ "$tu" =~ ^[A-Za-z0-9._@-]{2,64}$ ]] && break; bad "2-64 letters, digits, . _ @ -"; done
+      while :; do tp="$(ask_secret "  Termix password (8+)")"; [ "${#tp}" -ge 8 ] && break; bad "at least 8 characters"; done
+      termix="tx"
+    fi
+  else say "Termix needs Docker, which $USER can't reach right now; skipped"; fi
+  if [ "$forge_here" = true ]; then ok "Selkies Forge is already installed"
+  elif confirm "Install Selkies Forge? (150+ Linux desktops in the browser; a big download)" n; then forge=true; fi
+  out="$(B_ON="$burrow" TX="$termix" TU="${tu:-}" TP="${tp:-}" FG="$forge" "$NODE" -e '
+    const e = process.env;
+    const termix = e.TX === "tx" ? { username: e.TU, password: e.TP } : JSON.parse(e.TX);
+    process.stdout.write(JSON.stringify({ burrow: e.B_ON === "true", forge: e.FG === "true", termix }));' | burrow_call POST /pack -)" || die "$out"
+  tp=""
+  echo
+  if cli pack-wait; then ok "the pack is ready"; else warn "something didn't finish; see above, or open Settings in the browser"; fi
+}
+
+setup_domain() {
+  title "3 · Your own address (optional)" "a Cloudflare domain: the dashboard at NAME.your-domain, tunnels under it"
+  local js dom
+  js="$(burrow_call GET /cf)" || die "$js"
+  dom="$(printf '%s' "$js" | jget domain.mainHost)"
+  if [ -n "$dom" ]; then ok "linked: https://$dom  ${DIM}(another name: aegis domain rename NAME)${NC}"; return 0; fi
+  if [ "$(printf '%s' "$js" | jget cloudflared)" != true ]; then say "needs cloudflared: run aegis doctor --fix, then aegis domain link"; return 0; fi
+  if confirm "Link a domain now?" n; then domain_link; else dim "Later: aegis domain link (or Settings → Domain in the browser)"; fi
+}
+
+domain_link() {
+  local js out url zone label
+  js="$(burrow_call GET /cf)" || die "$js"
+  if [ -z "$(printf '%s' "$js" | jget cert)" ]; then
+    spin_start "asking Cloudflare for an authorization link"
+    out="$(burrow_call POST /cf/login)" || { spin_stop; die "$out"; }
+    spin_stop
+    url="$(printf '%s' "$out" | jget url)"
+    printf '\n  Open this in any browser (your phone works), sign in to Cloudflare and pick your domain:\n\n    %s%s%s\n\n' "$B$MNT" "$url" "$NC"
+    open_url "$url"
+    spin_start "waiting for you to authorize (ctrl-c stops)"
+    if ! zone="$(cli cf-wait 2>&1)"; then spin_stop; burrow_call POST /cf/cancel >/dev/null 2>&1 || true; die "Cloudflare: $zone"; fi
+    spin_stop
+    ok "Cloudflare authorized for ${B}${zone:-your zone}${NC}"
+  else
+    zone="$(printf '%s' "$js" | jget cert.zone.name)"
+    ok "Cloudflare is authorized for ${B}${zone:-your zone}${NC}"
+  fi
+  while :; do
+    label="$(ask "The dashboard's subdomain (any name you like)" aegis | tr 'A-Z' 'a-z')"
+    if ! [[ "$label" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]]; then bad "1-40 letters, digits and dashes (not at the ends)"; continue; fi
+    spin_start "linking $label.${zone:-your zone}"
+    if out="$(burrow_call POST /cf/link "{\"label\":\"$label\"}")"; then spin_stop; break; fi
+    spin_stop; bad "$out"
+    confirm "Try another name?" y || return 0
+  done
+  ok "the dashboard is at ${B}${MNT}https://$(printf '%s' "$out" | jget domain.mainHost)${NC}  ${DIM}(it can take a minute to resolve)${NC}"
+}
+
+# ---------------------------------------------------------------- aegis domain
+cmd_domain() {
+  need_installed; ensure_running
+  local js dom label out
+  js="$(burrow_call GET /cf)" || die "$js"
+  dom="$(printf '%s' "$js" | jget domain.mainHost)"
+  case "${1:-}" in
+    link) [ -z "$dom" ] || die "already linked: $dom (another name: aegis domain rename NAME)"; domain_link ;;
+    rename)
+      [ -n "$dom" ] || die "no domain yet: aegis domain link"
+      label="${2:-}"
+      [ -n "$label" ] || label="$(ask "New subdomain for the dashboard" "$(printf '%s' "$js" | jget domain.label)")"
+      confirm "Move the dashboard from $dom to $label.$(printf '%s' "$js" | jget domain.zone)? The old address stops working." y || return 0
+      spin_start "renaming"
+      out="$(burrow_call POST /cf/rename "{\"label\":\"$(printf '%s' "$label" | tr 'A-Z' 'a-z')\"}")" || { spin_stop; die "$out"; }
+      spin_stop
+      ok "the dashboard is now at ${B}${MNT}https://$(printf '%s' "$out" | jget domain.mainHost)${NC}; sign in there again" ;;
+    unlink)
+      [ -n "$dom" ] || die "no domain is linked"
+      confirm "Unlink $dom? Its DNS records and Cloudflare tunnel are deleted; tunnels go back to trycloudflare.com names." n || return 0
+      spin_start "unlinking"; out="$(burrow_call POST /cf/unlink)" || { spin_stop; die "$out"; }; spin_stop
+      ok "unlinked $dom" ;;
+    "")
+      if [ -n "$dom" ]; then
+        title "Domain"
+        linkline domain "https://$dom/"
+        say "$([ "$(printf '%s' "$js" | jget domain.managed)" = true ] && echo "Aegis runs its cloudflared (post-quantum)" || echo "routed by your own cloudflared service")"
+        if interactive && confirm "Give the dashboard another name?" n; then cmd_domain rename; fi
+      else
+        title "Domain" "none linked yet"
+        if interactive; then domain_link; else say "link one: aegis domain link"; fi
+      fi ;;
+    *) die "aegis domain [link | rename NAME | unlink]" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- aegis passwd
+cmd_passwd() {
+  need_installed; ensure_running
+  interactive || die "aegis passwd asks questions: run it in a terminal"
+  setup_needed && { cmd_setup; return 0; }
+  title "A new login" "every browser that's signed in is signed out"
+  local u p p2 out
+  while :; do u="$(ask "Username" "$(setting auth.username)")"; [[ "$u" =~ ^[A-Za-z0-9._@-]{2,64}$ ]] && break; bad "2-64 letters, digits, . _ @ -"; done
+  while :; do
+    p="$(ask_secret "New password (10+ characters)")"
+    if [ "${#p}" -lt 10 ]; then bad "use at least 10 characters"; continue; fi
+    p2="$(ask_secret "The same again")"
+    [ "$p" = "$p2" ] && break
+    bad "the two differ; once more"
+  done
+  out="$(U="$u" P="$p" "$NODE" -e 'process.stdout.write(JSON.stringify({username: process.env.U, password: process.env.P}))' | burrow_call POST /password -)" || die "$out"
+  p=""; p2=""
+  ok "the login is now ${B}$u${NC}; every browser signs in again"
+}
+
+# ---------------------------------------------------------------- aegis open
+cmd_open() {
+  need_installed
+  if setup_needed; then title "Set it up" "create the login in a browser, or: aegis setup"; links "$(setup_path)"
+  else title "The dashboard"; links ""; fi
+  open_url "$(dashboard_url)"
+}
+
+# ---------------------------------------------------------------- aegis tunnels
+cmd_tunnels() {
+  need_installed; ensure_running
+  if ! interactive; then cmd_burrow list; return 0; fi
+  local rows ch line
+  while :; do
+    rows="$(cli tunnels)" || die "$rows"
+    local -a items=($'new\t+ Publish a port\tpick from what is listening here')
+    while IFS= read -r line; do [ -n "$line" ] && items+=("$line"); done <<<"$rows"
+    items+=($'back\tBack\t')
+    printf '\n'
+    ch="$(menu_choose "Tunnels" "${items[@]}")" || return 0
+    case "$ch" in
+      back) return 0 ;;
+      new) tunnel_new ;;
+      *) tunnel_one "$ch" ;;
+    esac
+  done
+}
+
+tunnel_new() {
+  local rows ch line port host name sub access=login out
+  spin_start "looking for listening ports"
+  rows="$(cli ports)" || { spin_stop; bad "$rows"; return 0; }
+  spin_stop
+  local -a items=()
+  while IFS= read -r line; do [ -n "$line" ] && items+=("$line"); done <<<"$rows"
+  items+=($'other\tAnother port\ttype it, or one on another machine')
+  ch="$(menu_choose "Which port?" "${items[@]}")" || return 0
+  if [ "$ch" = other ]; then port="$(ask "Port")"; host="$(ask "On which host" 127.0.0.1)"
+  else port="${ch%%:*}"; host="${ch#*:}"; fi
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || { bad "that isn't a port"; return 0; }
+  name="$(ask "Name (optional)")"
+  sub="$(ask "Its own subdomain (optional, like grafana)")"
+  confirm "Public, with no login?" n && access=public
+  spin_start "publishing $port"
+  out="$(PORT="$port" H="$host" N="$name" S="$sub" A="$access" "$NODE" -e '
+    const e = process.env;
+    process.stdout.write(JSON.stringify({ port: +e.PORT, targetHost: e.H, targetPort: +e.PORT, name: e.N, sub: e.S || null, access: e.A }));' | burrow_call POST /tunnels -)" || { spin_stop; bad "$out"; return 0; }
+  spin_stop
+  ok "tunnel-$port is live: ${B}${MNT}$(printf '%s' "$out" | jget url)${NC}"
+}
+
+tunnel_one() {
+  local port="$1" js url access enabled sub ch out
+  while :; do
+    js="$(burrow_call GET "/tunnels/$port")" || { bad "$js"; return 0; }
+    url="$(printf '%s' "$js" | jget url)"; access="$(printf '%s' "$js" | jget access)"
+    enabled="$(printf '%s' "$js" | jget enabled)"; sub="$(printf '%s' "$js" | jget sub)"
+    title "tunnel-$port  $(printf '%s' "$js" | jget name)" "→ $(printf '%s' "$js" | jget target)"
+    linkline address "${url:-on its way}"
+    say "$access · $([ "$enabled" = true ] && echo live || echo paused) · $(printf '%s' "$js" | jget totals.requests) requests · $(printf '%s' "$js" | jget clients) clients"
+    printf '\n'
+    local -a items=(
+      $'sub\tChange its address\t'"${sub:+now }${sub:-its own subdomain, like grafana}"
+      "access"$'\t'"$([ "$access" = public ] && echo "Require the login" || echo "Make it public")"$'\t'"$([ "$access" = public ] && echo "anyone can open it now" || echo "no login needed after this")"
+      "pause"$'\t'"$([ "$enabled" = true ] && echo "Pause it" || echo "Resume it")"$'\t'"$([ "$enabled" = true ] && echo "stops answering, kept" || echo "answers again")"
+      $'open\tOpen it\tin this machine\'s browser'
+      $'remove\tUnpublish\tits address goes away'
+      $'back\tBack\t')
+    ch="$(menu_choose "What now?" "${items[@]}")" || return 0
+    case "$ch" in
+      back) return 0 ;;
+      sub) local s; s="$(ask "Subdomain (empty: back to tunnel-$port-…)" "$sub")"
+           out="$(S="$s" "$NODE" -e 'process.stdout.write(JSON.stringify({sub: process.env.S || null}))' | burrow_call PATCH "/tunnels/$port" -)" && ok "now at $(printf '%s' "$out" | jget url)" || bad "$out" ;;
+      access) out="$(burrow_call PATCH "/tunnels/$port" "{\"access\":\"$([ "$access" = public ] && echo login || echo public)\"}")" && ok "done" || bad "$out" ;;
+      pause) out="$(burrow_call PATCH "/tunnels/$port" "{\"enabled\":$([ "$enabled" = true ] && echo false || echo true)}")" && ok "done" || bad "$out" ;;
+      open) open_url "$url"; say "$url" ;;
+      remove) confirm "Unpublish tunnel-$port?" n && { out="$(burrow_call DELETE "/tunnels/$port")" && ok "tunnel-$port removed" || bad "$out"; return 0; } ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------- aegis update
 cmd_update() {
-  local repo="${AEGIS_REPO:-alexd-aero/aegis-burrow}" cur latest
-  cur="$(json_get "$APP/package.json" version)"
+  need_installed
+  case "${1:-}" in auto) cmd_auto "${2:-}"; return $? ;; esac
+  running || { update_offline "$@"; return $?; }
+  local out cur latest
+  spin_start "asking GitHub for the newest version"
+  out="$(burrow_call POST /update/check)" || { spin_stop; die "$out"; }
+  spin_stop
+  cur="$(printf '%s' "$out" | jget current)"; latest="$(printf '%s' "$out" | jget latest)"
+  if [ "$(printf '%s' "$out" | jget available)" != true ]; then
+    local err; err="$(printf '%s' "$out" | jget error)"
+    [ -n "$err" ] && die "$err"
+    ok "up to date (v$cur)"; return 0
+  fi
+  title "Update available  ${MNT}v$cur → v$latest${NC}" "what's new"
+  cli whats-new || true
+  echo
+  [ "${1:-}" = "--check" ] && { say "install it: aegis update"; return 0; }
+  if interactive && ! confirm "Install v$latest now? Aegis restarts for a few seconds; everything you set up is kept." y; then return 0; fi
+  spin_start "downloading and installing v$latest"
+  out="$(burrow_call POST /update/apply)" || { spin_stop; die "$out"; }
+  spin_stop
+  ok "installed v$latest"
+  if [ "$(service_scope)" = manual ]; then warn "restart it with whatever runs it to finish"; return 0; fi
+  spin_start "restarting"
+  if cli update-wait "$latest"; then spin_stop; ok "v$latest is running"; else spin_stop; warn "not answering yet; see: aegis status"; fi
+}
+cmd_auto() {
+  need_installed; ensure_running
+  local out
+  case "${1:-}" in
+    on|off) out="$(burrow_call POST /prefs "{\"autoUpdate\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"
+            ok "updates $([ "$1" = on ] && echo "install by themselves" || echo "wait for you")" ;;
+    *) die "aegis update auto on | off" ;;
+  esac
+}
+# not running: the newest code from GitHub, installed with its own bin/aegis
+update_offline() {
+  local repo="${AEGIS_REPO:-alexd-aero/aegis-burrow}" cur latest tmp src
+  cur="$(app_version)"
   latest="$(curl -fsSL "https://raw.githubusercontent.com/$repo/main/package.json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)"
   [ -n "$latest" ] || die "could not reach GitHub"
-  if [ "$cur" = "$latest" ] || ver_ge "$cur" "$latest"; then ok "up to date ($cur)"; return 0; fi
-  say "update available: $cur -> $latest"
+  if [ "$cur" = "$latest" ] || ver_ge "$cur" "$latest"; then ok "up to date (v$cur)"; return 0; fi
+  info "update available: v$cur → v$latest"
   [ "${1:-}" = "--check" ] && return 0
-  local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/main" | tar -xz -C "$tmp" || { rm -rf "$tmp"; die "download failed"; }
-  local src; src="$(ls -d "$tmp"/*/ | head -1)"
+  tmp="$(mktemp -d)"
+  spin_start "downloading v$latest"
+  curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/main" | tar -xz -C "$tmp" || { spin_stop; rm -rf "$tmp"; die "download failed"; }
+  spin_stop
+  src="$(ls -d "$tmp"/*/ | head -1)"
   [ -x "$src/bin/aegis" ] && [ -f "$src/aegis/server.mjs" ] || { rm -rf "$tmp"; die "the download does not look like Aegis × Burrow"; }
-  AEGIS_HOME="$AEGIS_HOME" "$src/bin/aegis" upgrade || { rm -rf "$tmp"; die "upgrade failed"; }
+  AEGIS_HOME="$AEGIS_HOME" "$src/bin/aegis" upgrade --setup browser || { rm -rf "$tmp"; die "upgrade failed"; }
   rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------- the home screen
+cmd_home() {
+  need_installed
+  banner "$(app_version)"
+  local ch
+  while :; do
+    local UP=0 SETUP=0 USER_NAME="" DASH="" LOCAL="" SERVEO="" SERVEO_ON=0 DOMAIN="" DOMAIN_MANAGED=0 BURROW_ON=0 TUNNELS=0
+    local TERMIX=0 FORGE=0 UPD=0 UPD_TO="" AUTO_UPD=0 PACK_DECIDED=0 VERSION=""
+    eval "$(cli vars)"
+    cli status || true
+    printf '\n'
+    local -a items=()
+    if [ "$UP" != 1 ]; then
+      items+=($'start\tStart Aegis × Burrow\tit is not running')
+      items+=($'logs\tShow the log\tthe last lines, to see why')
+      items+=($'doctor\tCheck this machine\tNode.js, cloudflared, Docker')
+    else
+      if [ "$SETUP" = 1 ]; then
+        items+=($'setup\tSet it up here\tthe login, then the pack and a domain')
+        items+=($'links\tSet it up in a browser\tthe setup links, for this machine or your phone')
+      fi
+      [ "$UPD" = 1 ] && items+=("update"$'\t'"Update to v$UPD_TO"$'\t'"a few seconds; everything is kept")
+      items+=("open"$'\t'"Open the dashboard"$'\t'"$DASH")
+      [ "$BURROW_ON" = 1 ] && items+=("tunnels"$'\t'"Tunnels"$'\t'"$TUNNELS published · publish, rename, make public")
+      if [ -n "$DOMAIN" ]; then items+=("domain"$'\t'"Domain"$'\t'"$DOMAIN · give it another name")
+      else items+=($'domain\tLink your own domain\tCloudflare: NAME.your-domain'); fi
+      if [ "$SETUP" != 1 ]; then
+        items+=($'pack\tThe pack\tTermix, Selkies Forge, Burrow')
+        items+=($'passwd\tChange the login\tevery browser signs in again')
+      fi
+      if [ "$SERVEO_ON" = 1 ]; then items+=("serveooff"$'\t'"Turn the serveo link off"$'\t'"${SERVEO:-connecting…}")
+      else items+=($'serveoon\tTurn the serveo link on\ta public link, no account needed'); fi
+      if [ "$BURROW_ON" = 1 ]; then items+=($'burrowoff\tSwitch Burrow off\ttunnels stop answering; they are kept')
+      else items+=($'burrowon\tSwitch Burrow on\ttunnels answer again'); fi
+      [ "$UPD" = 1 ] || items+=($'check\tCheck for updates\ton GitHub')
+      if [ "$AUTO_UPD" = 1 ]; then items+=($'autooff\tStop updating by itself\tauto-update is on')
+      else items+=($'autoon\tUpdate by itself\tinstall new versions as they come out'); fi
+      items+=($'restart\tRestart\ta few seconds')
+      items+=($'logs\tShow the log\tthe last lines')
+      items+=($'doctor\tCheck this machine\tNode.js, cloudflared, Docker')
+    fi
+    items+=($'quit\tQuit\t')
+    ch="$(menu_choose "What would you like to do?" "${items[@]}")" || { printf '\n  %sbye%s\n\n' "$DIM" "$NC"; return 0; }
+    printf '\n'
+    case "$ch" in
+      start) svc start; if wait_healthy; then ok "started"; else warn "not answering yet"; fi ;;
+      setup) cmd_setup; pause ;;
+      links) title "Set it up in a browser"; links "$(setup_path)"; pause ;;
+      update) cmd_update; pause ;;
+      open) cmd_open; pause ;;
+      tunnels) cmd_tunnels ;;
+      domain) cmd_domain; pause ;;
+      pack) setup_pack; pause ;;
+      passwd) cmd_passwd; pause ;;
+      serveoon|serveooff)
+        out="$(burrow_call POST /serveo "{\"on\":$([ "$ch" = serveoon ] && echo true || echo false)}")" || bad "$out"
+        if [ "$ch" = serveoon ]; then spin_start "opening the serveo link"; wait_serveo || true; spin_stop; fi ;;
+      burrowon) cmd_burrow on ;;
+      burrowoff) confirm "Switch Burrow off? Tunnels stop answering until it's back on." n && cmd_burrow off ;;
+      check) cmd_update --check; pause ;;
+      autoon) cmd_auto on ;;
+      autooff) cmd_auto off ;;
+      restart) spin_start "restarting"; svc restart >/dev/null 2>&1 || true; spin_stop; if wait_healthy; then ok "restarted"; else warn "not answering yet"; fi ;;
+      logs) cmd_logs 2>&1 | tail -n 25; pause ;;
+      doctor) cmd_doctor || true; pause ;;
+      quit) printf '  %sbye%s\n\n' "$DIM" "$NC"; return 0 ;;
+    esac
+  done
+}
+
+usage() {
+  banner "$(src_version)"
+  cat <<USAGE
+  ${B}Get going${NC}
+    aegis                        the home screen: what's running, what to do next
+    aegis setup                  set it up here: your login, the pack, a domain
+    aegis open                   the dashboard's links (and open it, on a desktop)
+
+  ${B}Every day${NC}
+    aegis status [--json]        what is running, where, and what's new
+    aegis tunnels                manage tunnels with the arrow keys
+    aegis domain [link | rename NAME | unlink]
+    aegis passwd                 a new login (every browser signs in again)
+    aegis update [--check]       the newest version from GitHub
+    aegis update auto on|off     install new versions by themselves
+    aegis start | stop | restart | logs [-f]
+
+  ${B}Burrow, the tunnel engine${NC}  (also: burrow …)
+    aegis burrow status | list | on | off
+    aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]
+    aegis burrow rename PORT NAME | unpublish PORT
+
+  ${B}More${NC}
+    aegis serveo on | off | url  a public link to the dashboard, no account
+    aegis termix install | remove
+    aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
+    aegis url | setup-link | version
+    aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli|browser]
+    aegis upgrade                copy this checkout over the installed copy, restart
+    aegis uninstall [--purge]
+
+USAGE
 }
 
 need_installed() { [ -f "$APP/aegis/server.mjs" ] || die "Aegis × Burrow is not installed (run: aegis install)"; NODE="$(find_node)" || die "Node.js is missing"; }
 
-case "${1:-help}" in
+# no command: the home screen in a terminal, the help elsewhere
+if [ $# -eq 0 ]; then
+  if [ -f "$APP/aegis/server.mjs" ] && interactive; then set -- home; else set -- help; fi
+fi
+case "$1" in
+  home) need_installed; cmd_home ;;
+  setup) need_installed; cmd_setup ;;
+  open) need_installed; cmd_open ;;
+  tunnels) need_installed; cmd_tunnels ;;
+  domain) shift; need_installed; cmd_domain "$@" ;;
+  passwd|password) need_installed; cmd_passwd ;;
   install) shift; cmd_install "$@" ;;
   upgrade) shift; cmd_install "$@" ;;
   update) shift; need_installed; cmd_update "$@" ;;
@@ -548,7 +973,7 @@ case "${1:-help}" in
   termix) shift; need_installed; cmd_termix "$@" ;;
   burrow) shift; need_installed; cmd_burrow "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
-  version|-v|--version) sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$SRC_DIR/package.json" | head -1 ;;
-  help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  version|-v|--version) src_version ;;
+  help|-h|--help) usage ;;
   *) die "unknown command $1 (see: aegis help)" ;;
 esac
