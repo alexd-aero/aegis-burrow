@@ -121,6 +121,15 @@ export function checkLock(lock, password) {
 }
 
 const now = () => Date.now();
+const DNS_COMMENT = "aegis (burrow tunnels)";
+// Do Cloudflare's and Google's public resolvers both answer for name?
+async function publicDnsAnswers(name) {
+  const ask = (url) => fetch(url, { headers: { Accept: "application/dns-json" }, signal: AbortSignal.timeout(5000) })
+    .then((r) => r.json()).then((j) => j.Status === 0 && (j.Answer || []).length > 0).catch(() => false);
+  const q = `?name=${encodeURIComponent(name)}&type=A`;
+  const [a, b] = await Promise.all([ask("https://cloudflare-dns.com/dns-query" + q), ask("https://dns.google/resolve" + q)]);
+  return a && b;
+}
 const minuteOf = (t) => Math.floor(t / 60000);
 const secondOf = (t) => Math.floor(t / 1000);
 
@@ -173,6 +182,12 @@ export class TunnelManager {
     this.saveTimer = setInterval(() => this.save(), 30000);
     this.healthTimer = setInterval(() => this.healthAll(), HEALTH_EVERY_MS);
     setTimeout(() => this.healthAll(), 1500);
+    // records still on their way to public DNS when we last stopped; leftovers
+    this.dnsAnswers = publicDnsAnswers;
+    this.bootTimer = setTimeout(() => {
+      for (const t of this.tunnels.values()) if (t.dns?.ok && t.dns.ready === false) this.watchDns(t.port);
+      this.sweepDns().catch((e) => this.log("tunnels: DNS sweep failed:", e.message));
+    }, 20000).unref?.();
   }
 
   // ------------------------------------------------------------- naming
@@ -400,12 +415,13 @@ export class TunnelManager {
     const t = this.get(port);
     if (!t) throw new Error("No such tunnel.");
     this.kick(port, null);
+    const host = this.hostFor(t.port);         // its name, while the tunnel (and its sub) still exists
     this.tunnels.delete(t.port);
     this.live.delete(t.port);
     try { if (existsSync(this.file(`favicons/${t.port}`))) unlinkSync(this.file(`favicons/${t.port}`)); } catch { /* ignore */ }
     this.save();
-    const dns = await this.unpublish(t.port);
-    this.log("tunnels: removed", t.port, "dns", dns);
+    const dns = await this.unpublish(t.port, host);
+    this.log("tunnels: removed", t.port, host || "", "dns", dns);
     return { removed: t.port, dns };
   }
 
@@ -417,14 +433,46 @@ export class TunnelManager {
     if (!this.domain) { t.dns = null; this.quick?.start(port); return; }
     try {
       t.dns = await this.dnsCreate(this.hostFor(port));
+      if (t.dns.created) { t.dns.ready = false; delete t.dns.created; this.watchDns(port); }
     } catch (e) {
       t.dns = { error: e.message };
       this.log("tunnels: DNS create failed for", port, e.message);
     }
   }
-  async unpublish(port) {
+  async unpublish(port, host) {
     if (!this.domain) { this.quick?.stop(port); return "none"; }
-    try { return await this.dnsDelete(this.hostFor(port)); } catch (e) { return "error: " + e.message; }
+    try { return await this.dnsDelete(host || this.hostFor(port)); } catch (e) { return "error: " + e.message; }
+  }
+  // A new name exists at Cloudflare within seconds, but a browser that asks for
+  // it too early is told "no such name" and believes it for up to 30 minutes.
+  // So the tunnel says "DNS on its way" until public resolvers answer for it.
+  watchDns(port) {
+    const t0 = now();
+    const tick = async () => {
+      const t = this.get(port);
+      if (!t?.dns?.ok || t.dns.ready !== false) return;
+      const name = t.dns.name;
+      if (await this.dnsAnswers(name)) {
+        t.dns.ready = true; t.dns.readyAt = now(); this.save();
+        this.log("tunnels:", name, "answers on public DNS after", Math.round((now() - t0) / 1000) + "s");
+        return;
+      }
+      if (now() - t0 > 15 * 60e3) { t.dns.ready = true; this.save(); return; }      // stop asking; it is surely there
+      setTimeout(tick, now() - t0 < 60e3 ? 3000 : 15000).unref?.();
+    };
+    setTimeout(tick, 1500).unref?.();
+  }
+  // Records Burrow made whose tunnel is gone (removed by an older version that
+  // looked for the wrong name): take them down.
+  async sweepDns() {
+    if (!this.domain) return;
+    const content = `${this.domain.tunnelId}.cfargotunnel.com`;
+    const mine = new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
+    for (const r of await this.cfApi("GET", "/dns_records?type=CNAME&per_page=1000")) {
+      if (r.content !== content || r.comment !== DNS_COMMENT || mine.has(r.name) || r.name === this.domain.mainHost) continue;
+      await this.cfApi("DELETE", `/dns_records/${r.id}`);
+      this.log("tunnels: removed a leftover DNS record:", r.name);
+    }
   }
   // A domain was just linked: every tunnel gets its record.
   async publishAll() {
@@ -832,12 +880,11 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     const rec = existing.find((r) => r.name === name);
     if (rec && rec.type === "CNAME" && rec.content === content && rec.proxied) return { id: rec.id, name, ok: true };
     if (rec) {
-      const r = await this.cfApi("PUT", `/dns_records/${rec.id}`, { type: "CNAME", name, content, proxied: true, ttl: 1 });
+      const r = await this.cfApi("PUT", `/dns_records/${rec.id}`, { type: "CNAME", name, content, proxied: true, ttl: 1, comment: DNS_COMMENT });
       return { id: r.id, name, ok: true };
     }
-    const r = await this.cfApi("POST", "/dns_records", { type: "CNAME", name, content, proxied: true, ttl: 1,
-                                                         comment: "aegis (burrow tunnels)" });
-    return { id: r.id, name, ok: true };
+    const r = await this.cfApi("POST", "/dns_records", { type: "CNAME", name, content, proxied: true, ttl: 1, comment: DNS_COMMENT });
+    return { id: r.id, name, ok: true, created: true };
   }
   async dnsDelete(name) {
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;
@@ -881,5 +928,5 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     });
   }
 
-  stop() { clearInterval(this.saveTimer); clearInterval(this.healthTimer); this.quick?.stopAll(); this.save(); }
+  stop() { clearInterval(this.saveTimer); clearInterval(this.healthTimer); clearTimeout(this.bootTimer); this.quick?.stopAll(); this.save(); }
 }

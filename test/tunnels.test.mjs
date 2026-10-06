@@ -19,6 +19,7 @@ function manager(records = {}) {
   };
   tm.detectScheme = async () => "http";
   tm.refreshFavicon = () => {}; tm.healthOne = () => {};
+  tm.dnsAnswers = async () => true;
   return { tm, dns };
 }
 
@@ -136,5 +137,37 @@ test("sites: an address of their own, never public", async () => {
     await assert.rejects(tm.update(70001, { sub: "" }), /address of its own/);
     assert.equal((await tm.update(70001, { site: "you.github.io/q" })).target, "https://you.github.io/q/");
     assert.equal(tm.get(70001).targetHost, "you.github.io");
+  } finally { tm.stop(); }
+});
+
+test("a renamed tunnel's record goes with it; leftovers are swept; DNS on its way", async () => {
+  const { tm, dns } = manager();
+  try {
+    let answers = false;
+    tm.dnsAnswers = async () => answers;
+    await tm.create({ port: 3000, sub: "grafana" });
+    assert.equal(tm.list()[0].dns.ready, false, "a brand-new name is on its way");
+    answers = true;
+    await new Promise((ok) => setTimeout(ok, 1700));
+    assert.equal(tm.list()[0].dns.ready, true, "until public DNS answers");
+    dns.length = 0;
+    await tm.remove(3000);
+    assert.ok(dns.includes(`GET /dns_records?name=${encodeURIComponent("grafana.example.com")}`), "removing looks up its own name, not the default");
+    // records Burrow made for tunnels that are gone; others are left alone
+    const C = "t-1.cfargotunnel.com", K = "aegis (burrow tunnels)";
+    await tm.create({ port: 4000 });
+    tm.cfApi = async (method, path) => {
+      dns.push(`${method} ${path}`);
+      return method === "GET" ? [
+        { id: "a", name: "db-test.example.com", content: C, comment: K },
+        { id: "b", name: "tunnel-4000-aegis.example.com", content: C, comment: K },
+        { id: "c", name: "aegis.example.com", content: C, comment: K },
+        { id: "d", name: "other.example.com", content: C, comment: "someone else's" },
+        { id: "e", name: "elsewhere.example.com", content: "x.cfargotunnel.com", comment: K },
+      ] : {};
+    };
+    dns.length = 0;
+    await tm.sweepDns();
+    assert.deepEqual(dns.filter((d) => d.startsWith("DELETE")), ["DELETE /dns_records/a"]);
   } finally { tm.stop(); }
 });

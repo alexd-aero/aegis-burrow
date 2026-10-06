@@ -110,6 +110,7 @@ function statusPill(t) {
   if (t.quick && t.quick.state === "error") return `<span class="pill err" title="${h(t.quick.error)}">no address</span>`;
   if (!t.url) return '<span class="pill warn"><i class="dot warn"></i>getting an address</span>';
   if (t.dns && t.dns.error) return `<span class="pill err" title="${h(t.dns.error)}">DNS error</span>`;
+  if (t.dns && t.dns.ready === false) return '<span class="pill warn" title="The name is reaching public DNS. Opening it before then can make your browser think it doesn\'t exist for a while."><i class="dot warn"></i>DNS on its way</span>';
   if (t.health.up === false) return '<span class="pill err"><i class="dot err"></i>target down</span>';
   if (t.health.up === null) return '<span class="pill">checking</span>';
   return `<span class="pill ok"><i class="dot ok"></i>live · ${fmtMs(t.health.ms)}</span>`;
