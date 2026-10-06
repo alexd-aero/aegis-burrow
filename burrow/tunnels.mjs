@@ -6,10 +6,12 @@
 //
 // With a linked domain (cloudflare.mjs) the address is
 //   https://tunnel-<PORT>-<label>.<zone>        e.g. tunnel-3000-aegis.example.com
-// through the same named Cloudflare tunnel as the dashboard. It is one level
-// under the zone, so Cloudflare's free certificate covers it. (The dotted
-// form tunnel-<PORT>.<label>.<zone> is accepted too, for zones whose
-// certificate covers two levels.)
+// through the same named Cloudflare tunnel as the dashboard, or a name of the
+// user's own choosing (t.sub):
+//   https://<sub>.<zone>                        e.g. grafana.example.com
+// Both are one level under the zone, so Cloudflare's free certificate covers
+// them. (The dotted form tunnel-<PORT>.<label>.<zone> is accepted too, for
+// zones whose certificate covers two levels.)
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -33,6 +35,7 @@ const MAX_CLIENTS = 500;        // per tunnel
 const HEALTH_EVERY_MS = 15000;
 const FAVICON_EVERY_MS = 6 * 3600 * 1000;
 // Never HTTP: not worth offering as a tunnel (ssh, smtp, dns, samba, ipp-less extras).
+const SUB_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3306, 5432, 6379, 27017]);
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
@@ -112,7 +115,8 @@ export class TunnelManager {
   }
   get mode() { return this.domain ? "domain" : "quick"; }
   hostFor(port) {
-    if (this.domain) return `tunnel-${port}-${this.label}.${this.parent}`;
+    const sub = this.tunnels.get(Number(port))?.sub;
+    if (this.domain) return sub ? `${sub}.${this.parent}` : `tunnel-${port}-${this.label}.${this.parent}`;
     return this.quick?.host(port) || null;
   }
   urlFor(port) { const h = this.hostFor(port); return h ? `https://${h}` : null; }
@@ -120,8 +124,9 @@ export class TunnelManager {
   matchHost(host) {
     const name = String(host || "").toLowerCase().split(":")[0];
     if (this.hostRe) {
+      for (const t of this.tunnels.values()) if (t.sub && name === `${t.sub}.${this.parent}`) return t.port;
       const m = this.hostRe.exec(name);
-      return m ? Number(m[1]) : null;
+      return m && !this.tunnels.get(Number(m[1]))?.sub ? Number(m[1]) : null;
     }
     const port = this.quick?.portOf(name);
     return port == null ? null : port;
@@ -172,6 +177,26 @@ export class TunnelManager {
   list() { return [...this.tunnels.values()].sort((a, b) => a.port - b.port).map((t) => this.summary(t)); }
   get(port) { return this.tunnels.get(Number(port)); }
 
+  // A name of the user's own for a tunnel: "grafana" -> grafana.<zone>.
+  // "" or null goes back to tunnel-PORT-<label>.
+  async checkSub(port, sub) {
+    if (sub == null || sub === "") return null;
+    sub = String(sub).trim().toLowerCase().replace(/\.$/, "");
+    if (this.parent && sub.endsWith("." + this.parent)) sub = sub.slice(0, -this.parent.length - 1);
+    if (!SUB_RE.test(sub)) throw new Error("A name is 1-40 letters, digits and dashes (not at the ends), like grafana.");
+    if (/^tunnel-\d+-/.test(sub)) throw new Error("Names that start with tunnel-PORT- are Burrow's own; pick another.");
+    if (this.domain && sub === this.label) throw new Error("That is the dashboard's own name.");
+    for (const t of this.tunnels.values()) if (t.port !== port && t.sub === sub) throw new Error(`tunnel-${t.port} already uses ${sub}.`);
+    if (this.domain) {
+      // never take over a record that isn't ours (mail, www, a website…)
+      const name = `${sub}.${this.parent}`;
+      const recs = await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`);
+      const other = recs.find((r) => !(r.type === "CNAME" && r.content === `${this.domain.tunnelId}.cfargotunnel.com`));
+      if (other) throw new Error(`${name} already has a ${other.type} record on Cloudflare. Pick another name, or delete that record first.`);
+    }
+    return sub;
+  }
+
   async create(spec) {
     const port = Number(spec.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Pick a port from 1 to 65535.");
@@ -181,7 +206,9 @@ export class TunnelManager {
     if (!/^[a-zA-Z0-9.\-:\[\]]{1,253}$/.test(targetHost)) throw new Error("That target host does not look right.");
     const targetPort = Number(spec.targetPort || port);
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error("Target port must be 1-65535.");
+    const sub = await this.checkSub(port, spec.sub);
     const t = {
+      sub,
       port, targetHost, targetPort,
       scheme: ["http", "https"].includes(spec.scheme) ? spec.scheme : await this.detectScheme(targetHost, targetPort),
       name: String(spec.name || "").slice(0, 60),
@@ -219,6 +246,15 @@ export class TunnelManager {
     }
     if (patch.block) { if (!t.blocked.includes(patch.block)) t.blocked.push(patch.block); this.kick(port, patch.block); }
     if (patch.unblock) t.blocked = t.blocked.filter((ip) => ip !== patch.unblock);
+    if ("sub" in patch) {
+      const sub = await this.checkSub(t.port, patch.sub);
+      if (sub !== (t.sub || null)) {
+        if (this.domain) await this.unpublish(t.port);          // the old name's record goes
+        t.sub = sub;
+        t.dns = null;
+        this.log("tunnels:", t.port, "is now at", this.hostFor(t.port) || `${sub || "its default name"} (once a domain is linked)`);
+      }
+    }
     if (patch.resetStats) { const rt = this.runtime(port); rt.stats = newStats(); rt.recent = []; rt.lat = []; rt.clients = new Map(); }
     if (this.domain && (!t.dns || t.dns.error)) await this.publish(port);
     this.save();
@@ -297,7 +333,7 @@ export class TunnelManager {
       port: t.port, url: this.urlFor(t.port), host: this.hostFor(t.port), mode: this.mode,
       quick: quick ? { state: quick.state, error: quick.error } : null,
       target: `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
-      scheme: t.scheme, name: t.name, title: rt.title, access: t.access, preserveHost: t.preserveHost,
+      scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
       health: { up: rt.health.up, ms: rt.health.ms, checked: rt.health.checked },

@@ -47,6 +47,7 @@ import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Pack } from "./pack.mjs";
+import { Updater } from "./updater.mjs";
 import { listIntegrations, getIntegration, publicView, forgeDesktops, forgeAction, addonView } from "./integrations.mjs";
 
 const settings = new Settings();
@@ -85,7 +86,7 @@ const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
                  "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "ui.css", "login.css",
-                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg"]) {
+                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
 const TYPES = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".html": "text/html; charset=utf-8" };
@@ -118,6 +119,8 @@ setTimeout(bridgeTick, 20000);
 setInterval(bridgeTick, 120000);
 const termix = new Termix({ settings, log });
 const pack = new Pack({ settings, termix, log, tunnels });
+// Updates from GitHub, by hand or by itself (Settings → Updates)
+const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo.stop(); process.exit(0); } });
 
 const mainHost = () => settings.get("domain")?.mainHost?.toLowerCase() || null;
 
@@ -511,6 +514,7 @@ function me(req) {
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
     serveo: serveo.state(),
+    update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
   };
 }
 
@@ -548,6 +552,7 @@ function savePrefs(p) {
                                         minutes: Math.max(1, Math.min(1440, Math.round(Number(p.lockout?.minutes) || 15))) };
   if ("modules" in p) burrow.setOn(p.modules?.burrow !== false);
   if ("serveo" in p) setServeo(p.serveo !== false);
+  if ("autoUpdate" in p) updater.setAuto(!!p.autoUpdate);
   settings.set(patch);
 }
 
@@ -614,6 +619,18 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/cf/forget" && req.method === "POST") return sendJson(res, 200, cloudflare.forgetCert());
     if (path === "/__gate/api/cf/link" && req.method === "POST") return sendJson(res, 200, await cloudflare.link((await readJsonBody(req)).label));
     if (path === "/__gate/api/cf/unlink" && req.method === "POST") return sendJson(res, 200, await cloudflare.unlink());
+    if (path === "/__gate/api/cf/rename" && req.method === "POST") return sendJson(res, 200, await cloudflare.rename((await readJsonBody(req)).label));
+
+    // Updates and the changelogs
+    if (path === "/__gate/api/update" && req.method === "GET") return sendJson(res, 200, updater.view());
+    if (path === "/__gate/api/update/check" && req.method === "POST") return sendJson(res, 200, await updater.check());
+    if (path === "/__gate/api/update/apply" && req.method === "POST") {
+      log("update: asked for by", sessionOf(req)?.u || "?");
+      const job = await updater.apply();
+      return sendJson(res, job.state === "error" ? 500 : 200, { ...updater.view(), job, error: job.error || undefined });
+    }
+    const cl = /^\/__gate\/api\/changelog\/([a-z-]{1,20})$/.exec(path);
+    if (cl && req.method === "GET") return sendJson(res, 200, await updater.changelog(cl[1]));
 
     // Termix
     if (path === "/__gate/api/termix" && req.method === "GET") return sendJson(res, 200, await termix.status());

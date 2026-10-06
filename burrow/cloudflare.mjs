@@ -313,6 +313,37 @@ export class Cloudflare {
     return this.state();
   }
 
+  // Give the dashboard another name on the same zone and tunnel: the new
+  // record first, then the old one goes. Tunnels named after the dashboard
+  // (tunnel-PORT-<name>) move with it; ones with a name of their own stay.
+  async rename(label) {
+    label = String(label || "").trim().toLowerCase();
+    if (!LABEL_RE.test(label)) throw new Error("Use 1-40 letters, digits and dashes (not at the ends).");
+    const d = this.domain();
+    if (!d) throw new Error("No domain is linked yet.");
+    if (!d.managed) throw new Error("This domain is routed by a cloudflared service Aegis does not manage; rename it there.");
+    const zoneName = d.zone?.name || d.mainHost.split(".").slice(1).join(".");
+    const mainHost = `${label}.${zoneName}`;
+    if (mainHost === d.mainHost) return this.state();
+    const cert = decodeCert(d.cert);
+    const target = `${d.tunnelId}.cfargotunnel.com`;
+    const existing = await cfApi(cert.token, "GET", `/zones/${cert.zoneId}/dns_records?name=${encodeURIComponent(mainHost)}`);
+    const rec = existing.find((x) => x.name === mainHost);
+    if (rec && !(rec.type === "CNAME" && rec.content === target)) throw new Error(`${mainHost} is already in use (a ${rec.type} record). Pick another name.`);
+    if (!rec) await cfApi(cert.token, "POST", `/zones/${cert.zoneId}/dns_records`, { type: "CNAME", name: mainHost, content: target, proxied: true, ttl: 1, comment: "aegis dashboard" });
+    await this.onDomain?.(d, "unlinking");
+    try {
+      const old = await cfApi(cert.token, "GET", `/zones/${cert.zoneId}/dns_records?name=${encodeURIComponent(d.mainHost)}`);
+      for (const r of old) if (r.type === "CNAME" && r.content === target) await cfApi(cert.token, "DELETE", `/zones/${cert.zoneId}/dns_records/${r.id}`);
+    } catch (e) { this.log("cf: could not remove the old dashboard record:", e.message); }
+    const domain = { ...d, mainHost, renamed: Date.now() };
+    this.settings.set({ domain });
+    this.startConnector();
+    this.log("cf: renamed", d.mainHost, "->", mainHost);
+    await this.onDomain?.(domain, "linked");
+    return this.state();
+  }
+
   writeConfig(d) {
     const o = this.origin();
     const req = o.insecure ? "    originRequest:\n      noTLSVerify: true\n" : "";

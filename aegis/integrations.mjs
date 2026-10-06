@@ -25,7 +25,7 @@
 // kind "selkies-forge" also gets a full panel: every desktop with its links,
 // start/stop/restart, and one-click publishing through a Aegis tunnel.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { APP, INTEGRATIONS_DIR, readJson } from "./config.mjs";
@@ -53,6 +53,17 @@ function cleanAddon(a) {
   };
 }
 
+// A Selkies Forge drop-in left behind is not a Forge: it counts while the
+// Forge keeps it fresh (every 20 s while it runs) or its install is still on
+// disk (it may just be stopped). Otherwise the Forge was removed, and Burrow
+// never offers to link with, or install, something that isn't here.
+function forgeStillHere(d) {
+  const age = Date.now() / 1000 - (Number(d.updated) || 0);
+  if (age < 15 * 60) return true;
+  const home = typeof d.home === "string" && d.home.startsWith("/") ? d.home : null;
+  return !!home && (existsSync(join(home, "app", "engine.py")) || existsSync(join(home, "engine.py")));
+}
+
 export function listIntegrations(dir = INTEGRATIONS_DIR) {
   let names = [];
   try { names = readdirSync(dir).filter((n) => n.endsWith(".json")); } catch { return []; }
@@ -63,6 +74,7 @@ export function listIntegrations(dir = INTEGRATIONS_DIR) {
       if (statSync(p).size > 128 * 1024) continue;
       const d = JSON.parse(readFileSync(p, "utf8"));
       if (!ID_RE.test(d.id || "") || n !== `${d.id}.json`) continue;
+      if (String(d.kind || d.id) === "selkies-forge" && !forgeStillHere(d)) continue;
       out.push({
         id: d.id, kind: String(d.kind || d.id).slice(0, 40), name: String(d.name || d.id).slice(0, 60),
         version: String(d.version || "").slice(0, 30), url: httpUrl(d.url), api: httpUrl(d.api),

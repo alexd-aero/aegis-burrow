@@ -143,10 +143,13 @@ function subtabs() {
   const a = S.addon, linked = !!(a && a.addon), upd = !!(a && a.addon && a.addon.update && a.addon.update.available);
   const b = S.bridge, dot = b ? { ok: "ok", warn: "warn", fail: "err", off: "idle" }[b.state] : linked ? "ok" : "idle";
   const installed = S.addons ? S.addons.filter((x) => x.installed).length : null;
+  // the Selkies Forge side only when a Forge is on this machine (or already runs us)
+  const forgeReal = S.integrations.some((i) => i.full) || !!(a && (a.forge || a.addon));
+  const forgeHere = forgeReal || S.view === "forge";
   return `<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
     <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}</button>
-    <button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${a || b ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>
+    ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
   </nav>`;
 }
 
@@ -489,7 +492,7 @@ function renderAddons() {
     </section>
     ${!list ? '<p class="muted">Loading…</p>' : list.length ? `<div class="grid">${list.map(adCard).join("")}</div>` : `
       <div class="card lit empty"><div class="big">${ICON.box}</div><h2>No addons yet</h2>
-        <p>Paste a repository link above, or add one the scan found. Selkies Forge is one: Burrow gives its dashboard an HTTPS address and its desktops a card.</p></div>`}`;
+        <p>Paste a repository link above, or add one the scan found.</p></div>`}`;
   const form = $("#adForm");
   form.addEventListener("submit", (e) => { e.preventDefault(); addAddon($("#adSrc").value, $("#adGo")); });
 }
@@ -591,6 +594,15 @@ function renderAddon() {
   const a = S.addon;
   if (!a) { app.innerHTML = `<div class="head"><div><h1>Burrow</h1><p>Loading…</p></div></div>${subtabs()}`; return; }
   const f = a.forge, ad = a.addon, man = a.manifest, c = a.control || { clients: [], activity: [] };
+  if (!f && !ad) {
+    // No Forge here: nothing to link, and nothing pushed on anyone.
+    app.innerHTML = `<div class="head"><div><h1>Burrow</h1><p>Selkies Forge, and linking it with Aegis × Burrow.</p></div></div>
+      ${subtabs()}
+      <section class="card panel ab-none"><img src="/__gate/logos/forge.svg" alt="" width="44" height="44">
+        <div><h3>Selkies Forge isn't on this machine</h3>
+        <p class="muted">That's fine: Aegis × Burrow works on its own, and there is nothing to link. If Selkies Forge is ever installed here, Burrow notices within a minute and this tab offers to connect the two.</p></div></section>`;
+    return;
+  }
   const upd = ad && ad.update, sum = f ? S.forgeSummary[f.id] : null;
   const forgeClient = c.clients.find((x) => x.id === "selkies-forge");
   const calls = c.clients.reduce((n, x) => n + x.calls, 0);
@@ -827,14 +839,19 @@ function openModal(html, onReady) {
   onReady?.(scrim);
 }
 
-function previewText(port) {
-  if (S.mode !== "domain") return `a random <b>https://….trycloudflare.com</b> address`;
+// "tunnel-PORT-aegis.example.com" -> "example.com" and "tunnel-3000-aegis"
+const zoneName = () => S.mode === "domain" && S.pattern ? S.pattern.split(".").slice(1).join(".") : "";
+const defaultLabel = (port) => (S.pattern.split(".")[0] || "tunnel-PORT").replace("PORT", port || "PORT");
+function previewText(port, sub) {
+  if (S.mode !== "domain") return `a random <b>https://….trycloudflare.com</b> address${sub ? `, then <b>https://${h(sub)}.your-domain</b> once a domain is linked` : ""}`;
+  if (sub) return `https://<b>${h(sub)}</b>.${h(zoneName())}`;
   const rest = S.pattern.replace(/^tunnel-PORT/, "");
   return `https://<b>tunnel-${h(port)}</b>${h(rest)}`;
 }
 
 async function tunnelForm(edit, preset) {
   const t = edit || { access: "login", targetHost: "127.0.0.1", scheme: "auto", preserveHost: false, ...(preset || {}) };
+  if (!S.pattern) { try { const r = await api("/__gate/api/tunnels"); S.mode = r.mode; S.pattern = r.pattern; } catch { /* the form still works */ } }
   openModal(`
     <h2>${edit ? `Edit tunnel-${t.port}` : "New tunnel"}</h2>
     <p>${edit ? "Change where it points or who can open it." : "Give a port its own HTTPS address. Login-protected unless you make it public."}</p>
@@ -846,6 +863,8 @@ async function tunnelForm(edit, preset) {
         <label class="field" style="width:120px"><span>Target port</span><input class="input mono" id="fTPort" inputmode="numeric" value="${edit ? t.targetPort : ""}" placeholder="same"></label>
       </div>
       <label class="field"><span>Name <span class="faint">(optional; the page title is used otherwise)</span></span><input class="input" id="fName" maxlength="60" value="${h(t.name || "")}"></label>
+      <label class="field"><span>Address <span class="faint">(optional; ${S.mode === "domain" ? "your own subdomain, empty for the default" : "used once a domain is linked"})</span></span>
+        <div class="addr"><input class="input mono" id="fSub" maxlength="40" value="${h(t.sub || "")}" placeholder="${h(S.mode === "domain" ? defaultLabel(t.port) : "grafana")}" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zoneName() || "your-domain")}</span></div></label>
       <div class="field"><span>Who can open it</span>
         <div class="seg" id="fAccess"><button type="button" data-v="login" class="${t.access !== "public" ? "on" : ""}">Login required</button><button type="button" data-v="public" class="${t.access === "public" ? "on" : ""}">Public</button></div></div>
       <details class="adv"><summary>Advanced</summary>
@@ -855,7 +874,7 @@ async function tunnelForm(edit, preset) {
         </div>
         <label class="row" style="gap:10px;margin-bottom:14px"><span class="switch"><input type="checkbox" id="fPreserve" ${t.preserveHost ? "checked" : ""}><i></i></span><span style="font-size:13px">Keep the tunnel's Host header <span class="faint">(for apps that need their public name)</span></span></label>
       </details>
-      ${edit ? "" : `<div class="preview" id="fPreview">${previewText("PORT")}</div>`}
+      <div class="preview" id="fPreview">${previewText(t.port || "PORT", t.sub)}</div>
       <div class="err-msg" id="fErr"></div>
       <div class="modal-actions"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="fGo">${edit ? "Save" : "Create tunnel"}</button></div>
     </form>`, (m) => {
@@ -865,8 +884,10 @@ async function tunnelForm(edit, preset) {
       access.v = b.dataset.v; m.querySelectorAll("#fAccess button").forEach((x) => x.classList.toggle("on", x === b));
     });
     const portEl = m.querySelector("#fPort");
-    const upd = () => { const p = (portEl?.value || "").trim(); const pv = m.querySelector("#fPreview"); if (pv) pv.innerHTML = previewText(p || "PORT"); };
+    const subEl = m.querySelector("#fSub");
+    const upd = () => { const p = edit ? t.port : (portEl?.value || "").trim(); const pv = m.querySelector("#fPreview"); if (pv) pv.innerHTML = previewText(p || "PORT", subEl.value.trim().toLowerCase()); };
     portEl?.addEventListener("input", upd);
+    subEl.addEventListener("input", upd);
     portEl?.focus();
     if (!edit) {
       (S.ports ? Promise.resolve({ ports: S.ports }) : api("/__gate/api/ports")).then(({ ports }) => {
@@ -892,7 +913,7 @@ async function tunnelForm(edit, preset) {
       const body = { targetHost: m.querySelector("#fHost").value.trim() || "127.0.0.1",
                      targetPort: m.querySelector("#fTPort").value.trim() || undefined,
                      name: m.querySelector("#fName").value.trim(), access: access.v,
-                     preserveHost: m.querySelector("#fPreserve").checked };
+                     preserveHost: m.querySelector("#fPreserve").checked, sub: subEl.value.trim().toLowerCase() || null };
       if (scheme !== "auto") body.scheme = scheme;
       try {
         let res;

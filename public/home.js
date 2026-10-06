@@ -1,7 +1,7 @@
 // The home page: one tile per app behind the gate. What shows, in what
 // order, under which name, and any links of your own are yours to set with
 // the gear (top right). Saved in data/state.json (home).
-import { $, h, api, post, toast, ICONS } from "./common.js";
+import { $, h, api, post, toast, ICONS, updateBanner } from "./common.js";
 
 const opts = $("#opts"), extra = $("#extra");
 const S = { me: null, draft: null, termixJob: false };
@@ -81,6 +81,7 @@ async function render() {
   $("#greet").textContent = home.greeting || "Unlocked";
   $("#tagline").textContent = home.tagline || "Where to?";
   document.body.dataset.bg = home.background || "grid";
+  if (!document.querySelector(".upd-banner")) updateBanner(me, opts);
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")
     : `<div class="card lit empty-home"><p>Every tile is hidden. Use ${GEAR} to bring some back.</p></div>`;

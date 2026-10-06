@@ -1,8 +1,11 @@
 // Settings: link a domain through Cloudflare, Termix, the login, connected apps.
-import { $, h, api, post, toast, ago, chrome, ICONS } from "./common.js";
+import { $, h, api, post, toast, ago, chrome, ICONS, UPD, updHero, verJump, runUpdate } from "./common.js";
 
 const app = $("#app");
-const S = { me: null, cf: null, termix: null, poll: null, busy: false };
+const S = { me: null, cf: null, termix: null, poll: null, busy: false,
+            label: null,          // the dashboard name being typed (kept across repaints)
+            renaming: false,      // the rename form for a linked domain is open
+            upd: null, log: "aegis-burrow", logs: {}, logErr: {} };
 
 const sec = (id, title, sub, body) => `<section class="card lit panel set" id="${id}">
   <div class="set-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ""}</div>${body}</section>`;
@@ -15,12 +18,20 @@ function domainBody() {
     const d = cf.domain, c = cf.connector;
     return `<div class="linked">
         <div class="kv-row"><span>Dashboard</span><a class="mono" href="https://${h(d.mainHost)}" target="_blank" rel="noopener">https://${h(d.mainHost)}</a></div>
-        <div class="kv-row"><span>Tunnels</span><span class="mono">tunnel-PORT-${h(d.mainHost)}</span></div>
+        <div class="kv-row"><span>Tunnels</span><span><span class="mono">tunnel-PORT-${h(d.mainHost)}</span> <span class="faint small">or a name of your own per tunnel (Burrow → a tunnel → Edit)</span></span></div>
         <div class="kv-row"><span>Connector</span>${!d.managed ? '<span class="pill">your own cloudflared service</span>'
           : c && c.running ? `<span class="pill ok"><i class="dot ok"></i>connected · post-quantum · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>not running</span>'}</div>
       </div>
       ${c && c.log && c.log.length ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
-      ${d.managed ? `<div class="row end"><button class="btn danger" data-act="unlink">Unlink ${h(d.mainHost)}</button></div>`
+      ${d.managed && S.renaming ? `<form id="renameForm" class="link-form" autocomplete="off">
+          <label class="field"><span>New name for the dashboard</span>
+            <div class="addr"><input class="input mono" id="label" value="${h(S.label ?? d.label)}" maxlength="40" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(d.zone)}</span></div></label>
+          <div class="preview" id="labelPreview"></div>
+          <p class="faint small">The old address stops working, so this page moves to the new one and you sign in there again. Tunnels named tunnel-PORT-… move with it; tunnels with a name of their own keep it.</p>
+          <div class="err-msg" id="linkErr"></div>
+          <div class="row end"><button type="button" class="btn ghost" data-act="rename-cancel">Cancel</button><button class="btn primary" id="linkGo">Rename</button></div>
+        </form>`
+      : d.managed ? `<div class="row end"><button class="btn" data-act="rename">Change the name</button><button class="btn danger" data-act="unlink">Unlink ${h(d.mainHost)}</button></div>`
         : '<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis only adds and removes the per-tunnel DNS records.</p>'}`;
   }
   if (!cf.cloudflared) {
@@ -29,10 +40,10 @@ function domainBody() {
   }
   if (cf.cert) {
     const zone = cf.cert.zone && cf.cert.zone.name;
-    return `<ol class="steps"><li class="done"><b>Cloudflare authorized</b><span>${zone ? `for <span class="mono">${h(zone)}</span>` : ""}</span></li><li class="on"><b>Pick the dashboard's name</b></li></ol>
+    return `<ol class="steps"><li class="done"><b>Cloudflare authorized</b><span>${zone ? `for <span class="mono">${h(zone)}</span>` : ""}</span></li><li class="on"><b>Pick the dashboard's name</b><span>Anything you like: aegis, home, private-termix…</span></li></ol>
       <form id="linkForm" class="link-form" autocomplete="off">
         <label class="field"><span>Name</span>
-          <div class="addr"><input class="input mono" id="label" value="aegis" maxlength="40" pattern="[a-z0-9-]+" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zone || "your-zone")}</span></div></label>
+          <div class="addr"><input class="input mono" id="label" value="${h(S.label ?? "aegis")}" maxlength="40" spellcheck="false" autocapitalize="none" placeholder="aegis"><span class="mono zone">.${h(zone || "your-zone")}</span></div></label>
         <div class="preview" id="labelPreview"></div>
         <div class="err-msg" id="linkErr"></div>
         <div class="row end"><button type="button" class="btn ghost" data-act="forget">Use another account</button><button class="btn primary" id="linkGo">Link domain</button></div>
@@ -49,10 +60,85 @@ function domainBody() {
       </div>`;
   }
   return `<p class="muted">Right now every tunnel gets a random <span class="mono">trycloudflare.com</span> name that changes when Aegis restarts.
-      Link a domain on your Cloudflare account and the dashboard lives at <span class="mono">aegis.your-domain</span>, every tunnel at
-      <span class="mono">tunnel-PORT-aegis.your-domain</span>, through one post-quantum Cloudflare tunnel that Aegis runs for you.</p>
+      Link a domain on your Cloudflare account and the dashboard lives at a name you pick (<span class="mono">aegis.your-domain</span>, or any other), every tunnel at
+      <span class="mono">tunnel-PORT-<i>name</i>.your-domain</span> or a subdomain of its own, through one post-quantum Cloudflare tunnel that Aegis runs for you.</p>
     ${l && l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
     <div class="row end"><button class="btn primary" data-act="login">${ICONS.globe} Connect Cloudflare</button></div>`;
+}
+
+// ------------------------------------------------------------------ updates
+const PROJECTS = [
+  { id: "aegis-burrow", name: "Aegis × Burrow", logo: "/__gate/logos/aegis-burrow.svg" },
+  { id: "selkies-forge", name: "Selkies Forge", logo: "/__gate/logos/forge.svg" },
+  { id: "weft", name: "Weft", logo: "/__gate/logos/weft.svg" },
+];
+function updatesBody() {
+  const u = S.upd;
+  let hero;
+  if (!u || S.checking) hero = updHero("checking", '<span class="uc-spin"></span>', "Checking for updates…", "Asking GitHub for the newest Aegis × Burrow.");
+  else if (S.updPhase) hero = updHero("checking", '<span class="uc-spin"></span>', `Updating to v${h(u.latest)}…`, h(S.updPhase));
+  else if (u.error && !u.latest) hero = updHero("bad", UPD.x, "Couldn't check", h(u.error))
+    + `<div class="uc-foot"><span class="spacer"></span><button class="uc-btn" data-act="upd-check">Try again</button></div>`;
+  else if (u.available) {
+    const n = u.entries.length;
+    hero = updHero("new", UPD.down, 'Update available <span class="new-chip">NEW</span>',
+      `Version <span class="uc-pill">v${h(u.latest)}</span> is ready to install${n > 1 ? ` · ${n} changes` : ""}. Login, domain, tunnels and addons are kept.`, verJump(u.current, u.latest))
+      + (n ? `<div class="uc-k">What's new</div><div class="uc-tl">${u.entries.map((e) => logItem(e, "new")).join("")}${logItem({ version: u.current, title: "the version you have", short: "" }, "cur")}</div>` : "")
+      + `<div class="uc-foot"><span class="uc-when">Checked ${h(ago(u.checked))}</span><span class="spacer"></span><button class="uc-btn" data-act="upd-check">Check again</button>
+         <button class="uc-go" data-act="upd-go">${UPD.down}<span>Update to v${h(u.latest)}</span></button></div>`;
+  } else hero = updHero("ok", UPD.check, "You're up to date",
+      `Aegis × Burrow <span class="uc-pill">v${h(u.current)}</span> is the newest version${u.justUpdated ? `, installed ${h(ago(u.justUpdated.at))} (from v${h(u.justUpdated.from)})` : ""}.`)
+      + `<div class="uc-foot"><span class="uc-when">Checked ${h(ago(u.checked))}${u.error ? ` · ${h(u.error)}` : ""}</span><span class="spacer"></span><button class="uc-btn" data-act="upd-check">Check again</button></div>`;
+  const auto = !!(u ? u.auto : S.me?.update?.auto);
+  return `<div class="upcheck">${hero}</div>
+    <div class="mod">
+      <span class="mod-ico" aria-hidden="true">↻</span>
+      <div class="grow"><b>Update by itself</b>
+        <p class="muted small">Checks GitHub every 6 hours and installs a new version as soon as it finds one. Aegis restarts for a few seconds; your login, domain, tunnels and addons are kept.
+        ${u && u.scope === "manual" ? "<br><b>This copy runs under your own supervisor</b>: it installs, and the new version starts the next time that restarts it." : ""}</p></div>
+      <label class="switch" title="${auto ? "On" : "Off"}"><input type="checkbox" id="autoUpd" ${auto ? "checked" : ""} aria-label="Update by itself"><i></i></label>
+    </div>`;
+}
+function logItem(e, kind) {
+  const sha = e.short ? (e.url ? `<a href="${h(e.url)}" target="_blank" rel="noopener" title="See the commit"><span class="uc-sha">${h(e.short)}</span></a>` : `<span class="uc-sha">${h(e.short)}</span>`) : "";
+  return `<div class="uc-item ${kind}"><span class="uc-node"></span>
+    ${e.version ? `<span class="uc-tag ${kind === "new" ? "new" : ""}">v${h(e.version)}</span>` : ""}
+    <div class="uc-msg"><b title="${h(e.title)}">${h(e.title || "(no message)")}</b><span>${h([e.date ? ago(e.date) : "", e.date ? new Date(e.date).toLocaleDateString() : ""].filter(Boolean).join(" · "))}</span></div>
+    ${kind === "cur" ? '<span class="uc-tag">installed</span>' : sha}</div>`;
+}
+function changelogBody() {
+  const id = S.log, L = S.logs[id], err = S.logErr[id];
+  const p = PROJECTS.find((x) => x.id === id);
+  const tabs = `<div class="seg cl-tabs" role="tablist">${PROJECTS.map((x) => `<button type="button" role="tab" data-act="log" data-id="${x.id}" class="${x.id === id ? "on" : ""}" aria-selected="${x.id === id}"><img src="${x.logo}" alt="">${h(x.name)}</button>`).join("")}</div>`;
+  let body;
+  if (err && !L) body = `<p class="err-msg">${h(err)}</p>`;
+  else if (!L) body = '<p class="muted"><i class="spin"></i> Loading…</p>';
+  else {
+    let cur = id === "aegis-burrow" ? S.me?.version : id === "selkies-forge" ? (S.me?.integrations || []).find((i) => i.full)?.version : null;
+    if (cur && !L.entries.some((e) => e.version === cur)) cur = null;
+    // newer than what is installed here: green; the installed one: marked
+    let seenCur = false;
+    body = `<div class="uc-tl cl">${L.entries.map((e) => {
+      const isCur = !!cur && e.version === cur && !seenCur;
+      if (isCur) seenCur = true;
+      return clItem(e, isCur ? "cur" : seenCur || !cur ? "" : "new");
+    }).join("")}</div>
+      <p class="faint small">From <a class="link" href="${h(L.repo)}/commits" target="_blank" rel="noopener">${h(L.repo.replace("https://", ""))}</a>${L.error ? ` · showing what was fetched earlier (${h(L.error)})` : ""}.</p>`;
+  }
+  return `${tabs}<div class="cl-head"><img src="${p.logo}" alt="" width="34" height="34"><div><b>${h(p.name)}</b><span class="faint small">${id === "weft" ? "the addon format both hosts share" : id === "selkies-forge" ? "desktops in the browser; an addon host" : "this gate and its tunnel engine"}</span></div></div>${body}`;
+}
+function clItem(e, kind) {
+  const sha = e.url ? `<a href="${h(e.url)}" target="_blank" rel="noopener" title="See the commit"><span class="uc-sha">${h(e.short)}</span></a>` : `<span class="uc-sha">${h(e.short)}</span>`;
+  return `<div class="uc-item ${kind}${e.version ? " rel" : ""}"><span class="uc-node"></span>
+    ${e.version ? `<span class="uc-tag ${kind === "new" ? "new" : ""}">v${h(e.version)}</span>` : ""}
+    <div class="uc-msg"><b title="${h(e.title)}">${h(e.title || "(no message)")}</b><span>${h(e.date ? `${new Date(e.date).toLocaleDateString()} · ${ago(e.date)}` : "")}</span>
+    ${e.body ? `<details class="cl-more"><summary>details</summary><pre>${h(e.body)}</pre></details>` : ""}</div>
+    ${kind === "cur" ? '<span class="uc-tag">installed</span>' : ""}${sha}</div>`;
+}
+function loadLog(id, force) {
+  if (S.logs[id] && !force) return;
+  api(`/__gate/api/changelog/${id}`).then((r) => { S.logs[id] = r; delete S.logErr[id]; render(); })
+    .catch((e) => { S.logErr[id] = e.message; render(); });
 }
 
 // ------------------------------------------------------------------ termix
@@ -150,6 +236,8 @@ function render() {
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div></div>
     ${sec("signin", "Sign-in", "What the sign-in page says, and how long a sign-in lasts.", signinBody())}
+    ${sec("updates", "Updates", "New versions of Aegis × Burrow, by hand or by themselves.", updatesBody())}
+    ${sec("changelog", "Changelog", "What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture.", changelogBody())}
     ${sec("modules", "Modules", "What Aegis runs besides the gate.", modulesBody())}
     ${sec("domain", "Domain", "Where the dashboard and the tunnels live.", domainBody())}
     ${sec("termix", "Termix", "Optional. A terminal for this machine and your servers, behind the same login.", termixBody())}
@@ -160,18 +248,38 @@ function render() {
 }
 
 function wireForms() {
-  const lf = $("#linkForm");
-  if (lf) {
+  const lf = $("#linkForm"), rf = $("#renameForm");
+  if (lf || rf) {
     const label = $("#label"), pv = $("#labelPreview");
-    const zone = S.cf?.cert?.zone?.name || "your-zone";
-    const upd = () => { const v = label.value.trim().toLowerCase() || "aegis"; pv.innerHTML = `Dashboard <b>https://${h(v)}.${h(zone)}</b><br>Tunnels &nbsp;<b>https://tunnel-PORT-${h(v)}.${h(zone)}</b>`; };
+    const zone = (rf ? S.cf?.domain?.zone : S.cf?.cert?.zone?.name) || "your-zone";
+    const upd = () => { S.label = label.value; const v = label.value.trim().toLowerCase() || "aegis"; pv.innerHTML = `Dashboard <b>https://${h(v)}.${h(zone)}</b><br>Tunnels &nbsp;<b>https://tunnel-PORT-${h(v)}.${h(zone)}</b>`; };
     label.addEventListener("input", upd); upd();
+  }
+  if (rf) rf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const v = $("#label").value.trim().toLowerCase(), b = $("#linkGo");
+    if (v === S.cf.domain.label) { S.renaming = false; S.label = null; render(); return; }
+    if (!confirm(`Move the dashboard to ${v}.${S.cf.domain.zone}? ${S.cf.domain.mainHost} stops working.`)) return;
+    b.disabled = true; b.innerHTML = '<i class="spin"></i> Renaming…'; S.busy = true;
+    try {
+      S.renamedFrom = S.cf.domain.mainHost;
+      S.cf = await post("/__gate/api/cf/rename", { label: v });
+      const was = location.hostname === S.renamedFrom;
+      toast(`The dashboard is now at ${S.cf.domain.mainHost}`);
+      S.renaming = false; S.label = null; S.busy = false;
+      // on the old address, this page has nowhere left to load from: move to the new one
+      if (was) setTimeout(() => { location.href = `https://${S.cf.domain.mainHost}/__gate/settings#domain`; }, 2500);
+      else load();
+    } catch (ex) { S.busy = false; $("#linkErr").textContent = ex.message; b.disabled = false; b.textContent = "Rename"; }
+  });
+  if (lf) {
+    const label = $("#label");
     lf.addEventListener("submit", async (e) => {
       e.preventDefault();
       const b = $("#linkGo"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Linking…'; S.busy = true;
       try {
         S.cf = await post("/__gate/api/cf/link", { label: label.value.trim().toLowerCase() });
-        S.busy = false; toast("Linked. The new address can take a minute to resolve."); load();
+        S.busy = false; S.label = null; toast("Linked. The new address can take a minute to resolve."); load();
       } catch (ex) { S.busy = false; $("#linkErr").textContent = ex.message; b.disabled = false; b.textContent = "Link domain"; }
     });
   }
@@ -199,6 +307,11 @@ function wireForms() {
       if (ms.checked) setTimeout(async () => { S.me = await fetch("/__gate/api/me", { credentials: "same-origin" }).then((r) => r.json()); render(); }, 6000);
     } catch (ex) { toast(ex.message); ms.checked = !ms.checked; }
   });
+  const au = $("#autoUpd");
+  if (au) au.addEventListener("change", async () => {
+    try { S.me = await post("/__gate/api/prefs", { autoUpdate: au.checked }); if (S.upd) S.upd.auto = au.checked; toast(au.checked ? "Updates install by themselves" : "Updates wait for you"); render(); }
+    catch (ex) { toast(ex.message); au.checked = !au.checked; }
+  });
   const pf = $("#pwForm");
   if (pf) pf.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -223,11 +336,20 @@ async function load() {
   try {
     const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
     S.me = me; S.cf = cf; S.termix = termix;
+    if (!S.upd && !S.checking) checkUpdates(false);
+    loadLog(S.log);
   } catch (e) { toast(e.message); }
   render();
   clearTimeout(S.poll);
   const waiting = (S.cf?.login && S.cf.login.waiting) || (S.termix?.job && S.termix.job.state === "running");
   S.poll = setTimeout(load, waiting ? 2000 : 8000);
+}
+
+async function checkUpdates(force) {
+  S.checking = true; render();
+  try { S.upd = force ? await post("/__gate/api/update/check") : await api("/__gate/api/update"); if (!S.upd.checked) S.upd = await post("/__gate/api/update/check"); }
+  catch (e) { S.upd = { error: e.message }; }
+  S.checking = false; render();
 }
 
 document.addEventListener("click", async (e) => {
@@ -242,6 +364,16 @@ document.addEventListener("click", async (e) => {
       load();
     } else if (act === "cancel-login") { await post("/__gate/api/cf/cancel"); load(); }
     else if (act === "forget") { await post("/__gate/api/cf/forget"); load(); }
+    else if (act === "upd-check") checkUpdates(true);
+    else if (act === "upd-go") {
+      if (!confirm(`Install Aegis × Burrow v${S.upd.latest}? It restarts for a few seconds; everything you set up is kept.`)) return;
+      S.updPhase = "Downloading…"; render();
+      try { await runUpdate((t) => { S.updPhase = t; render(); }); }
+      catch (ex) { S.updPhase = null; toast(ex.message); render(); }
+    }
+    else if (act === "log") { S.log = el.dataset.id; render(); loadLog(S.log); }
+    else if (act === "rename") { S.renaming = true; S.label = null; render(); $("#label")?.focus(); }
+    else if (act === "rename-cancel") { S.renaming = false; S.label = null; render(); }
     else if (act === "unlink") {
       if (!confirm(`Unlink ${S.cf.domain.mainHost}? Its DNS records and the Cloudflare tunnel are deleted, and tunnels go back to trycloudflare.com names.`)) return;
       el.disabled = true; el.innerHTML = '<i class="spin"></i> Unlinking…'; S.busy = true;

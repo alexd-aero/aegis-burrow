@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Weft">
+  <defs>
+    <linearGradient id="wt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e1932"/><stop offset="1" stop-color="#07060b"/></linearGradient>
+    <linearGradient id="wi" gradientUnits="userSpaceOnUse" x1="24" y1="0" x2="104" y2="0"><stop offset="0" stop-color="#a98bff"/><stop offset=".5" stop-color="#e3d8ff"/><stop offset="1" stop-color="#a98bff"/></linearGradient>
+    <radialGradient id="wg" cx=".5" cy="0" r=".9"><stop offset="0" stop-color="#c9b8ff" stop-opacity=".24"/><stop offset="1" stop-color="#c9b8ff" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#wt)"/>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#wg)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="29.5" fill="none" stroke="#fff" stroke-opacity=".14"/>
+  <path d="M38 6.5h52" stroke="#fff" stroke-opacity=".45" stroke-linecap="round"/>
+  <!-- the warp: three threads that stay put -->
+  <path d="M44 26v76M64 26v76M84 26v76" stroke="#efeaff" stroke-opacity=".9" stroke-width="7" stroke-linecap="round"/>
+  <!-- the weft: three threads woven across them, over and under -->
+  <path d="M30 44h68M30 64h68M30 84h68" stroke="#16122a" stroke-width="14"/>
+  <path d="M26 44h76M26 64h76M26 84h76" stroke="url(#wi)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M44 53v22" stroke="#16122a" stroke-width="14"/><path d="M64 33v22" stroke="#16122a" stroke-width="14"/><path d="M64 73v22" stroke="#16122a" stroke-width="14"/><path d="M84 53v22" stroke="#16122a" stroke-width="14"/>
+  <path d="M44 53v22" stroke="#efeaff" stroke-opacity=".9" stroke-width="7" stroke-linecap="round"/><path d="M64 33v22" stroke="#efeaff" stroke-opacity=".9" stroke-width="7" stroke-linecap="round"/><path d="M64 73v22" stroke="#efeaff" stroke-opacity=".9" stroke-width="7" stroke-linecap="round"/><path d="M84 53v22" stroke="#efeaff" stroke-opacity=".9" stroke-width="7" stroke-linecap="round"/>
+</svg>

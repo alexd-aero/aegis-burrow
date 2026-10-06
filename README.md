@@ -110,7 +110,7 @@ aegis doctor --fix
 Right after you create your login:
 
 - **Burrow comes with Aegis.** It's on by default. Untick it here, or switch it off later under *Settings → Modules*. Your tunnels are kept while it's off.
-- **Install the full pack?** Three cards, all ticked:
+- **Install the full pack?** Three cards. Termix and Burrow start ticked; **Selkies Forge is only installed if you tick it.** What's already here is found and linked rather than installed twice: Termix on any port (Burrow's port scan, or a page titled Termix), and a Forge that's already installed.
 
   | | |
   |---|---|
@@ -119,6 +119,7 @@ Right after you create your login:
   | **Burrow** | The engine, on. |
 
   Or press **I don't want to install this pack**. *Settings → Modules → Open the pack* brings this page back.
+- **Your own address (optional).** Connect Cloudflare and pick the dashboard's subdomain, any name you like (`aegis`, `home`, `private-termix`…), right on this page. Until then the dashboard answers on this machine and its serveo link; once a domain is linked, the serveo link sends visitors on to the domain.
 
 ## 🎛️ Your dashboard
 
@@ -139,15 +140,17 @@ Everything else lives in **Settings**:
 | Section | What you can change |
 |---|---|
 | **Sign-in** | The gate's name, the line on the sign-in page, how long a sign-in lasts, the lockout after wrong tries |
+| **Updates** | Check for a new version and install it in one click; **Update by itself** on or off |
+| **Changelog** | What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture, release by release |
 | **Modules** | Burrow on or off; the **serveo link** on or off (with its address); the pack |
-| **Domain** | Link a domain through Cloudflare, or unlink it |
+| **Domain** | Link a domain through Cloudflare with the subdomain you pick, **change that name later**, or unlink it |
 | **Termix** | Install, open, remove (its data volume is kept) |
 | **Login** | Your username and password |
 | **Connected apps** | Apps that plugged in |
 
 ## 🕳️ Burrow, the engine
 
-**Burrow → Tunnels** publishes any port at its own HTTPS address: `tunnel-3000-aegis.example.com` with a linked domain, or a random `trycloudflare.com` name without one. Every tunnel shows:
+**Burrow → Tunnels** publishes any port at its own HTTPS address: `tunnel-3000-aegis.example.com` with a linked domain, or a random `trycloudflare.com` name without one. **Or give it a subdomain of its own**: type `grafana` under *Address* when you create or edit a tunnel, and it lives at `grafana.example.com`. Burrow never takes over a DNS record that isn't its own (your `www`, your mail). Every tunnel shows:
 
 - live requests and bandwidth;
 - latency percentiles and status codes;
@@ -161,24 +164,36 @@ The engine also answers on **`data/control.sock`**, a Unix socket only your user
 burrow status                       # Burrow 2.0.0: on, 3 tunnels (3 live), tunnel-PORT on alexaero.dev
 burrow list
 burrow publish 8790 --name hello    # login-protected; --public for anyone
+burrow publish 3000 --sub grafana   # at grafana.<your zone>
+burrow rename 3000 dashboards       # move it; "" goes back to tunnel-3000-…
 burrow unpublish 8790
 burrow off / on                     # the module switch (tunnels are kept)
 ```
 
-**Your own domain:** *Settings → Domain → Connect Cloudflare* shows Cloudflare's own authorization link. Pick your zone and a name (default `aegis`). Burrow then:
+**Your own domain:** *Settings → Domain → Connect Cloudflare* (or the first-run page) shows Cloudflare's own authorization link. Pick your zone and a name: `aegis` is only the suggestion, type any other. Burrow then:
 
 1. creates a named tunnel;
 2. adds a proxied CNAME for `aegis.<zone>`;
 3. runs `cloudflared --post-quantum` itself.
 
-Each tunnel gets its own DNS record. *Unlink* removes the records, the tunnel and the files.
+Each tunnel gets its own DNS record. *Change the name* moves the dashboard to another subdomain on the same tunnel (tunnels named `tunnel-PORT-…` move with it), and *Unlink* removes the records, the tunnel and the files.
+
+## ⬆️ Updates
+
+<p align="center"><img src="docs/screenshots/update.png" alt="An update waiting: the green card" width="100%"></p>
+
+Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts and every 6 hours after that. When there is one, every page shows the green **Update available** card: the version going from → to, *What's new*, and **Update**. One click downloads it (size-capped, unpacked into a fresh folder, checked to be a whole, newer Aegis × Burrow), swaps it in for `app/` (the old code stays as `app.prev`), and restarts. The page waits and reloads itself, and greets you with **You're up to date**. Your login, domain, tunnels and addons live in `data/` and are kept.
+
+- **Update by itself** (*Settings → Updates*): install new versions as soon as they're found.
+- From a terminal: `aegis update` (or `aegis update --check`).
+- Installed as a Selkies Forge addon? Either works; the Forge's own *Update* does the same.
 
 ## 🔗 The serveo link
 
 Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it up. That gives the dashboard a public `https://…serveousercontent.com` address, from a key of its own in `data/serveo/` so the name stays the same.
 
-- **When it's on.** By default until a domain is linked, so a first run is reachable from your phone. After that it's off, unless you switch it on in *Settings → Modules* or with `aegis serveo on`.
-- **It goes through the same gate as everything else.** Serveo's visitors count as remote, never as "this machine", even though serveo connects from loopback. The setup page needs the one-time token, sign-in needs your password, and the lockout counts each visitor's real address.
+- **When it's on.** By default, so a first run is reachable from your phone. Once a domain is linked, opening the serveo link sends you on to the domain (signed in, if you were). Switch it off in *Settings → Modules* or with `aegis serveo off`.
+- **It goes through the same gate as everything else.** Serveo's visitors count as remote, never as "this machine", even though serveo connects from loopback. The setup page is open from anywhere for 30 minutes after Aegis starts (and from this machine any time; `aegis restart` opens the 30 minutes again), sign-in needs your password, and the lockout counts each visitor's real address.
 - **Serveo's warning page.** Serveo shows its own *Browser Warning* the first time a browser opens a free tunnel; press *Continue to Site*.
 
 ## 📦 Addons
@@ -218,7 +233,7 @@ Once linked:
 - **Burrow** lists the Forge among its own, with its desktops, their links, start/stop/restart and one-click **Publish**.
 - **The Forge's Open desktop** button offers each desktop's Burrow address.
 
-The **Selkies Forge** tab shows:
+The **Selkies Forge** tab only appears when a Forge is actually on this machine (its drop-in is fresh, or its install is on disk). Without one, Burrow never suggests installing it or adding it. The tab shows:
 
 - which version and commit the Forge installed, and whether it linked it;
 - whether an update waits, with **Update in Selkies Forge**;
@@ -264,11 +279,12 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 |---|---|
 | `aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start]` | Install, or upgrade in place (keeps the login, settings, tunnels and addons) |
 | `aegis upgrade` | Copy this checkout's code over the installed one and restart |
+| `aegis update [--check]` | Fetch the newest version from GitHub and install it (or just say whether there is one) |
 | `aegis uninstall [--purge]` | Stop and remove; `--purge` also deletes the login, tunnels and Cloudflare credentials |
 | `aegis start` · `stop` · `restart` · `status [--json]` · `url` · `setup-link` · `logs [-f]` | The usual |
 | `aegis termix install` · `remove` | Termix in Docker, behind the gate |
 | `aegis doctor [--fix]` | Check (and fetch) Node.js and cloudflared; check Docker |
-| `aegis burrow …` = `burrow …` | `status` · `list` · `on` · `off` · `publish PORT [--name N] [--public] [--host H]` · `unpublish PORT` |
+| `aegis burrow …` = `burrow …` | `status` · `list` · `on` · `off` · `publish PORT [--name N] [--sub NAME] [--public] [--host H]` · `rename PORT NAME` · `unpublish PORT` |
 
 </details>
 

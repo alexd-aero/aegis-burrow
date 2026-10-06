@@ -3,6 +3,7 @@
 #
 #   aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start]
 #   aegis upgrade                    copy this checkout's code over the installed one, restart
+#   aegis update [--check]           fetch the newest version from GitHub and install it
 #   aegis uninstall [--purge]        stop and remove; --purge also deletes data and the login
 #   aegis start | stop | restart
 #   aegis status [--json]
@@ -11,7 +12,7 @@
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared
 #   aegis serveo on | off | url        a public https link to the dashboard (serveo.net)
 #   aegis burrow status | list | on | off
-#   aegis burrow publish PORT [--name N] [--public] [--host H]
+#   aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]
 #   aegis burrow unpublish PORT      Burrow, the tunnel engine (also: burrow …)
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
@@ -491,17 +492,38 @@ cmd_burrow() {
       out="$(burrow_call POST /module "{\"burrow\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"
       ok "Burrow is $1" ;;
     publish)
-      local port="${2:-}" name="" access=login host=127.0.0.1; shift 2 || true
-      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--public] [--host H]"
-      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --public) access=public ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
-      out="$(burrow_call POST /tunnels "$("$NODE" -e 'const [p,n,a,h]=process.argv.slice(1);process.stdout.write(JSON.stringify({port:+p,targetHost:h,targetPort:+p,name:n,access:a}))' "$port" "$name" "$access" "$host")")" || die "$out"
+      local port="${2:-}" name="" access=login host=127.0.0.1 sub=""; shift 2 || true
+      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--sub NAME] [--public] [--host H]"
+      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --public) access=public ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
+      out="$(burrow_call POST /tunnels "$("$NODE" -e 'const [p,n,a,h,s]=process.argv.slice(1);process.stdout.write(JSON.stringify({port:+p,targetHost:h,targetPort:+p,name:n,access:a,sub:s||null}))' "$port" "$name" "$access" "$host" "$sub")")" || die "$out"
       ok "published: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way: aegis burrow list)")' "$out")" ;;
     unpublish)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow unpublish PORT"
       out="$(burrow_call DELETE "/tunnels/$2")" || die "$out"
       ok "tunnel $2 removed" ;;
-    *) die "aegis burrow status | list | on | off | publish PORT | unpublish PORT" ;;
+    rename)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow rename PORT NAME   (NAME \"\" goes back to tunnel-PORT-…)"
+      out="$(burrow_call PATCH "/tunnels/$2" "$("$NODE" -e 'process.stdout.write(JSON.stringify({sub:process.argv[1]||null}))' "${3:-}")")" || die "$out"
+      ok "tunnel $2: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way)")' "$out")" ;;
+    *) die "aegis burrow status | list | on | off | publish PORT | unpublish PORT | rename PORT NAME" ;;
   esac
+}
+
+# aegis update: the newest Aegis × Burrow from GitHub, installed over this one
+cmd_update() {
+  local repo="${AEGIS_REPO:-alexd-aero/aegis-burrow}" cur latest
+  cur="$(json_get "$APP/package.json" version)"
+  latest="$(curl -fsSL "https://raw.githubusercontent.com/$repo/main/package.json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$latest" ] || die "could not reach GitHub"
+  if [ "$cur" = "$latest" ] || ver_ge "$cur" "$latest"; then ok "up to date ($cur)"; return 0; fi
+  say "update available: $cur -> $latest"
+  [ "${1:-}" = "--check" ] && return 0
+  local tmp; tmp="$(mktemp -d)"
+  curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/main" | tar -xz -C "$tmp" || { rm -rf "$tmp"; die "download failed"; }
+  local src; src="$(ls -d "$tmp"/*/ | head -1)"
+  [ -x "$src/bin/aegis" ] && [ -f "$src/aegis/server.mjs" ] || { rm -rf "$tmp"; die "the download does not look like Aegis × Burrow"; }
+  AEGIS_HOME="$AEGIS_HOME" "$src/bin/aegis" upgrade || { rm -rf "$tmp"; die "upgrade failed"; }
+  rm -rf "$tmp"
 }
 
 need_installed() { [ -f "$APP/aegis/server.mjs" ] || die "Aegis × Burrow is not installed (run: aegis install)"; NODE="$(find_node)" || die "Node.js is missing"; }
@@ -509,6 +531,7 @@ need_installed() { [ -f "$APP/aegis/server.mjs" ] || die "Aegis × Burrow is not
 case "${1:-help}" in
   install) shift; cmd_install "$@" ;;
   upgrade) shift; cmd_install "$@" ;;
+  update) shift; need_installed; cmd_update "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   start|stop|restart) need_installed; svc "$1"; [ "$1" = stop ] || wait_healthy || die "not answering yet; see: aegis logs"; ok "$1 done" ;;
   status) shift; cmd_status "$@" ;;
@@ -526,6 +549,6 @@ case "${1:-help}" in
   burrow) shift; need_installed; cmd_burrow "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   version|-v|--version) sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$SRC_DIR/package.json" | head -1 ;;
-  help|-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command $1 (see: aegis help)" ;;
 esac

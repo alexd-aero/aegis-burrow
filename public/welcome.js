@@ -1,10 +1,13 @@
 // First run, after the login exists: Burrow is built in (and can go), and
 // the full pack (Selkies Forge, Termix with its own login, Burrow) is offered,
-// each part optional, or not at all.
+// each part optional, or not at all. Selkies Forge is never ticked for you:
+// it is a big install, and only goes on when someone asks for it. A domain
+// (Cloudflare, with the subdomain you pick) can be linked here too.
 import { $, h, api, post, toast } from "./common.js";
 
 const app = $("#app");
-const S = { pick: { forge: true, termix: true, burrow: true }, status: null, poll: null };
+const S = { pick: { forge: false, termix: true, burrow: true }, status: null, poll: null,
+            cf: null, cfPoll: null, label: null, linking: false };
 
 const ICON = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
@@ -52,6 +55,7 @@ function picker() {
           <label class="field grow"><span>Password <span class="faint">(8+)</span></span><input class="input" id="txPass" type="password" autocomplete="new-password"></label>
         </div></div>
     </form>
+    <section class="card lit dom-card" id="dom"></section>
     <div class="err-msg" id="pkErr"></div>
     <div class="pk-actions">
       <button class="btn primary big" id="pkGo">Install the pack</button>
@@ -73,7 +77,52 @@ function progress() {
     <div class="pk-head"><h1>${done ? (j.state === "done" ? "Your pack is ready" : "Mostly done") : "Installing your pack…"}</h1>
       <p>${done ? "Everything below can be changed later in Settings." : "This page follows along; you can also leave and come back."}</p></div>
     <div class="pr-list">${j.steps.map(row).join("")}</div>
-    ${done ? `<div class="pk-actions"><a class="btn primary big" href="/">Go to the dashboard ${ICON.arrow}</a></div>` : ""}`;
+    ${done ? `<section class="card lit dom-card" id="dom"></section><div class="pk-actions"><a class="btn primary big" href="/">Go to the dashboard ${ICON.arrow}</a></div>` : ""}`;
+  if (done) domain();
+}
+
+// ------------------------------------------------------------------ your own address
+// The same three steps as Settings → Domain: authorize Cloudflare, pick the
+// dashboard's subdomain (any name: aegis, home, private-termix…), link.
+function domainHtml() {
+  const cf = S.cf;
+  const top = `<img src="/__gate/logos/aegis-burrow.svg" alt="" width="40" height="40"><div class="grow"><b>Your own address <span class="faint">(optional)</span></b>`;
+  if (!cf) return `${top}<p class="muted">Loading…</p></div>`;
+  if (cf.domain) return `${top}<p>The dashboard lives at <a class="link mono" href="https://${h(cf.domain.mainHost)}" target="_blank" rel="noopener">https://${h(cf.domain.mainHost)}</a>, and every tunnel under <span class="mono">${h(cf.domain.zone)}</span>. Rename it any time in Settings → Domain.</p></div><span class="pill ok">linked</span>`;
+  if (!cf.cloudflared) return `${top}<p class="muted">Needs cloudflared: run <span class="mono">aegis doctor --fix</span> on this machine, then link a domain in Settings → Domain.</p></div>`;
+  if (cf.cert) {
+    const zone = (cf.cert.zone && cf.cert.zone.name) || "your-zone";
+    const v = (S.label ?? "aegis");
+    return `${top}<p>Cloudflare is authorized for <span class="mono">${h(zone)}</span>. Pick the dashboard's name: anything you like.</p>
+      <form id="domForm" class="dom-form" autocomplete="off">
+        <div class="addr"><input class="input mono" id="domLabel" value="${h(v)}" maxlength="40" spellcheck="false" autocapitalize="none" placeholder="aegis" aria-label="Subdomain"><span class="mono zone">.${h(zone)}</span></div>
+        <button class="btn primary" id="domGo"${S.linking ? " disabled" : ""}>${S.linking ? '<i class="spin"></i> Linking…' : "Link"}</button>
+      </form>
+      <div class="preview" id="domPv"></div><div class="err-msg" id="domErr"></div></div>`;
+  }
+  const l = cf.login;
+  if (l && (l.url || l.waiting)) return `${top}<p>Open the link, sign in to Cloudflare and pick your domain. This card moves on by itself.</p>
+      <div class="row"><a class="btn primary" href="${h(l.url)}" target="_blank" rel="noopener">Open the Cloudflare authorization</a><span class="muted small"><i class="spin"></i> waiting…</span></div></div>`;
+  return `${top}<p>Right now the dashboard answers on this machine (and its serveo link). Link a domain on your Cloudflare account and it gets <span class="mono"><i>name</i>.your-domain</span>, with the name you pick; tunnels get addresses under it too.</p>
+    ${l && l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
+    <div class="row"><button type="button" class="btn" id="domLogin">Connect Cloudflare</button></div></div>`;
+}
+async function domain() {
+  clearTimeout(S.cfPoll);
+  const el = $("#dom");
+  if (!el) return;
+  try { S.cf = await api("/__gate/api/cf"); } catch { /* shown as loading */ }
+  const typing = document.activeElement && document.activeElement.id === "domLabel";
+  if (!typing && !S.linking) {
+    el.innerHTML = domainHtml();
+    const inp = $("#domLabel");
+    if (inp) {
+      const zone = S.cf.cert.zone?.name || "your-zone";
+      const pv = () => { S.label = inp.value; $("#domPv").innerHTML = `https://<b>${h(inp.value.trim().toLowerCase() || "aegis")}</b>.${h(zone)}`; };
+      inp.addEventListener("input", pv); pv();
+    }
+  }
+  if (!S.cf?.domain) S.cfPoll = setTimeout(domain, S.cf?.login?.waiting ? 2000 : 8000);
 }
 
 async function load() {
@@ -81,11 +130,28 @@ async function load() {
   if (S.status.job) { progress(); if (S.status.job.state === "running") { clearTimeout(S.poll); S.poll = setTimeout(load, 1500); } return; }
   if (S.status.decided && !new URLSearchParams(location.search).has("again")) { location.replace("/"); return; }
   picker();
+  domain();
 }
+
+document.addEventListener("submit", async (e) => {
+  if (e.target.id !== "domForm") return;
+  e.preventDefault();
+  const label = $("#domLabel").value.trim().toLowerCase();
+  S.linking = true; $("#domGo").disabled = true; $("#domGo").innerHTML = '<i class="spin"></i> Linking…';
+  try { S.cf = await post("/__gate/api/cf/link", { label }); S.label = null; toast(`Linked: https://${S.cf.domain.mainHost}`); }
+  catch (ex) { S.linking = false; $("#domErr").textContent = ex.message; $("#domGo").disabled = false; $("#domGo").textContent = "Link"; return; }
+  S.linking = false; domain();
+});
 
 document.addEventListener("click", async (e) => {
   const p = e.target.closest("[data-pick]");
-  if (p) { S.txUser = $("#txUser")?.value; S.pick[p.dataset.pick] = !S.pick[p.dataset.pick]; picker(); return; }
+  if (p) { S.txUser = $("#txUser")?.value; S.pick[p.dataset.pick] = !S.pick[p.dataset.pick]; picker(); domain(); return; }
+  if (e.target.closest("#domLogin")) {
+    const b = e.target.closest("#domLogin"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Asking Cloudflare…';
+    try { const r = await post("/__gate/api/cf/login"); window.open(r.url, "_blank", "noopener"); } catch (ex) { toast(ex.message); }
+    domain();
+    return;
+  }
   if (e.target.closest("#pkSkip")) {
     await post("/__gate/api/pack", { skip: true }).catch((ex) => toast(ex.message));
     location.replace("/");
