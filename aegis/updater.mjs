@@ -1,7 +1,8 @@
 // Updates: Aegis × Burrow keeps itself current, and shows what changed.
 //
 //   check()     asks GitHub for main's package.json; a higher version there
-//               means an update. Every 6 hours, and when someone asks.
+//               means an update. Every 30 minutes, when a page opens (fresh(),
+//               at most every two minutes), and when someone asks.
 //   apply()     downloads main as a .tar.gz (burrow/archive.mjs: size caps, no
 //               escaping paths), checks it is a whole Aegis × Burrow of that
 //               version, swaps it in for app/ (the old one stays as app.prev),
@@ -32,7 +33,8 @@ const OWN = REPOS["aegis-burrow"].repo;
 const UA = `aegis-burrow/${VERSION} (+https://github.com/${OWN})`;
 const MIRROR = process.env.AEGIS_UPDATE_MIRROR?.replace(/\/$/, "");
 const RAW = MIRROR || "https://raw.githubusercontent.com", CODELOAD = MIRROR || "https://codeload.github.com";
-const CHECK_EVERY = 6 * 3600 * 1000;
+const CHECK_EVERY = 30 * 60 * 1000;      // in the background; a page that opens checks sooner (fresh())
+const FRESH = 2 * 60 * 1000;             // a check younger than this is good enough for a page
 const LOG_TTL = 3600 * 1000;
 const newer = (a, b) => { const x = versionTuple(a), y = versionTuple(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
 
@@ -83,6 +85,14 @@ export class Updater {
     } catch { /* noted in state */ }
     this.timer = setTimeout(() => this.tick(), CHECK_EVERY);
     this.timer.unref?.();
+  }
+
+  // A check no older than FRESH: what a page asks for when it opens, so a
+  // new version shows up right away. Concurrent callers share one request.
+  fresh() {
+    if (this.state.checked && Date.now() - this.state.checked < FRESH) return Promise.resolve(this.view());
+    if (!this.pending) this.pending = this.check().finally(() => { this.pending = null; });
+    return this.pending;
   }
 
   async check() {

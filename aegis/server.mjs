@@ -622,7 +622,7 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/cf/rename" && req.method === "POST") return sendJson(res, 200, await cloudflare.rename((await readJsonBody(req)).label));
 
     // Updates and the changelogs
-    if (path === "/__gate/api/update" && req.method === "GET") return sendJson(res, 200, updater.view());
+    if (path === "/__gate/api/update" && req.method === "GET") return sendJson(res, 200, url.searchParams.has("fresh") ? await updater.fresh() : updater.view());
     if (path === "/__gate/api/update/check" && req.method === "POST") return sendJson(res, 200, await updater.check());
     if (path === "/__gate/api/update/apply" && req.method === "POST") {
       log("update: asked for by", sessionOf(req)?.u || "?");

@@ -50,6 +50,7 @@ export async function chrome(active) {
   const burrow = document.querySelector('[data-nav="tunnels"]');
   if (burrow && !me.modules?.burrow && active !== "tunnels") burrow.hidden = true;
   updateBanner(me, document.querySelector("main"));
+  freshUpdate(me, document.querySelector("main"));
   return me;
 }
 
@@ -90,6 +91,18 @@ export async function runUpdate(onPhase) {
 
 const seen = (k) => { try { return localStorage.getItem(k) === "1"; } catch { return false; } };
 const hide = (k) => { try { localStorage.setItem(k, "1"); } catch { /* private window */ } };
+
+// Ask the gate for a check no older than two minutes, then redraw the banner:
+// a new version shows up as soon as the page opens, not hours later.
+export async function freshUpdate(me, before) {
+  if (!me || !me.update) return;
+  try {
+    const u = await api("/__gate/api/update?fresh=1");
+    const was = me.update;
+    me.update = { ...was, current: u.current, latest: u.latest, available: u.available, checked: u.checked, title: u.title, auto: u.auto, justUpdated: u.justUpdated };
+    if (u.available !== was.available || u.latest !== was.latest) updateBanner(me, before);
+  } catch { /* offline: the banner stays as it was */ }
+}
 
 // The banner: an update waiting, or the one that just happened.
 export function updateBanner(me, before) {

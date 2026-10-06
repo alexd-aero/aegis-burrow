@@ -125,7 +125,7 @@ Right after you create your login:
 
 <p align="center"><img src="docs/screenshots/home.png" alt="The home page" width="49%"> <img src="docs/screenshots/customize.png" alt="Customize the dashboard" width="49%"></p>
 
-The **gear** on the home page opens *Customize the dashboard*:
+The **gear** on the home page opens **Settings**. There, *Sign-in → Customize the home page* opens *Customize the dashboard*:
 
 - greeting and tagline;
 - two or three columns;
@@ -182,7 +182,7 @@ Each tunnel gets its own DNS record. *Change the name* moves the dashboard to an
 
 <p align="center"><img src="docs/screenshots/update.png" alt="An update waiting: the green card" width="100%"></p>
 
-Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts and every 6 hours after that. When there is one, every page shows the green **Update available** card: the version going from → to, *What's new*, and **Update**. One click downloads it (size-capped, unpacked into a fresh folder, checked to be a whole, newer Aegis × Burrow), swaps it in for `app/` (the old code stays as `app.prev`), and restarts. The page waits and reloads itself, and greets you with **You're up to date**. Your login, domain, tunnels and addons live in `data/` and are kept.
+Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts, every 30 minutes after that, and whenever a page opens (when the last check is more than two minutes old), so a new version shows up right away. When there is one, every page shows the green **Update available** card: the version going from → to, *What's new*, and **Update**. One click downloads it (size-capped, unpacked into a fresh folder, checked to be a whole, newer Aegis × Burrow), swaps it in for `app/` (the old code stays as `app.prev`), and restarts. The page waits and reloads itself, and greets you with **You're up to date**. Your login, domain, tunnels and addons live in `data/` and are kept.
 
 - **Update by itself** (*Settings → Updates*): install new versions as soon as they're found.
 - From a terminal: `aegis update` (or `aegis update --check`).

@@ -1,7 +1,8 @@
 // The home page: one tile per app behind the gate. What shows, in what
 // order, under which name, and any links of your own are yours to set with
-// the gear (top right). Saved in data/state.json (home).
-import { $, h, api, post, toast, ICONS, updateBanner } from "./common.js";
+// Settings → Customize the home page (/?customize=1; the gear opens Settings).
+// Saved in data/state.json (home).
+import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate } from "./common.js";
 
 const opts = $("#opts"), extra = $("#extra");
 const S = { me: null, draft: null, termixJob: false };
@@ -82,6 +83,7 @@ async function render() {
   $("#tagline").textContent = home.tagline || "Where to?";
   document.body.dataset.bg = home.background || "grid";
   if (!document.querySelector(".upd-banner")) updateBanner(me, opts);
+  if (!S.freshAsked) { S.freshAsked = true; freshUpdate(me, opts); }
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")
     : `<div class="card lit empty-home"><p>Every tile is hidden. Use ${GEAR} to bring some back.</p></div>`;
@@ -210,7 +212,6 @@ async function save() {
 
 document.addEventListener("input", (e) => { if (e.target.closest(".cz")) readInputs(); });
 document.addEventListener("click", async (e) => {
-  if (e.target.closest("#gear")) { openPanel(); return; }
   const seg = e.target.closest("[data-seg] button");
   if (seg && S.draft) { const k = seg.parentElement.dataset.seg; S.draft[k] = k === "columns" ? Number(seg.dataset.v) : seg.dataset.v; repaint(); return; }
   const cz = e.target.closest("[data-cz]");
@@ -246,4 +247,7 @@ document.addEventListener("click", async (e) => {
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.scrim) closePanel(); });
 
-render();
+render().then(() => {
+  // Settings → Customize the home page lands here
+  if (new URLSearchParams(location.search).has("customize")) { history.replaceState(null, "", "/"); openPanel(); }
+});

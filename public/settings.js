@@ -95,7 +95,7 @@ function updatesBody() {
     <div class="mod">
       <span class="mod-ico" aria-hidden="true">↻</span>
       <div class="grow"><b>Update by itself</b>
-        <p class="muted small">Checks GitHub every 6 hours and installs a new version as soon as it finds one. Aegis restarts for a few seconds; your login, domain, tunnels and addons are kept.
+        <p class="muted small">Checks GitHub every 30 minutes (and whenever a page opens) and installs a new version as soon as it finds one. Aegis restarts for a few seconds; your login, domain, tunnels and addons are kept.
         ${u && u.scope === "manual" ? "<br><b>This copy runs under your own supervisor</b>: it installs, and the new version starts the next time that restarts it." : ""}</p></div>
       <label class="switch" title="${auto ? "On" : "Off"}"><input type="checkbox" id="autoUpd" ${auto ? "checked" : ""} aria-label="Update by itself"><i></i></label>
     </div>`;
@@ -214,7 +214,7 @@ function signinBody() {
         <label class="field grow"><span>Lock out after <span class="faint">(wrong tries)</span></span><input class="input" id="siTries" type="number" min="3" max="50" value="${h(me.lockout?.attempts || 5)}"></label>
         <label class="field grow"><span>…for <span class="faint">(minutes)</span></span><input class="input" id="siMins" type="number" min="1" max="1440" value="${h(me.lockout?.minutes || 15)}"></label>
       </div>
-      <div class="row end"><span class="faint small grow">The dashboard's tiles, greeting and background: the gear on the home page.</span><button class="btn" id="siGo">Save</button></div>
+      <div class="row end"><a class="btn ghost" href="/?customize=1">Customize the home page</a><span class="grow"></span><button class="btn" id="siGo">Save</button></div>
     </form>`;
 }
 
@@ -348,7 +348,7 @@ async function load() {
 
 async function checkUpdates(force) {
   S.checking = true; render();
-  try { S.upd = force ? await post("/__gate/api/update/check") : await api("/__gate/api/update"); if (!S.upd.checked) S.upd = await post("/__gate/api/update/check"); }
+  try { S.upd = force ? await post("/__gate/api/update/check") : await api("/__gate/api/update?fresh=1"); }
   catch (e) { S.upd = { error: e.message }; }
   S.checking = false; render();
 }
