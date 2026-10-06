@@ -640,8 +640,32 @@ export class Addons {
       const mj = await git(["show", `${remote}:${(sub ? sub + "/" : "") + MANIFEST}`], { cwd: repo, timeout: 60 });
       try { out.remote.version = mj.code === 0 ? String(JSON.parse(mj.out).version || "").slice(0, 30) : ""; } catch { out.remote.version = ""; }
     } else out.remote = { commit: remote, short: remote.slice(0, 7) };
-    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null } });
+    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null, count: same ? 0 : (out.commits || []).length } });
     return out;
+  }
+
+  // Check every installed addon fetched from a link (git or archive) whose last
+  // check is older than maxAge, one at a time; a check already running is shared.
+  checkAll(maxAge = 6 * 3600e3) {
+    if (this.checking) return this.checking;
+    this.checking = (async () => {
+      for (const rec of Object.values(this.load())) {
+        if (!rec.installed || !["git", "archive"].includes(rec.source?.kind)) continue;
+        if (Date.now() - (rec.remote?.checked || 0) < maxAge) continue;
+        if ([...this.jobs.values()].some((j) => j.aid === rec.id && j.state === "running")) continue;
+        try { await this.checkUpdates(rec.id); } catch (e) { this.log(`addon ${rec.id}: update check failed:`, e.message); }
+      }
+    })().finally(() => { this.checking = null; });
+    return this.checking;
+  }
+
+  // Installed addons whose source has something newer, as the last checks found.
+  updates() {
+    return Object.values(this.load()).filter((r) => r.installed && r.remote?.up_to_date === false).map((r) => ({
+      id: r.id, name: r.manifest.name, version: r.installed_version || r.manifest.version, latest: r.remote.version || null,
+      commit: r.remote.commit || null, from: r.commit || null, subject: r.remote.subject || null, count: r.remote.count || 0, checked: r.remote.checked,
+      logo: r.manifest.logo ? `/__gate/api/addons/${r.id}/image?v=${(r.commit || String(r.updated || 0)).slice(0, 12)}` : null,
+    }));
   }
 
   // ---------------- ways in: an addon whose status names a port can get a Burrow address

@@ -683,6 +683,11 @@ ol.perm .mono { font-size: 12px; }
 .upd-banner { position: relative; z-index: 1; max-width: 1200px; margin: 18px auto 0; padding: 0 20px; display: grid; gap: 10px; }
 .home-in .upd-banner, .wrap .upd-banner { padding: 0; margin: 0 0 18px; }
 .upd-banner .uc-hero { padding: 18px 20px; }
+/* an addon's update, above its section on the Burrow page */
+.addon-upd { display: grid; gap: 10px; margin: 0 0 12px; }
+.addon-upd .uc-hero { padding: 16px 20px; }
+.addon-upd .uc-logo { width: 20px; height: 20px; border-radius: 5px; flex: none; }
+.addon-upd .uc-sub .mono { font-size: 12px; }
 .upcheck { display: grid; gap: 14px; margin-bottom: 16px; }
 .uc-hero { position: relative; overflow: hidden; display: flex; align-items: center; gap: 18px; padding: 22px 24px; border-radius: 22px;
   border: 1px solid var(--line-2); background: rgba(255,255,255,.03); }

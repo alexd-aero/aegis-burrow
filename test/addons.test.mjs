@@ -134,3 +134,38 @@ with zipfile.ZipFile(os.path.join(www, "evil.zip"), "w") as z:
     await assert.rejects(H.inspect(base + "evil.zip"), /unsafe path/);
   } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
 });
+
+test("updates: checked in the background, listed for the Burrow page", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { createServer } = await import("node:http");
+  const { readFileSync } = await import("node:fs");
+  const www = tmp(), src = join(tmp(), "pagey-main");
+  const pack = (version) => {
+    addon(src, { id: "pagey", name: "Pagey", version });
+    execFileSync("tar", ["-czf", join(www, "pagey.tar.gz"), "-C", join(src, ".."), "pagey-main"]);
+  };
+  pack("1.0.0");
+  const srv = createServer((q, r) => { try { r.end(readFileSync(join(www, q.url.slice(1)))); } catch { r.statusCode = 404; r.end(); } });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const dir = tmp();
+  const H = new A.Addons({ dir: join(dir, "addons"), registry: join(dir, "addons.json"), version: "2.0.0", log: () => {} });
+  try {
+    await H.add(`http://127.0.0.1:${srv.address().port}/pagey.tar.gz`);
+    await H.checkAll(0);
+    assert.deepEqual(H.updates(), []);                             // not installed: nothing to offer
+    const job = H.install("pagey", {});
+    while (H.job(job.id).state === "running") await new Promise((ok) => setTimeout(ok, 50));
+    await H.checkAll(0);
+    assert.deepEqual(H.updates(), []);                             // the same archive
+    pack("1.1.0");
+    await H.checkAll(3600e3);
+    assert.deepEqual(H.updates(), []);                             // checked a moment ago: not again
+    await H.checkAll(0);
+    const [u] = H.updates();
+    assert.deepEqual([u.id, u.name, u.version, u.latest], ["pagey", "Pagey", "1.0.0", "1.1.0"]);
+    const up = H.update("pagey");
+    while (H.job(up.id).state === "running") await new Promise((ok) => setTimeout(ok, 50));
+    assert.equal(H.job(up.id).state, "done");
+    assert.deepEqual(H.updates(), []);                             // updated: the card goes away
+  } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
+});

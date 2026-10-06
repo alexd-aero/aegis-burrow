@@ -228,6 +228,10 @@ async function defaultAddons() {
   }
 }
 setTimeout(defaultAddons, 30000);
+// addons from a link get checked for updates like Aegis × Burrow itself: their
+// cards on the Burrow page then offer the update, no visit to Addons needed
+setTimeout(() => addons.checkAll(), 120000).unref();
+setInterval(() => addons.checkAll(), 3600e3).unref();
 setInterval(defaultAddons, 6 * 3600 * 1000);
 
 // Both ways: once the Forge has us as an addon, we add it as one of ours.
@@ -677,6 +681,7 @@ function me(req) {
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
     pages: pagesView(),
+    addonUpdates: addons.updates(),
     extensions: [...extensions].filter(([, x]) => x.ui).map(([id, x]) => ({ id, ui: `/__gate/x/${id}/ui.js?v=${encodeURIComponent(x.version.replace(/\|/g, "-").slice(0, 60))}` })),
     serveo: { ...serveo.state(), forward: serveoForward() },
     mounts: { ...(settings.get("mounts") || {}) }, mountable: { termix: !!settings.get("termix"), "selkies-forge": !!listIntegrations().find((i) => i.kind === "selkies-forge" && i.url) },
@@ -855,6 +860,11 @@ async function handleAddons(req, res, path, url) {
   const ok = (o) => sendJson(res, 200, o);
   try {
     if (path === "/__gate/api/addons" && req.method === "GET") return ok({ addons: await addons.list(), spec: 1, host: "burrow", version: VERSION });
+    // what has an update waiting; ?fresh=1 first checks anything not checked in 15 minutes
+    if (path === "/__gate/api/addons/updates" && req.method === "GET") {
+      if (url.searchParams.get("fresh")) await addons.checkAll(15 * 60e3);
+      return ok({ updates: addons.updates() });
+    }
     if (path === "/__gate/api/addons/scan" && req.method === "GET") return ok(await addons.scan(url.searchParams.get("fresh") ? 0 : 60000));
     if (path === "/__gate/api/addons/add" && req.method === "POST") return ok({ addon: await addons.add((await readJsonBody(req)).source) });
     if (path === "/__gate/api/addons/inspect" && req.method === "POST") {
