@@ -97,7 +97,7 @@ export class Updater {
 
   async check() {
     try {
-      const pkg = await getJson(`${RAW}/${OWN}/main/package.json`);
+      const pkg = await this.remotePackage();
       const latest = String(pkg.version || "");
       const available = newer(latest, VERSION);
       let entries = [];
@@ -118,6 +118,20 @@ export class Updater {
   get justUpdated() {
     const j = (this.settings.get("updates") || {}).justUpdated;
     return j && j.to === VERSION && Date.now() - j.at < 3 * 86400e3 ? j : null;
+  }
+
+  // main's package.json. GitHub's API first: raw.githubusercontent.com is a CDN
+  // that can hand out a copy minutes old, so a check would name a version the
+  // download no longer is. The raw file is the fallback (no rate limit).
+  async remotePackage() {
+    if (!MIRROR) {
+      try {
+        const r = await fetch(`https://api.github.com/repos/${OWN}/contents/package.json?ref=main`,
+                              { headers: { "User-Agent": UA, Accept: "application/vnd.github.raw+json" }, signal: AbortSignal.timeout(15000) });
+        if (r.ok) return JSON.parse(await r.text());
+      } catch { /* fall back */ }
+    }
+    return getJson(`${RAW}/${OWN}/main/package.json`);
   }
 
   view() {
@@ -162,6 +176,7 @@ export class Updater {
         if (!existsSync(join(src, f))) throw new Error(`The download is missing ${f}; nothing was changed.`);
       }
       if (pkg.name !== "aegis-burrow" || !newer(pkg.version, VERSION)) throw new Error(`The download is ${pkg.name} ${pkg.version}, not a newer Aegis × Burrow; nothing was changed.`);
+      job.to = pkg.version;          // what is really installed (the check may have seen an older one)
       for (const d of ["bin", "forge"]) {
         try { for (const n of readdirSync(join(src, d))) chmodSync(join(src, d, n), 0o755); } catch { /* no such folder */ }
       }

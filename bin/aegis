@@ -809,10 +809,11 @@ cmd_update() {
   spin_start "downloading and installing v$latest"
   out="$(burrow_call POST /update/apply)" || { spin_stop; die "$out"; }
   spin_stop
+  latest="$(printf '%s' "$out" | jget job.to)"     # what was really installed
   ok "installed v$latest"
   if [ "$(service_scope)" = manual ]; then warn "restart it with whatever runs it to finish"; return 0; fi
   spin_start "restarting"
-  if cli update-wait "$latest"; then spin_stop; ok "v$latest is running"; else spin_stop; warn "not answering yet; see: aegis status"; fi
+  if cli update-wait "$latest" "$cur"; then spin_stop; ok "v$latest is running"; else spin_stop; warn "not answering yet; see: aegis status"; fi
 }
 cmd_auto() {
   need_installed; ensure_running

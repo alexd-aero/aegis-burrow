@@ -73,6 +73,8 @@ export const verJump = (from, to) => `<div class="uc-ver"><span>v${h(from)}</spa
 // Install the update, then wait for the new version to answer and reload.
 export async function runUpdate(onPhase) {
   onPhase("Downloading and installing…");
+  const health = () => fetch("/__gate/health", { cache: "no-store" }).then((x) => x.json());
+  const before = (await health().catch(() => ({}))).version;
   const r = await post("/__gate/api/update/apply");
   if (r.job?.state === "error") throw new Error(r.job.error);
   if (!r.job?.to) { onPhase("Already up to date."); return; }
@@ -82,8 +84,9 @@ export async function runUpdate(onPhase) {
   for (;;) {
     await new Promise((ok) => setTimeout(ok, 1500));
     try {
-      const v = await fetch("/__gate/health", { cache: "no-store" }).then((x) => x.json());
-      if (v.version === r.job.to) { location.reload(); return; }
+      // back up on a new version (whichever it is): reload into it
+      const v = await health();
+      if (v.version && v.version !== before) { location.reload(); return; }
     } catch { /* restarting */ }
     if (Date.now() - t0 > 120000) { onPhase("It is taking a while to come back. Reload in a minute, or run: aegis status"); return; }
   }

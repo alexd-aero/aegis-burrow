@@ -155,11 +155,11 @@ async function cfWait() {
 }
 
 // after an update the server restarts: wait until the socket answers with the new version
-async function updateWait(want) {
+async function updateWait(want, from) {
   const t0 = Date.now();
   await sleep(1500);
   for (;;) {
-    try { const s = await call("GET", "/status", null, 3000); if (s.version === want) return 0; } catch { /* restarting */ }
+    try { const s = await call("GET", "/status", null, 3000); if (s.version === want || (from && s.version && s.version !== from)) return 0; } catch { /* restarting */ }
     if (Date.now() - t0 > 120000) return 1;
     await sleep(1000);
   }
@@ -199,7 +199,7 @@ const run = {
   "whats-new": whatsNew,
   status, vars: async () => { await vars(); return 0; },
   tunnels: async () => { await tunnels(); return 0; }, ports: async () => { await ports(); return 0; },
-  "pack-wait": packWait, "cf-wait": cfWait, "update-wait": () => updateWait(args[0]),
+  "pack-wait": packWait, "cf-wait": cfWait, "update-wait": () => updateWait(args[0], args[1]),
   get: () => { get(args[0]); return null; },
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
