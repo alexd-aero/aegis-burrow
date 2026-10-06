@@ -5,7 +5,7 @@
 #   burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]
 #   burrow password PORT             its own password (asked, or the first line of stdin)
 #   burrow access PORT login|password|public
-#   burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (experimental)
+#   burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (Burrow Pages addon)
 #   burrow rename PORT NAME          its own address: NAME.<zone> ("" = tunnel-PORT-…)
 #   burrow unpublish PORT
 #

@@ -301,6 +301,7 @@ body.home { display: grid; place-items: center; min-height: 100vh; padding: 16px
 .desk { padding: 18px 18px 14px; display: flex; flex-direction: column; gap: 12px; }
 .desk.off { opacity: .7; }
 .desk .fav svg { width: 20px; height: 20px; color: #c9ccd1; }
+.desk .fav.distro svg { width: 26px; height: 26px; }
 .dl { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 .dl-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
 .dl-row a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12px; min-width: 0; }
@@ -655,6 +656,22 @@ ol.perm .mono { font-size: 12px; }
 .pill.exp { color: #f2c14e; border-color: rgba(242,193,78,.35); background: rgba(242,193,78,.08); font-size: 10.5px; padding: 1px 7px; vertical-align: 1px; }
 .exp-ico { color: #3ddc97; }
 .exp-ico svg { width: 22px; height: 22px; }
+/* Burrow Pages: its own card on the Burrow page */
+.pages { padding: 18px 18px 8px; margin-bottom: 14px; border-color: rgba(61,220,151,.22);
+         background: radial-gradient(120% 140% at 0% 0%, rgba(61,220,151,.07), transparent 55%), var(--card, #0f1012); }
+.pages-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-bottom: 12px; }
+.pages-head .grow { min-width: 200px; }
+.pages-head .integ-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pages-list { border-top: 1px solid var(--line); }
+.prow { display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 8px; }
+.prow:last-child { border-bottom: 0; }
+.prow:hover { background: rgba(255,255,255,.025); }
+.prow.off { opacity: .6; }
+.prow .grow { min-width: 0; }
+.prow-meta { flex: 0 1 auto; justify-content: flex-end; min-width: 0; }
+.pages-empty { border-top: 1px solid var(--line); padding: 12px 2px 6px; }
+.pages-empty p { margin: 0; }
+@media (max-width: 720px) { .prow { flex-wrap: wrap; } .prow-meta { order: 3; flex-basis: 100%; justify-content: flex-start; } }
 .pill.site { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c9d4ff; border-color: rgba(122,167,255,.3); background: rgba(122,167,255,.07); }
 .site-guess { margin: -6px 0 14px; min-height: 16px; }
 .pw-box { margin: 0 0 6px; }

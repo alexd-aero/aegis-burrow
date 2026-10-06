@@ -761,7 +761,7 @@ cmd_tunnels() {
   while :; do
     rows="$(cli tunnels)" || die "$rows"
     local -a items=($'new\t+ Publish a port\tpick from what is listening here')
-    [ "$(burrow_call GET /overview | jget experimental.sites)" = true ] && items+=($'site\t+ Secure reverse tunneling\ta GitHub or GitLab Pages site, behind a password (experimental)')
+    [ "$(burrow_call GET /overview | jget pages.installed)" = true ] && items+=($'site\t+ Add a site\tBurrow Pages: a GitHub or GitLab Pages site, behind a password')
     while IFS= read -r line; do [ -n "$line" ] && items+=("$line"); done <<<"$rows"
     items+=($'back\tBack\t')
     printf '\n'
@@ -808,7 +808,7 @@ who_menu() {
 # Secure reverse tunneling (experimental): a Pages site on a subdomain of yours
 tunnel_site() {
   local url sub name access pw="" out
-  title "Secure reverse tunneling" "a GitHub or GitLab Pages site, on your domain, behind a password"
+  title "Burrow Pages" "a GitHub or GitLab Pages site, on your domain, behind a password"
   url="$(ask "The site (you.github.io/project or github.com/you/project)")"; [ -n "$url" ] || return 0
   sub="$(ask "Its subdomain (like docs)")"
   name="$(ask "Name (optional)")"
@@ -1004,7 +1004,7 @@ usage() {
     aegis burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]
     aegis burrow password PORT   its own password (asked, or read from stdin)
     aegis burrow access PORT login|password|public
-    aegis burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (experimental)
+    aegis burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (Burrow Pages addon)
     aegis burrow rename PORT NAME | unpublish PORT
 
   ${B}More${NC}

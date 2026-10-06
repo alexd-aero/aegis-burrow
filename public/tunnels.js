@@ -1,6 +1,7 @@
 // Tunnel manager UI. No inline handlers (strict CSP): everything is wired
 // through data-act attributes and one delegated listener.
 import { chrome } from "./common.js";
+import { distroLogo, distroLabel } from "./distros.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
@@ -116,7 +117,8 @@ function statusPill(t) {
 const accessPill = (t) => t.access === "public" ? `<span class="pill warn">${ICON.globe} public</span>`
   : t.access === "password" ? `<span class="pill lock">${ICON.key} password</span>` : `<span class="pill lock">${ICON.lock} login</span>`;
 // where it goes: a port, or a Pages site
-const targetPill = (t) => t.kind === "site" ? `<span class="pill site">${h(PROVIDER[t.site.provider] || "Pages")} · ${h(t.site.url.replace(/^https:\/\//, "").replace(/\/$/, ""))}</span>`
+const targetPill = (t) => t.meta?.repo ? `<span class="pill site">${h(PROVIDER[t.meta.provider] ? PROVIDER[t.meta.provider].replace(" Pages", "") : "repo")} · ${h(t.meta.repo)}${t.meta.branch ? ` @${h(t.meta.branch)}` : ""}</span>`
+  : t.kind === "site" ? `<span class="pill site">${h(PROVIDER[t.site.provider] || "Pages")} · ${h(t.site.url.replace(/^https:\/\//, "").replace(/\/$/, ""))}</span>`
   : `<span class="pill">→ ${h(t.targetHost)}:${t.targetPort}</span>`;
 
 function card(t) {
@@ -167,6 +169,7 @@ function renderList() {
   }
   const on = L.filter((t) => t.enabled).length;
   const sum = (f) => L.reduce((a, t) => a + f(t), 0);
+  const sites = L.filter(isSite), ports = L.filter((t) => !isSite(t));
   app.innerHTML = `
     <div class="head">
       <div><h1>Burrow</h1><p>${S.mode === "domain"
@@ -183,13 +186,77 @@ function renderList() {
       <div class="card stat"><b>${fmtB(sum((t) => t.totals.bytesOut))}</b><span>served</span><div class="sub">${fmtB(sum((t) => t.totals.bytesIn))} received</div></div>
     </div>
     ${S.integrations.map(integCard).join("")}
-    ${L.length ? `<div class="grid">${L.map(card).join("")}</div>` : `
+    ${panels()}
+    ${!PANELS.has("burrow-pages") && sites.length ? pagesCard(sites) : ""}
+    ${ports.length ? `<div class="grid">${ports.map(card).join("")}</div>` : `
     <div class="card lit empty">
       <div class="big">${ICON.tunnel}</div>
       <h2>No tunnels yet</h2>
       <p>Pick a port running on this machine (or anywhere it can reach) and it gets its own HTTPS address in seconds. Login-protected by default.</p>
       <button class="btn primary" data-act="new">${ICON.plus} New tunnel</button>
     </div>`}`;
+}
+
+// ------------------------------------------------------------------ Burrow Pages
+// The Burrow Pages addon (github.com/alexd-aero/burrow-pages): GitHub and
+// GitLab Pages sites on a subdomain of yours, behind a password. Its sites
+// live on this card, not among the ports.
+const pagesOn = () => !!S.me?.pages?.installed;
+const isSite = (t) => t.kind === "site" || t.app === "burrow-pages";
+
+// Panels that addons bring for this page (their manifest's "burrow": {"ui"}).
+// A panel is an ES module: card(ctx) -> HTML, wire(el, ctx) after each paint.
+const PANELS = new Map();          // id -> module
+const panelWant = new Set();
+function loadPanels() {
+  for (const x of S.me?.extensions || []) {
+    if (panelWant.has(x.ui)) continue;
+    panelWant.add(x.ui);
+    import(x.ui).then((m) => { PANELS.set(x.id, m); render(); }).catch((e) => console.warn(`panel ${x.id}:`, e));
+  }
+}
+function panelCtx(id) {
+  return { id, api: (p, o) => api(`/__gate/api/x/${id}${p}`, o), h, toast, openModal, closeModal, refresh, render, go, ICON, ago, fmtN,
+           fav, statusPill, accessPill, targetPill, displayName, siteRow, accessSeg, pwFields, sealedPw, tunnelForm,
+           tunnels: S.list.filter((t) => t.app === id || (id === "burrow-pages" && t.kind === "site")),
+           mode: S.mode, zone: zoneName(), me: S.me };
+}
+function panels() {
+  return [...PANELS].map(([id, m]) => {
+    try { return `<div class="panel-slot" data-panel="${h(id)}">${m.card(panelCtx(id))}</div>`; }
+    catch (e) { console.warn(e); return ""; }
+  }).join("");
+}
+function wirePanels() {
+  for (const el of document.querySelectorAll("[data-panel]")) {
+    const m = PANELS.get(el.dataset.panel);
+    try { m?.wire?.(el, panelCtx(el.dataset.panel)); } catch (e) { console.warn(e); }
+  }
+}
+function siteRow(t) {
+  return `<div class="prow${t.enabled ? "" : " off"}" data-act="open" data-port="${t.port}" role="link" tabindex="0">
+    ${fav(t)}
+    <div class="grow"><div class="t-name">${h(displayName(t))}</div>
+      <div class="t-url">${t.url ? `<a href="${h(t.url)}" target="_blank" rel="noopener" data-stop>${h(t.host)}</a>
+        <button class="copy" data-act="copy" data-text="${h(t.url)}" title="Copy link" aria-label="Copy link">${ICON.copy}</button>` : '<span class="faint">getting an address…</span>'}</div></div>
+    <div class="t-meta prow-meta">${statusPill(t)}${accessPill(t)}${targetPill(t)}</div>
+    <label class="switch" title="${t.enabled ? "On" : "Off"}" data-stop><input type="checkbox" data-act="toggle" data-port="${t.port}" ${t.enabled ? "checked" : ""} aria-label="Site on or off"><i></i></label>
+  </div>`;
+}
+function pagesCard(sites) {
+  const p = S.me?.pages || {}, on = pagesOn();
+  return `<section class="card lit pages" id="pagesCard">
+    <div class="pages-head">
+      <div class="integ-logo"><img src="${h(p.logo || "/__gate/logos/burrow-pages.svg")}" alt=""></div>
+      <div class="grow">
+        <div class="integ-name">Burrow Pages ${p.version ? `<span class="pill">v${h(p.version)}</span>` : ""}<span class="pill exp">experimental</span></div>
+        <div class="integ-sub">${on ? "GitHub &amp; GitLab Pages on your domain, behind your login or a password of their own." : "Not installed: these sites keep their settings, paused, until it is back."}</div>
+      </div>
+      ${on ? `<button class="btn sm primary" data-act="site-new">${ICON.plus} Add a site</button>` : `<button class="btn sm" data-act="tab" data-v="addons">Install it</button>`}
+    </div>
+    ${sites.length ? `<div class="pages-list">${sites.map(siteRow).join("")}</div>`
+      : `<div class="pages-empty"><p class="muted small">No sites yet. Paste a <span class="mono">you.github.io/project</span> or <span class="mono">gitlab.com/group/project</span> address, pick a subdomain, and it answers there, only to whoever has the password.</p></div>`}
+  </section>`;
 }
 
 // ------------------------------------------------------------------ integrations
@@ -226,11 +293,11 @@ function deskCard(d) {
   const st = d.running ? `<span class="pill ok"><i class="dot ok"></i>running</span>` : `<span class="pill">${h(d.status)}</span>`;
   return `<article class="card desk${d.running ? "" : " off"}">
     <div class="t-top">
-      <div class="fav">${ICON.desk}</div>
+      <div class="fav distro" title="${h(distroLabel(d.family))}">${d.family ? distroLogo(d.family) : ICON.desk}</div>
       <div class="grow"><div class="t-name">${h(d.title)}</div><div class="t-url"><span class="mono">${h(d.name)}</span></div></div>
       ${st}
     </div>
-    <div class="t-meta">${d.de ? `<span class="pill">${h(d.de)}</span>` : ""}${d.port ? `<span class="pill">:${d.port}</span>` : ""}${d.tunnel ? `<span class="pill ok">${ICON.lock} via Aegis</span>` : ""}</div>
+    <div class="t-meta">${d.family ? `<span class="pill">${h(distroLabel(d.family))}</span>` : ""}${d.de ? `<span class="pill">${h(d.de)}</span>` : ""}${d.port ? `<span class="pill">:${d.port}</span>` : ""}${d.tunnel ? `<span class="pill ok">${ICON.lock} via Aegis</span>` : ""}</div>
     <div class="dl">${deskLinks(d)}</div>
     <div class="t-actions">
       ${d.running
@@ -765,7 +832,9 @@ function renderDetail() {
 function render() {
   if (S.modal) return;          // never repaint under an open form
   if (S.view === "detail") renderDetail(); else if (S.view === "integ") renderInteg(); else if (S.view === "forge") renderAddon();
-  else if (S.view === "addons") renderAddons(); else renderList();
+  else if (S.view === "addons") renderAddons(); else { renderList(); wirePanels(); }
+  const to = S.scrollTo && document.getElementById(S.scrollTo);
+  if (to) { S.scrollTo = null; to.scrollIntoView({ block: "center" }); to.classList.remove("flash"); void to.offsetWidth; to.classList.add("flash"); }
 }
 
 // ------------------------------------------------------------------ data
@@ -827,6 +896,7 @@ function go(view, port) {
   window.scrollTo(0, 0);
 }
 function fromHash() {
+  if (location.hash === "#/pages") { S.scrollTo = "pagesCard"; history.replaceState(null, "", "#/"); }
   const m = /^#\/t\/(\d+)/.exec(location.hash);
   const i = /^#\/i\/([a-z0-9-]+)/.exec(location.hash);
   if (m) go("detail", Number(m[1])); else if (i) go("integ", i[1]); else if (/^#\/(forge|addon)$/.test(location.hash)) go("forge");
@@ -892,20 +962,22 @@ function siteGuess(v) {
 }
 const PROVIDER = { github: "GitHub Pages", gitlab: "GitLab Pages" };
 
-async function tunnelForm(edit, preset) {
+async function tunnelForm(edit, preset, opts = {}) {
   const t = edit || { access: "login", targetHost: "127.0.0.1", scheme: "auto", preserveHost: false, ...(preset || {}) };
   if (!S.pattern) { try { const r = await api("/__gate/api/tunnels"); S.mode = r.mode; S.pattern = r.pattern; } catch { /* the form still works */ } }
   const isSite = edit && t.kind === "site";
-  const canSite = !edit && !!S.me?.experimental?.sites;
-  const st = { site: isSite, access: t.access || "login" };
+  const managed = edit && !!t.app && !isSite;      // an addon's: it decides where it points
+  const siteOnly = !edit && !!opts.site;
+  const canSite = !edit && !siteOnly && pagesOn();
+  const st = { site: isSite || siteOnly, access: t.access || "login" };
   openModal(`
-    <h2>${edit ? `Edit ${h(isSite ? displayName(t) : "tunnel-" + t.port)}` : "New tunnel"}</h2>
+    <h2>${edit ? `Edit ${h(isSite ? displayName(t) : "tunnel-" + t.port)}` : siteOnly ? "Add a site" : "New tunnel"}</h2>
     <p id="fLead">${edit ? (isSite ? "Change the site, its address, or who can open it." : "Change where it points or who can open it.") : "Give a port its own HTTPS address. Behind your Aegis login unless you pick otherwise."}</p>
     <form id="tf" autocomplete="off">
       ${canSite ? `<section class="srt" id="fSrt">
         <label class="srt-head"><span class="srt-ico">${ICON.shield}</span>
           <span class="grow"><span class="srt-t"><b>Secure reverse tunneling mode</b><span class="pill exp">experimental</span></span>
-            <span class="faint small">Serve a GitHub or GitLab Pages site on a subdomain of yours, behind a password, through Burrow.</span></span>
+            <span class="faint small">Serve a GitHub or GitLab Pages site on a subdomain of yours, behind a password, through Burrow. From the Burrow Pages addon.</span></span>
           <span class="switch"><input type="checkbox" id="fSiteOn" aria-label="Secure reverse tunneling mode"><i></i></span></label>
       </section>` : ""}
       <div id="fSiteBox" ${st.site ? "" : "hidden"}>
@@ -940,8 +1012,8 @@ async function tunnelForm(edit, preset) {
     const portEl = m.querySelector("#fPort"), subEl = m.querySelector("#fSub"), siteEl = m.querySelector("#fSite");
     const draw = () => {
       m.querySelector("#fSiteBox").hidden = !st.site;
-      m.querySelector("#fPortBox").hidden = st.site;
-      m.querySelector("#fAdv").hidden = st.site;
+      m.querySelector("#fPortBox").hidden = st.site || managed;
+      m.querySelector("#fAdv").hidden = st.site || managed;
       if (st.site && st.access === "public") st.access = "login";
       m.querySelector("#fAccessBox").innerHTML = accessSeg("fAccess", st.access, st.site);
       m.querySelector("#fPwBox").hidden = st.access !== "password";
@@ -1004,7 +1076,7 @@ async function tunnelForm(edit, preset) {
         const pw = st.access === "password" ? await sealedPw(m, !(t.locked && edit)) : {};
         let body = { name: m.querySelector("#fName").value.trim(), access: st.access, sub, ...pw };
         if (st.site) body.site = siteEl.value.trim();
-        else {
+        else if (!managed) {
           const scheme = m.querySelector("#fScheme").value;
           Object.assign(body, { targetHost: m.querySelector("#fHost").value.trim() || "127.0.0.1",
                                 targetPort: m.querySelector("#fTPort").value.trim() || undefined,
@@ -1087,6 +1159,7 @@ document.addEventListener("click", async (e) => {
     else if (act === "ad-share") { el.disabled = true; await api(`/__gate/api/addons/${el.dataset.id}/share`, { method: "POST", body: JSON.stringify({ on: el.dataset.on === "1" }) }); toast(el.dataset.on === "1" ? "Published through Burrow" : "Unpublished"); refresh(); }
     else if (act === "job-cancel") await api(`/__gate/api/addons/jobs/${el.dataset.job}/cancel`, { method: "POST", body: "{}" });
     else if (act === "new") tunnelForm();
+    else if (act === "site-new") tunnelForm(null, null, { site: true });
     else if (act === "close") closeModal();
     else if (act === "copy") { e.stopPropagation(); await navigator.clipboard.writeText(el.dataset.text); toast("Link copied"); }
     else if (act === "edit") tunnelForm(S.detail);
@@ -1132,6 +1205,8 @@ document.addEventListener("change", async (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.modal) closeModal();
+  const pr = e.target.closest?.(".prow");
+  if (pr && e.key === "Enter" && e.target === pr) go("detail", Number(pr.dataset.port));
   const i = e.target.closest?.(".integ");
   if (i && (e.key === "Enter" || e.key === " ") && e.target === i) { e.preventDefault(); go("integ", i.dataset.id); }
 });
@@ -1143,5 +1218,5 @@ document.addEventListener("error", (e) => {
   if (img.tagName === "IMG" && img.dataset.fallback) img.parentElement.textContent = img.dataset.fallback;
 }, true);
 
-chrome("tunnels").then((me) => { S.me = me; });
+chrome("tunnels").then((me) => { S.me = me; loadPanels(); render(); });
 fromHash();

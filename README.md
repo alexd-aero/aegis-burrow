@@ -209,13 +209,15 @@ Termix normally answers at the root of the dashboard's address (the home page st
 | **Its own password** | A password just for this tunnel, to share with someone who shouldn't have your login. Your login still works there too. It is sealed in the browser on its way (like the login) and kept only as a scrypt hash; a new password signs out everyone who had the old one. |
 | **Public** | Anyone with the link. |
 
-### Secure reverse tunneling (experimental)
+### Burrow Pages: your repositories behind a password (an addon)
 
-Switch it on under *Settings → Experimental*, and **New tunnel** gets a **Secure reverse tunneling mode**: paste a GitHub or GitLab Pages site (`you.github.io/project`, `github.com/you/project`, `gitlab.com/group/project`…), pick a subdomain like `docs`, and `https://docs.example.com` serves that site, behind your login or a password of its own. It is never public.
+[**Burrow Pages**](https://github.com/alexd-aero/burrow-pages) comes with Aegis × Burrow: it installs itself once (uninstall it and it stays gone) and has its own card on the Burrow page.
 
-Burrow fetches the site from GitHub or GitLab (checking their certificate) and hands it on: the project's path is mapped to `/`, redirects are rewritten, and nothing about your visitors (their IP, Cloudflare's headers) is passed along. Burrow checks that the site exists before it publishes it.
-
-This protects the address on your domain, not the site itself: `you.github.io/project` stays exactly as public as it is now. To keep the content private, keep the site's source private and serve it only this way, or use a host that can lock it.
+- **Your domain, checked.** It looks at whether your domain is linked, and whether anything on it already points at GitHub or GitLab Pages, and for which account. Those accounts are added for you; remove them, or add others by **username**.
+- **Sign in with GitHub** with a code at [github.com/login/device](https://github.com/login/device), and private repositories show up too.
+- **Repositories sorted by commits and recent activity.** Pick one and a subdomain, and Burrow serves its files itself (a `gh-pages` branch, `/`, `docs/`, `dist/`…). Private repositories stay private, and it follows every push. Sites that need building (Jekyll) are served from their Pages site.
+- **Behind your login** or a password of the site's own; never public.
+- A Pages address that's already live (`you.github.io/project`) works too: **+ A Pages address**.
 
 The engine also answers on **`data/control.sock`**, a Unix socket only your user can open. That is how [Selkies Forge](#-selkies-forge) and the `burrow` command work without a browser:
 
@@ -276,7 +278,9 @@ Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it 
   - a folder on this machine. The addon shows up as a card. Install it, open it, run its actions, check for updates against its git commits, and uninstall it. An addon whose status reports a port gets **Publish**, which gives it a Burrow address.
 - **Found on this machine.** Opening *Addons* scans your home, `/opt`, `/srv` and the code folders apps declare. It lists every valid addon it finds, **running, stopped or not installed**, using each one's read-only `detect` and `status` scripts. Addons already in the list aren't repeated. Addons made for another host are shown greyed out.
 
-Scripts get the universal `ADDON_*` names (`ADDON_ID`, `ADDON_DIR`, `ADDON_DATA`, `ADDON_SETTING_<KEY>`, `ADDON_HOST=burrow`…), the older `FORGE_ADDON_*` twins, and `BURROW_SOCKET`. **Start here:** [the Weft Architecture](https://github.com/alexd-aero/weft). It has the spec, **[stable example addons that link to each other](https://github.com/alexd-aero/weft#-the-examples)** (Beacon, Pulse, Relay for Burrow, Shelf for the Forge), `weft-check`, `weft-run`, and [a strict brief for AI agents](https://github.com/alexd-aero/weft/blob/main/prompt.md). The Forge's [addon guide](https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md) covers the details.
+Scripts get the universal `ADDON_*` names (`ADDON_ID`, `ADDON_DIR`, `ADDON_DATA`, `ADDON_SETTING_<KEY>`, `ADDON_HOST=burrow`…), the older `FORGE_ADDON_*` twins, `BURROW_SOCKET` and `BURROW_NODE`.
+
+**Addons that extend Burrow.** A manifest may add `"burrow": {"extension": "x.mjs", "ui": "y.js"}`: Burrow runs the extension inside itself while the addon is installed (with a context: its data folder, its settings, the domain and its DNS records read-only, and the tunnels it made), answers `/__gate/api/x/<id>/…` and `/x/<id>/…` on the control socket with it, and shows the UI module as a card on the Burrow page. Other hosts ignore the field. [Burrow Pages](https://github.com/alexd-aero/burrow-pages) is built this way. **Start here:** [the Weft Architecture](https://github.com/alexd-aero/weft). It has the spec, **[stable example addons that link to each other](https://github.com/alexd-aero/weft#-the-examples)** (Beacon, Pulse, Relay for Burrow, Shelf for the Forge), `weft-check`, `weft-run`, and [a strict brief for AI agents](https://github.com/alexd-aero/weft/blob/main/prompt.md). The Forge's [addon guide](https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md) covers the details.
 
 ## 🖥️ Selkies Forge
 
@@ -293,7 +297,7 @@ Aegis × Burrow and Selkies Forge each become **the other's addon**, and either 
 Once linked:
 
 - **The Forge** lists Aegis × Burrow among its addons.
-- **Burrow** lists the Forge among its own, with its desktops, their links, start/stop/restart and one-click **Publish**.
+- **Burrow** lists the Forge among its own, with its desktops (each with its distro's logo, the same marks the Forge shows), their links, start/stop/restart and one-click **Publish**.
 - **The Forge's Open desktop** button offers each desktop's Burrow address.
 
 The **Selkies Forge** tab only appears when a Forge is actually on this machine (its drop-in is fresh, or its install is on disk). Without one, Burrow never suggests installing it or adding it. The tab shows:

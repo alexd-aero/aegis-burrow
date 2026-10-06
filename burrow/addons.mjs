@@ -257,6 +257,15 @@ export function loadManifest(root) {
   m.replaces = rep.filter((x) => x !== m.id);
   m.links = [];
   for (const ln of (d.links || []).slice(0, 6)) if (ln && typeof ln === "object") m.links.push({ label: text(ln, "label", 40, true), url: url(ln.url, "link url") });
+  // Burrow's own field (other hosts ignore it): code that runs inside Burrow
+  // while the addon is installed, and a panel for the Burrow page.
+  //   "burrow": {"extension": "burrow/extension.mjs", "ui": "burrow/ui.js"}
+  m.burrow = null;
+  if (d.burrow && typeof d.burrow === "object") {
+    m.burrow = {};
+    if (d.burrow.extension) m.burrow.extension = inside(root, d.burrow.extension, "burrow.extension");
+    if (d.burrow.ui) m.burrow.ui = inside(root, d.burrow.ui, "burrow.ui");
+  }
   return m;
 }
 
@@ -314,8 +323,8 @@ export class Addons {
   // dir:      where checkouts and data live (AEGIS_HOME/addons)
   // registry: the JSON file that remembers them (DATA/addons.json)
   // env:      () => {ADDON_HOST_URL, ADDON_BIND, BURROW_SOCKET, …}: host values for scripts
-  constructor({ dir, registry, version, env, log, tunnels }) {
-    Object.assign(this, { dir, registryFile: registry, version, hostEnv: env || (() => ({})), log: log || console.log, tunnels });
+  constructor({ dir, registry, version, env, log, tunnels, onChange }) {
+    Object.assign(this, { dir, registryFile: registry, version, hostEnv: env || (() => ({})), log: log || console.log, tunnels, onChange });
     this.statusCache = new Map();
     this.jobs = new Map();
     this.scanCache = null;
@@ -500,7 +509,7 @@ export class Addons {
     }).catch((e) => {
       Object.assign(job, { state: job.cancelled ? "cancelled" : "error", error: e.message });
       job.log(e.message, "err");
-    }).finally(() => { job.finished = Date.now(); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); });
+    }).finally(() => { job.finished = Date.now(); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
     return job.view();
   }
 

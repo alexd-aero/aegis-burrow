@@ -36,6 +36,7 @@ import { createServer as createHttpServer, request as httpRequest } from "node:h
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { join, extname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { networkInterfaces } from "node:os";
 import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
          createCipheriv, createDecipheriv, createHash } from "node:crypto";
@@ -87,8 +88,8 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "ui.css", "login.css",
-                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg"]) {
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "ui.css", "login.css",
+                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
 // Every link to our scripts and styles carries the version: a proxy in front
@@ -115,15 +116,120 @@ const burrowOn = () => burrow.on;
 // Burrow's addons: the same format as Selkies Forge's (burrow/addons.mjs).
 const addons = new Addons({
   dir: join(DATA, "addons"), registry: join(DATA, "addons.json"), version: VERSION, log, tunnels,
+  onChange: () => { syncExtensions(); },
   env: () => {
     const e = { ADDON_HOST_URL: `${TLS ? "https" : "http"}://${ORIGIN_HOST}:${LISTEN.port}/`, ADDON_BIND: LISTEN.host,
-                BURROW_SOCKET: join(DATA, "control.sock") };
+                // the short path when data/ is deep: curl and others refuse socket paths over ~107 bytes
+                BURROW_SOCKET: burrow.controlReal || join(DATA, "control.sock"), BURROW_NODE: process.execPath };
     // the Selkies Forge on this machine, when one registered: addons that talk to it find it
     const f = listIntegrations().find((i) => i.kind === "selkies-forge");
     if (f) Object.assign(e, { FORGE_URL: f.url || "", FORGE_API: f.api || "", ...(f.home ? { FORGE_HOME: f.home } : {}) });
     return e;
   },
 });
+// Burrow Pages (GitHub & GitLab Pages behind a password) is an addon of its own;
+// while it is installed, Burrow offers sites.
+const PAGES = "burrow-pages";
+const pagesRec = () => addons.load()[PAGES] || null;
+burrow.sitesAllowed = () => !!pagesRec()?.installed;
+function pagesView() {
+  const rec = pagesRec();
+  let sites = 0;
+  for (const t of tunnels.tunnels.values()) if (t.kind === "site") sites++;
+  return { installed: !!rec?.installed, added: !!rec, sites, version: rec?.manifest?.version || null,
+           logo: rec ? `/__gate/api/addons/${PAGES}/image?v=${(rec.commit || "").slice(0, 12)}` : "/__gate/logos/burrow-pages.svg" };
+}
+
+// ---------- addons that extend Burrow (manifest "burrow": {extension, ui}) ----------
+// An installed addon may bring code that runs inside Burrow, and a panel for
+// the Burrow page. Its scripts already run as this user with this data, so
+// this gives it nothing new; it gets a context, not the whole server:
+//
+//   start(ctx)  stop()  handle({method, path, query, json(), unseal(), via})
+//     -> {status, json} | {status, body, type}
+//
+// Routes: /__gate/api/x/<id>/… (signed in) and /x/<id>/… on the control
+// socket; the panel is /__gate/x/<id>/ui.js. Burrow Pages is the first.
+const extensions = new Map();          // id -> { mod, commit, ctx, ui }
+function extContext(rec) {
+  const id = rec.id, own = (port) => { const t = tunnels.get(port); if (!t || t.app !== id) throw new Error("That tunnel isn't this addon's."); return t; };
+  return {
+    id, hostVersion: VERSION, dataDir: addons.dataDir(rec), root: addons.rootOf(rec),
+    log: (...a) => log(`${id}:`, ...a),
+    setting: (key) => { const r = addons.load()[id]; return r?.settings?.[key] ?? r?.manifest.settings.find((s) => s.key === key)?.default ?? ""; },
+    domain: () => { const d = settings.get("domain"); return d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join("."), managed: !!d.managed } : null; },
+    dns: () => tunnels.dnsRecords(),
+    tunnels: {
+      list: () => tunnels.list(),
+      create: (spec) => tunnels.create({ ...spec, app: id }),
+      update: (port, patch) => { own(port); return tunnels.update(port, patch); },
+      remove: (port) => { own(port); return tunnels.remove(port); },
+    },
+  };
+}
+// which copy of an addon is installed: a new commit, or a folder copied again, means reload
+const extVersion = (rec) => `${rec.commit || ""}|${rec.updated || ""}|${rec.installed_at || ""}`;
+async function syncExtensions() {
+  const all = addons.load();
+  for (const [id, x] of extensions) {
+    const rec = all[id];
+    if (!rec?.installed || extVersion(rec) !== x.version) {
+      extensions.delete(id);
+      try { await x.mod.stop?.(); } catch (e) { log(`${id}: stop failed`, e.message); }
+      log(`${id}: unloaded`);
+    }
+  }
+  for (const rec of Object.values(all)) {
+    const b = rec.installed && rec.manifest.burrow;
+    if (!b || extensions.has(rec.id)) continue;
+    const x = { mod: {}, commit: rec.commit, version: extVersion(rec), ui: b.ui ? join(addons.rootOf(rec), b.ui) : null, ctx: null };
+    extensions.set(rec.id, x);
+    if (!b.extension) continue;
+    try {
+      x.mod = await import(`${pathToFileURL(join(addons.rootOf(rec), b.extension)).href}?v=${Date.now()}`);
+      x.ctx = extContext(rec);
+      await x.mod.start?.(x.ctx);
+      log(`${rec.id}: running inside Burrow`);
+    } catch (e) { x.error = e.message; log(`${rec.id}: its extension failed to start:`, e.message); }
+  }
+}
+async function extRoute(id, path, method, query, json, via) {
+  const x = extensions.get(id);
+  if (!x || !x.mod.handle) return { status: 404, json: { error: x?.error ? `That addon's extension failed to start: ${x.error}` : "That addon isn't installed." } };
+  try { return (await x.mod.handle({ method, path, query, json, unseal: unwrapSealed, via })) || { status: 404, json: { error: "not found" } }; }
+  catch (e) { return { status: e.status || 400, json: { error: e.message } }; }
+}
+setTimeout(syncExtensions, 1500);
+setInterval(syncExtensions, 60000);
+
+// Addons that come with Aegis × Burrow: each is installed once, by itself, a
+// little after the first start (or the update that brought it). One you
+// uninstall stays uninstalled: state.json's defaultAddons remembers it was done.
+const DEFAULT_ADDONS = [{ id: PAGES, source: "https://github.com/alexd-aero/burrow-pages" }];
+async function defaultAddons() {
+  if (process.env.AEGIS_NO_DEFAULT_ADDONS) return;
+  for (const d of DEFAULT_ADDONS) {
+    if ((settings.get("defaultAddons") || {})[d.id]) continue;
+    try {
+      if (!addons.load()[d.id]) await addons.add(d.source);
+      if (!addons.load()[d.id].installed) {
+        const { id } = addons.install(d.id, {});
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const j = addons.job(id);
+          if (j.state === "running") continue;
+          if (j.state !== "done") throw new Error(j.error || j.state);
+          break;
+        }
+      }
+      settings.set({ defaultAddons: { ...(settings.get("defaultAddons") || {}), [d.id]: Date.now() } });
+      log("addons:", d.id, "is installed (it comes with Aegis × Burrow)");
+    } catch (e) { log("addons: couldn't install", d.id, "by default:", e.message, "- trying again later"); }
+  }
+}
+setTimeout(defaultAddons, 30000);
+setInterval(defaultAddons, 6 * 3600 * 1000);
+
 // Both ways: once the Forge has us as an addon, we add it as one of ours.
 const bridgeTick = () => adoptForge({ addons, log }).catch((e) => log("bridge:", e.message));
 setTimeout(bridgeTick, 20000);
@@ -520,6 +626,12 @@ async function handleGate(req, res, path, url, host, isMain) {
     return send(res, 302, "", { Location: "/", "Set-Cookie": `${goName(req)}=termix; ${cookieAttrs(req, 30).replace("SameSite=Lax", "SameSite=Strict")}` });
   }
   if (path === "/__gate/tunnels") return page(res, "tunnels.html");
+  const xu = /^\/__gate\/x\/([a-z0-9][a-z0-9-]{1,39})\/ui\.js$/.exec(path);
+  if (xu) {
+    const x = extensions.get(xu[1]);
+    if (!x?.ui) return send(res, 404, "");
+    return send(res, 200, readFileSync(x.ui), { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" });
+  }
   if (path === "/__gate/settings") return page(res, "settings.html");
   if (path === "/__gate/welcome") return page(res, "welcome.html");
   if (path.startsWith("/__gate/api/")) return handleApi(req, res, path, url);
@@ -564,7 +676,8 @@ function me(req) {
     login: { subtitle: (settings.get("login") || {}).subtitle || "Secure channel" },
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
-    experimental: { sites: !!(settings.get("experimental") || {}).sites },
+    pages: pagesView(),
+    extensions: [...extensions].filter(([, x]) => x.ui).map(([id, x]) => ({ id, ui: `/__gate/x/${id}/ui.js?v=${encodeURIComponent(x.version.replace(/\|/g, "-").slice(0, 60))}` })),
     serveo: { ...serveo.state(), forward: serveoForward() },
     mounts: { ...(settings.get("mounts") || {}) }, mountable: { termix: !!settings.get("termix"), "selkies-forge": !!listIntegrations().find((i) => i.kind === "selkies-forge" && i.url) },
     update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
@@ -607,11 +720,6 @@ function savePrefs(p) {
   if ("serveo" in p) setServeo(p.serveo !== false);
   if ("autoUpdate" in p) updater.setAuto(!!p.autoUpdate);
   if ("serveoForward" in p) patch.serveoForward = p.serveoForward !== false;
-  if ("experimental" in p) {
-    const x = { ...(settings.get("experimental") || {}) };
-    if (typeof p.experimental?.sites === "boolean") x.sites = p.experimental.sites;
-    patch.experimental = x;
-  }
   if ("mounts" in p) {
     const next = { ...(settings.get("mounts") || {}) };
     for (const [id, v] of Object.entries(p.mounts || {})) {
@@ -667,6 +775,11 @@ async function handleApi(req, res, path, url) {
       return sendJson(res, 200, v);
     }
     if (path.startsWith("/__gate/api/addons") || path.startsWith("/__gate/api/bridge")) return await handleAddons(req, res, path, url);
+    const xm = /^\/__gate\/api\/x\/([a-z0-9][a-z0-9-]{1,39})(\/[^?]*)?$/.exec(path);
+    if (xm) {
+      const r = await extRoute(xm[1], xm[2] || "/", req.method, url.searchParams, () => readJsonBody(req), "dashboard");
+      return r.body !== undefined ? send(res, r.status, r.body, { "Content-Type": r.type || "application/octet-stream" }) : sendJson(res, r.status, r.json);
+    }
 
     // integrations
     if (path === "/__gate/api/integrations") return sendJson(res, 200, { integrations: listIntegrations().map((i) => viewOf(i)) });
@@ -1079,7 +1192,7 @@ async function overview() {
     termix: tx ? { upstream: tx.upstream, container: tx.container || null } : null,
     forge: forge ? { version: forge.version, url: forge.url, linked: !!forge.addon } : null,
     pack: (({ decided, skipped }) => ({ decided, skipped }))(pack.status()),
-    experimental: { sites: !!(settings.get("experimental") || {}).sites },
+    pages: pagesView(),
     update: { current: u.current, latest: u.latest, available: u.available, checked: u.checked, auto: u.auto, error: u.error, entries: (u.entries || []).slice(0, 8) },
   };
 }
@@ -1131,6 +1244,15 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/update/check" && method === "POST") return ok(await updater.check());
   if (path === "/update/apply" && method === "POST") { const job = await updater.apply(); return job.state === "error" ? no(500, job.error) : ok({ ...updater.view(), job }); }
   if (path === "/prefs" && method === "POST") { savePrefs(await readJson()); return ok({ ok: true }); }
+  // the domain and its DNS records, read-only (addon scripts: Burrow Pages checks them on install)
+  if (path === "/dns" && method === "GET") {
+    const d = settings.get("domain");
+    let records = [], error = null;
+    try { records = await tunnels.dnsRecords(); } catch (e) { error = e.message; }
+    return ok({ domain: d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join(".") } : null, records, error });
+  }
+  const xc = /^\/x\/([a-z0-9][a-z0-9-]{1,39})(\/[^?]*)?$/.exec(path);
+  if (xc) return extRoute(xc[1], xc[2] || "/", method, new URLSearchParams(), readJson, "control");
   return null;
 });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { burrow.stop(); serveo.stop(); process.exit(0); });

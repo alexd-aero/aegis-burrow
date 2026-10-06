@@ -20,7 +20,7 @@
 //   GET    /tunnels                  {mode, pattern, tunnels: [summary…]}
 //   POST   /tunnels                  {port, targetHost?, targetPort?, name?, sub?, access?, password?, scheme?} -> summary
 //                                     or {site, sub, name?, access?, password?}: a GitHub/GitLab
-//                                     Pages site behind a password (experimental.sites)
+//                                     Pages site behind a password (needs the Burrow Pages addon)
 //   GET    /tunnels/PORT             details: stats, charts, clients, recent requests
 //   PATCH  /tunnels/PORT             any of {name, sub, access, password, enabled, targetHost, targetPort, scheme, site}
 //
@@ -65,6 +65,9 @@ export class Burrow {
     this.clients = new Map();     // "selkies-forge" -> {name, version, first, last, calls}
     this.activity = [];           // newest first: {at, client, action, port, name}
     this.control = null;
+    // Sites (GitHub/GitLab Pages behind a password) come with the Burrow Pages
+    // addon (github.com/alexd-aero/burrow-pages); Aegis says whether it is installed.
+    this.sitesAllowed = () => false;
   }
 
   get on() { return (this.settings.get("modules") || {}).burrow !== false; }
@@ -97,8 +100,8 @@ export class Burrow {
     if (path === "/tunnels" && method === "GET") return ok({ tunnels: T.list(), now: Date.now(), mode: T.mode, pattern: T.pattern() });
     if (path === "/tunnels" && method === "POST") {
       const spec = await readJson();
-      if (spec.site && !(this.settings.get("experimental") || {}).sites) {
-        return { status: 409, json: { error: "Secure reverse tunneling is experimental: switch it on under Settings → Experimental first." } };
+      if (spec.site && !this.sitesAllowed()) {
+        return { status: 409, json: { error: "Sites come with the Burrow Pages addon: install it under Burrow → Addons." } };
       }
       return ok(await T.create(spec));
     }

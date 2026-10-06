@@ -72,6 +72,7 @@ const PROJECTS = [
   { id: "aegis-burrow", name: "Aegis × Burrow", logo: "/__gate/logos/aegis-burrow.svg" },
   { id: "selkies-forge", name: "Selkies Forge", logo: "/__gate/logos/forge.svg" },
   { id: "weft", name: "Weft", logo: "/__gate/logos/weft.svg" },
+  { id: "burrow-pages", name: "Burrow Pages", logo: "/__gate/logos/burrow-pages.svg" },
 ];
 function updatesBody() {
   const u = S.upd;
@@ -198,7 +199,8 @@ const INDEX = [
   ["Termix", "termix", "ssh terminal install remove docker"],
   ["Change the username or password", "account", "login password user credentials"],
   ["Connected apps", "apps", "integrations selkies forge plugged in"],
-  ["Secure reverse tunneling (GitHub & GitLab Pages)", "experimental", "experimental github gitlab pages site reverse proxy custom domain subdomain password protect"],
+  ["Burrow Pages: GitHub & GitLab Pages behind a password", "modules", "addon experimental github gitlab pages site secure reverse tunneling proxy custom domain subdomain password protect", "/__gate/tunnels#/pages"],
+  ["Changelog: Burrow Pages", "changelog", "release notes pages addon", "log:burrow-pages"],
   ["A tunnel's own password (Burrow)", "account", "tunnel password own custom protect burrow share", "/__gate/tunnels"],
   ["Where apps live (an app under a path)", "advanced", "path mount subpath directory base url /__gate/termix /__gate/forge advanced root"],
 ];
@@ -291,19 +293,6 @@ function accountBody() {
     </form>`;
 }
 
-// ------------------------------------------------------------------ experimental
-function experimentalBody() {
-  const on = !!S.me?.experimental?.sites;
-  return `<div class="mod">
-      <span class="mod-ico exp-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 5.5V11c0 4.6 3 8.3 7 10 4-1.7 7-5.4 7-10V5.5z"/><path d="m9 12 2 2 4-4"/></svg></span>
-      <div class="grow"><b>Secure reverse tunneling</b> <span class="pill exp">experimental</span>
-        <p class="muted small">Serve a GitHub or GitLab Pages site on a subdomain of yours (like <span class="mono">docs.${h(S.me?.domain?.mainHost?.split(".").slice(1).join(".") || "your-domain")}</span>), behind your Aegis login or a password of its own.
-        Burrow fetches the site and hands it on, so its address on github.io or gitlab.io stays as public as it is now: this is a protected front door, not a lock on the repository.
-        ${on ? `Find it under <a class="link" href="/__gate/tunnels">Burrow → New tunnel</a>.` : "Switched on, New tunnel gets a Secure reverse tunneling mode."}</p></div>
-      <label class="switch" title="${on ? "On" : "Off"}"><input type="checkbox" id="expSites" ${on ? "checked" : ""} aria-label="Secure reverse tunneling on or off"><i></i></label>
-    </div>`;
-}
-
 // ------------------------------------------------------------------ modules + sign-in
 function modulesBody() {
   const on = !!S.me?.modules?.burrow;
@@ -377,7 +366,6 @@ function render() {
     ${sec("termix", "Termix", "Optional. A terminal for this machine and your servers, behind the same login.", termixBody())}
     ${sec("account", "Login", "One login for the dashboard, Termix and every tunnel. A tunnel can also have a password of its own (Burrow → the tunnel → Password).", accountBody())}
     ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
-    ${sec("experimental", "Experimental", "Features still being tried out. They may change, or go away.", experimentalBody())}
     ${advancedBody()}`;
   wireForms();
   if (location.hash && !S.scrolled) { S.scrolled = true; document.querySelector(location.hash)?.scrollIntoView({ block: "start" }); }
@@ -447,11 +435,6 @@ function wireForms() {
       render();
       if (ms.checked) setTimeout(async () => { S.me = await fetch("/__gate/api/me", { credentials: "same-origin" }).then((r) => r.json()); render(); }, 6000);
     } catch (ex) { toast(ex.message); ms.checked = !ms.checked; }
-  });
-  const xs = $("#expSites");
-  if (xs) xs.addEventListener("change", async () => {
-    try { S.me = await post("/__gate/api/prefs", { experimental: { sites: xs.checked } }); toast(xs.checked ? "On: Burrow → New tunnel → Secure reverse tunneling mode" : "Secure reverse tunneling is off (sites you made keep working)"); render(); }
-    catch (ex) { toast(ex.message); xs.checked = !xs.checked; }
   });
   const au = $("#autoUpd");
   if (au) au.addEventListener("change", async () => {

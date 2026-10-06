@@ -28,6 +28,7 @@ export const REPOS = {
   "aegis-burrow": { name: "Aegis × Burrow", repo: process.env.AEGIS_REPO || "alexd-aero/aegis-burrow", logo: "/__gate/logos/aegis-burrow.svg" },
   "selkies-forge": { name: "Selkies Forge", repo: "adatskov-wcpss/animated-fiesta", logo: "/__gate/logos/forge.svg" },
   weft: { name: "Weft Architecture", repo: "alexd-aero/weft", logo: "/__gate/logos/weft.svg" },
+  "burrow-pages": { name: "Burrow Pages", repo: "alexd-aero/burrow-pages", logo: "/__gate/logos/burrow-pages.svg" },
 };
 const OWN = REPOS["aegis-burrow"].repo;
 const UA = `aegis-burrow/${VERSION} (+https://github.com/${OWN})`;

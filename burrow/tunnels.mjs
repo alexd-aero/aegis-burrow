@@ -60,6 +60,17 @@ const SITE_PATH = /^\/(?:[A-Za-z0-9._~%-]+\/)*$/;
 const PASS_MIN = 8;
 const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 export const accessOf = (v) => (v === "public" || v === "password" ? v : "login");
+// A tunnel an addon made carries its id (t.app) and a few words about itself
+// (t.meta: {repo, branch, mode…}), so the dashboard can show it on that addon's card.
+const APP_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+function cleanMeta(app, meta) {
+  if (!app || !APP_RE.test(String(app))) return { app: null, meta: null };
+  const out = {};
+  for (const [k, v] of Object.entries(meta && typeof meta === "object" ? meta : {}).slice(0, 12)) {
+    if (/^[a-zA-Z][a-zA-Z0-9]{0,23}$/.test(k) && ["string", "number", "boolean"].includes(typeof v)) out[k] = typeof v === "string" ? v.slice(0, 200) : v;
+  }
+  return { app: String(app), meta: out };
+}
 
 // Where a GitHub or GitLab Pages site really is, from what people paste:
 //   github.com/you/project      -> https://you.github.io/project/
@@ -293,6 +304,7 @@ export class TunnelManager {
       access, lock,
       preserveHost: !!spec.preserveHost,
       enabled: true, created: now(), blocked: [], dns: null,
+      ...cleanMeta(spec.app, spec.meta),
     };
     return this.add(t);
   }
@@ -311,6 +323,7 @@ export class TunnelManager {
       sub, port, kind: "site", site, targetHost: site.host, targetPort: 443, scheme: "https",
       name: String(spec.name || "").slice(0, 60) || `${site.host}${site.base.slice(0, -1)}`,
       access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
+      ...cleanMeta(spec.app, spec.meta),
     });
   }
 
@@ -350,6 +363,7 @@ export class TunnelManager {
       t.access = access; t.lock = lock;
     }
     if ("name" in patch) t.name = String(patch.name || "").slice(0, 60);
+    if ("meta" in patch && t.app) t.meta = cleanMeta(t.app, patch.meta).meta;
     if (t.kind === "site") {
       if ("site" in patch) {
         const site = parseSite(patch.site);
@@ -456,7 +470,7 @@ export class TunnelManager {
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
       target: t.site ? t.site.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
-      locked: !!t.lock, lockSet: t.lock?.set || null,
+      locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
       health: { up: rt.health.up, ms: rt.health.ms, checked: rt.health.checked },
@@ -804,6 +818,13 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     const j = await r.json().catch(() => ({}));
     if (!j.success) throw new Error((j.errors || []).map((e) => e.message).join("; ") || `HTTP ${r.status}`);
     return j.result;
+  }
+  // The zone's records, read-only (what an addon may look at: Burrow Pages
+  // checks whether the domain already points at GitHub or GitLab Pages).
+  async dnsRecords() {
+    if (!this.domain) return [];
+    const recs = await this.cfApi("GET", "/dns_records?per_page=1000");
+    return recs.map(({ name, type, content, proxied, comment }) => ({ name, type, content, proxied: !!proxied, comment: comment || "" }));
   }
   async dnsCreate(name) {
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;
