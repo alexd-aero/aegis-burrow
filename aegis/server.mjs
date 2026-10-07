@@ -88,8 +88,8 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "ui.css", "login.css",
-                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg"]) {
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "noxia.html", "noxia.js", "ui.css", "login.css",
+                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/noxia.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
 // Every link to our scripts and styles carries the version: a proxy in front
@@ -636,6 +636,7 @@ async function handleGate(req, res, path, url, host, isMain) {
     if (!x?.ui) return send(res, 404, "");
     return send(res, 200, readFileSync(x.ui), { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" });
   }
+  if (path === "/__gate/noxia") return page(res, "noxia.html");
   if (path === "/__gate/settings") return page(res, "settings.html");
   if (path === "/__gate/welcome") return page(res, "welcome.html");
   if (path.startsWith("/__gate/api/")) return handleApi(req, res, path, url);
@@ -681,6 +682,7 @@ function me(req) {
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
     pack: pack.status(),
     pages: pagesView(),
+    noxia: noxiaView(),
     addonUpdates: addons.updates(),
     extensions: [...extensions].filter(([, x]) => x.ui).map(([id, x]) => ({ id, ui: `/__gate/x/${id}/ui.js?v=${encodeURIComponent(x.version.replace(/\|/g, "-").slice(0, 60))}` })),
     serveo: { ...serveo.state(), forward: serveoForward() },
@@ -738,6 +740,44 @@ function savePrefs(p) {
   settings.set(patch);
 }
 
+// ---------- Noxia: the VLESS + REALITY endpoint running on this machine ----------
+// Noxia is its own service (github.com/alexd-aero/noxia) on 127.0.0.1:NOXIA_WEB.
+// The gate doesn't embed it; the Noxia tab talks to it through this loopback
+// proxy, so the service's web port is never exposed. Presence is polled so the
+// tab can hide when Noxia isn't on this machine.
+const NOXIA_WEB = process.env.NOXIA_WEB || "http://127.0.0.1:7900";
+let noxiaCache = { at: 0, status: null };
+async function pollNoxia() {
+  try {
+    const r = await fetch(`${NOXIA_WEB}/api/status`, { signal: AbortSignal.timeout(2500) });
+    noxiaCache = { at: Date.now(), status: r.ok ? await r.json() : null };
+  } catch { noxiaCache = { at: Date.now(), status: null }; }
+}
+setTimeout(pollNoxia, 2000); setInterval(pollNoxia, 15000).unref?.();
+function noxiaView() {
+  const s = noxiaCache.status;
+  return { present: !!s, running: !!s?.running, front: s?.front || null, routes: (s?.routes || []).length,
+           browserMode: !!(settings.get("noxia") || {}).browserMode };
+}
+async function handleNoxia(req, res, path) {
+  if (req.method === "GET" && path === "/__gate/api/noxia") { await pollNoxia(); return sendJson(res, 200, { ...noxiaView(), status: noxiaCache.status }); }
+  if (req.method === "POST" && path === "/__gate/api/noxia/browser-mode") {
+    const b = await readJsonBody(req);
+    settings.set({ noxia: { ...(settings.get("noxia") || {}), browserMode: !!b.enabled } });
+    return sendJson(res, 200, noxiaView());
+  }
+  // everything else proxies straight to the local Noxia service
+  const sub = path.replace("/__gate/api/noxia", "") || "/status";
+  if (!/^\/(status|reroll|restart|routes)(\/[0-9a-f]{10})?$/.test(sub)) return sendJson(res, 404, { error: "not found" });
+  try {
+    const body = req.method === "GET" ? undefined : JSON.stringify(await readJsonBody(req).catch(() => ({})));
+    const r = await fetch(`${NOXIA_WEB}/api${sub}`, { method: req.method, headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(20000) });
+    const text = await r.text();
+    pollNoxia();
+    return send(res, r.status, text, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  } catch { return sendJson(res, 502, { error: "Noxia isn't reachable on this machine." }); }
+}
+
 async function handleApi(req, res, path, url) {
   const mutating = req.method !== "GET";
   if (mutating) {
@@ -749,6 +789,7 @@ async function handleApi(req, res, path, url) {
   }
   try {
     if (path === "/__gate/api/me") return sendJson(res, 200, me(req));
+    if (path.startsWith("/__gate/api/noxia")) return handleNoxia(req, res, path);
     if (path === "/__gate/api/prefs" && req.method === "POST") { savePrefs(await readJsonBody(req)); return sendJson(res, 200, me(req)); }
     if (path === "/__gate/api/pack" && req.method === "GET") {
       if (!pack.found || Date.now() - pack.found.at > 30000) await pack.detect();
