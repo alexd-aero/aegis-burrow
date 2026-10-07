@@ -757,7 +757,7 @@ setTimeout(pollNoxia, 2000); setInterval(pollNoxia, 15000).unref?.();
 function noxiaView() {
   const s = noxiaCache.status;
   return { present: !!s, running: !!s?.running, front: s?.front || null, routes: (s?.routes || []).length,
-           browser: s?.browser || { running: false }, browserMode: !!(settings.get("noxia") || {}).browserMode };
+           ws: s?.ws || null, browser: s?.browser || { running: false }, browserMode: !!(settings.get("noxia") || {}).browserMode };
 }
 async function handleNoxia(req, res, path) {
   if (req.method === "GET" && path === "/__gate/api/noxia") { await pollNoxia(); return sendJson(res, 200, { ...noxiaView(), status: noxiaCache.status }); }

@@ -48,10 +48,13 @@ function statusCard(st) {
       <div class="card stat"><b>${(st.routes || []).length}</b><span>routes</span><div class="sub">ports served through Noxia</div></div>
       <div class="card stat"><b class="mono" style="font-size:12px">${h((st.xrayVersion || "—").replace("Xray ", ""))}</b><span>xray-core</span></div>
     </div>
-    ${st.shareUri ? `<div style="margin-top:14px"><div class="row" style="display:flex;align-items:center;gap:8px"><b>Client link</b><span class="faint small">import into an Xray-core ≥26 client</span></div>
-      <textarea id="nxUri" readonly spellcheck="false" style="width:100%;height:78px;margin-top:8px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.shareUri)}</textarea>
-      <div style="margin-top:8px"><button class="btn sm primary" data-act="copy-uri">${ICON.copy} Copy link</button></div></div>`
+    ${st.shareUri ? `<div style="margin-top:14px"><div class="row" style="display:flex;align-items:center;gap:8px"><b>Client link</b><span class="pill">REALITY</span><span class="faint small">direct · decoy front · post-quantum · import into an Xray-core ≥26 client</span></div>
+      <textarea id="nxUri" readonly spellcheck="false" style="width:100%;height:72px;margin-top:8px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.shareUri)}</textarea>
+      <div style="margin-top:8px"><button class="btn sm primary" data-act="copy-uri">${ICON.copy} Copy REALITY link</button></div></div>`
       : `<div class="note-err small" style="margin-top:14px">No public address yet. Noxia's service sets it from its endpoint settings (NOXIA_RECORD / WAN port). The endpoint still runs locally.</div>`}
+    ${st.ws?.shareUri ? `<div style="margin-top:14px"><div class="row" style="display:flex;align-items:center;gap:8px"><b>Client link</b><span class="pill" style="color:#7ab8ff;border-color:rgba(122,184,255,.4)">WS · 443</span><span class="faint small">via the VPS edge on port 443 · blends as ordinary HTTPS · for restricted networks</span></div>
+      <textarea id="nxWsUri" readonly spellcheck="false" style="width:100%;height:60px;margin-top:8px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.ws.shareUri)}</textarea>
+      <div style="margin-top:8px"><button class="btn sm" data-act="copy-ws">${ICON.copy} Copy 443 link</button></div></div>` : ""}
   </section>`;
 }
 
@@ -177,7 +180,8 @@ document.addEventListener("click", async (e) => {
   try {
     if (act === "reroll") { el.disabled = true; S.data.status = await api("/__gate/api/noxia/reroll", { method: "POST", body: "{}" }); toast("New front: " + (S.data.status.front?.dest || "")); render(); }
     else if (act === "restart") { el.disabled = true; S.data.status = await api("/__gate/api/noxia/restart", { method: "POST", body: "{}" }); toast("Restarted"); render(); }
-    else if (act === "copy-uri") { const t = $("#nxUri"); if (t) { await navigator.clipboard.writeText(t.value).catch(() => { t.select(); document.execCommand("copy"); }); toast("Link copied"); } }
+    else if (act === "copy-uri") { const t = $("#nxUri"); if (t) { await navigator.clipboard.writeText(t.value).catch(() => { t.select(); document.execCommand("copy"); }); toast("REALITY link copied"); } }
+    else if (act === "copy-ws") { const t = $("#nxWsUri"); if (t) { await navigator.clipboard.writeText(t.value).catch(() => { t.select(); document.execCommand("copy"); }); toast("443 link copied"); } }
     else if (act === "add") addForm(S.data.browserMode);
     else if (act === "route-rm") { el.disabled = true; await api(`/__gate/api/noxia/routes/${el.dataset.id}`, { method: "DELETE" }); toast("Removed"); await load(); }
     else if (act === "transfer") { el.disabled = true; await doTransfer(el); }
