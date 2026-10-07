@@ -21,10 +21,6 @@ function available(me) {
   if (me.termix) out.push({ id: "termix", href: "/__gate/open/termix", img: "/__gate/logos/termix.svg", title: "Termix", text: "SSH terminals, files and hosts.", foot: location.host });
   if (me.modules.burrow) out.push({ id: "burrow", href: "/__gate/tunnels", img: "/__gate/logos/burrow.svg", title: "Burrow",
     text: "Publish a port on its own address, with live traffic and clients.", foot: me.domain ? `tunnel-PORT-${me.domain.mainHost}` : "trycloudflare.com" });
-  if (me.noxia?.present) out.push({ id: "noxia", href: "/__gate/noxia", img: "/__gate/logos/noxia.svg", title: "Noxia",
-    text: "A VLESS + REALITY tunnel: serve a port encrypted, behind your keys.", foot: me.noxia.running ? (me.noxia.routes ? `${me.noxia.routes} route${me.noxia.routes === 1 ? "" : "s"}` : "running") : "stopped" });
-  if (me.modules.burrow && me.pages?.installed) out.push({ id: "pages", href: "/__gate/tunnels#/pages", img: me.pages.logo, title: "Burrow Pages",
-    text: "GitHub & GitLab Pages on your domain, behind a password.", foot: me.pages.sites ? `${me.pages.sites} site${me.pages.sites === 1 ? "" : "s"}` : "no sites yet" });
   for (const i of me.integrations) {
     out.push(i.full
       ? { id: "app:" + i.id, href: `/__gate/tunnels#/i/${encodeURIComponent(i.id)}`, img: i.logo, title: i.name, text: "Desktops, their links and tunnels, start and stop.", foot: i.version ? `v${i.version}` : "connected" }

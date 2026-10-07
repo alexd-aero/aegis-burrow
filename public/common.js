@@ -47,8 +47,6 @@ export async function chrome(active) {
   try { me = await api("/__gate/api/me"); } catch { return null; }
   const termix = document.querySelector('[data-nav="termix"]');
   if (termix) termix.hidden = !me.termix;
-  const noxia = document.querySelector('[data-nav="noxia"]');
-  if (noxia) noxia.hidden = !me.noxia?.present;
   const burrow = document.querySelector('[data-nav="tunnels"]');
   if (burrow && !me.modules?.burrow && active !== "tunnels") burrow.hidden = true;
   updateBanner(me, document.querySelector("main"));
