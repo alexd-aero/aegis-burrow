@@ -757,13 +757,16 @@ setTimeout(pollNoxia, 2000); setInterval(pollNoxia, 15000).unref?.();
 function noxiaView() {
   const s = noxiaCache.status;
   return { present: !!s, running: !!s?.running, front: s?.front || null, routes: (s?.routes || []).length,
-           browserMode: !!(settings.get("noxia") || {}).browserMode };
+           browser: s?.browser || { running: false }, browserMode: !!(settings.get("noxia") || {}).browserMode };
 }
 async function handleNoxia(req, res, path) {
   if (req.method === "GET" && path === "/__gate/api/noxia") { await pollNoxia(); return sendJson(res, 200, { ...noxiaView(), status: noxiaCache.status }); }
   if (req.method === "POST" && path === "/__gate/api/noxia/browser-mode") {
     const b = await readJsonBody(req);
     settings.set({ noxia: { ...(settings.get("noxia") || {}), browserMode: !!b.enabled } });
+    // turning the feature on/off actually starts/stops the hosted browser
+    try { await fetch(`${NOXIA_WEB}/api/browser/${b.enabled ? "start" : "stop"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", signal: AbortSignal.timeout(20000) }); } catch { /* reflected on next poll */ }
+    await pollNoxia();
     return sendJson(res, 200, noxiaView());
   }
   // everything else proxies straight to the local Noxia service

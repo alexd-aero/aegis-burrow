@@ -88,11 +88,14 @@ function transferCard() {
 const isSite = (t) => t.kind === "site" || t.app === "burrow-pages";
 
 function browserCard(view) {
+  const b = view.browser || {};
   return `<section class="card panel">
-    <div class="t-top"><div class="grow"><h3 style="margin:0">Browser mode</h3>
-      <p class="faint small" style="margin:4px 0 0">When on, adding a tunnel can host a <b>server-side browser</b> for it — the page is fetched here and relayed encrypted, so the client browses fully through Noxia. Off by default.</p></div>
+    <div class="t-top"><div class="grow"><h3 style="margin:0">Browser mode ${b.running ? '<span class="pill ok"><i class="dot ok"></i>hosting</span>' : ""}</h3>
+      <p class="faint small" style="margin:4px 0 0">A <b>server-side browser</b>, reached through Noxia: every page is fetched here and relayed, so the client's real destinations never leave this machine in the clear — full browser encrypted.</p></div>
       <label class="switch" title="Browser mode"><input type="checkbox" data-act="browser-toggle" ${view.browserMode ? "checked" : ""}><i></i></label></div>
-    ${view.browserMode ? `<p class="note small" style="margin-top:10px">On. The <b>Add tunnel via Noxia</b> dialog now offers “host a browser”. <span class="faint">(The hosted-browser backend is being ported from vpn-portal; the option is visible and records your choice.)</span></p>` : ""}
+    ${view.browserMode ? `<p class="note small" style="margin-top:10px">${b.running
+      ? `On — the hosted browser is served at <span class="mono">127.0.0.1:${b.port}</span> and routed through Noxia. A connected client opens that address to browse fully encrypted.`
+      : `Starting the hosted browser…`}</p>` : ""}
   </section>`;
 }
 
@@ -142,9 +145,15 @@ function addForm(browserOn) {
       e.preventDefault();
       const err = m.querySelector("#nxErr"), go = m.querySelector("#nxGo");
       err.textContent = "";
+      const wantBrowser = browserOn && m.querySelector("#nxBrowser")?.checked;
       const body = { host: m.querySelector("#nxHost").value.trim() || "127.0.0.1", port: Number(m.querySelector("#nxPort").value),
-                     label: m.querySelector("#nxLabel").value.trim() || undefined, browser: browserOn && m.querySelector("#nxBrowser")?.checked || undefined };
-      try { go.disabled = true; go.textContent = "Adding…"; await api("/__gate/api/noxia/routes", { method: "POST", body: JSON.stringify(body) }); closeModal(); toast("Serving through Noxia"); await load(); }
+                     label: m.querySelector("#nxLabel").value.trim() || undefined };
+      try {
+        go.disabled = true; go.textContent = "Adding…";
+        await api("/__gate/api/noxia/routes", { method: "POST", body: JSON.stringify(body) });
+        if (wantBrowser) await api("/__gate/api/noxia/browser-mode", { method: "POST", body: JSON.stringify({ enabled: true }) });
+        closeModal(); toast(wantBrowser ? "Serving through Noxia + hosted browser on" : "Serving through Noxia"); await load();
+      }
       catch (ex) { err.textContent = ex.message; go.disabled = false; go.innerHTML = `${ICON.plus} Serve through Noxia`; }
     });
   });
