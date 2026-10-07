@@ -18,6 +18,7 @@ const ICON = {
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-14 5.3M4 12A8 8 0 0 1 18 6.7"/><path d="M18 2.5v4.5h-4.5M6 21.5V17h4.5"/></svg>',
   move: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
   globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14 0 18M12 3c-3 3.5-3 14 0 18"/></svg>',
+  key: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#a98bff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.7-8.7M17 6l3 3M14.5 8.5l2 2"/></svg>',
 };
 
 async function api(path, opts = {}) {
@@ -44,32 +45,39 @@ function statusCard(st) {
     </div>
     <div class="stats" style="margin-top:14px">
       <div class="card stat"><b>${st.running ? "live" : "—"}</b><span>endpoint</span><div class="sub mono">${h(st.listen || "")}:${h(String(st.port || ""))}</div></div>
-      <div class="card stat"><b class="mono" style="font-size:13px">${h(st.publicHost || "set host")}</b><span>public address</span><div class="sub">clients connect here</div></div>
-      <div class="card stat"><b>${(st.routes || []).length}</b><span>routes</span><div class="sub">ports served through Noxia</div></div>
+      <div class="card stat"><b class="mono" style="font-size:13px">${h(st.tunnels?.zone || "—")}</b><span>tunnel domain</span><div class="sub">nx-&lt;name&gt;.${h(st.tunnels?.zone || "")}</div></div>
+      <div class="card stat"><b>${(st.routes || []).length}</b><span>tunnels</span><div class="sub">open in a browser</div></div>
       <div class="card stat"><b class="mono" style="font-size:12px">${h((st.xrayVersion || "—").replace("Xray ", ""))}</b><span>xray-core</span></div>
     </div>
-    ${st.shareUri ? `<div style="margin-top:14px"><div class="row" style="display:flex;align-items:center;gap:8px"><b>Client link</b><span class="pill">REALITY</span><span class="faint small">direct · decoy front · post-quantum · import into an Xray-core ≥26 client</span></div>
-      <textarea id="nxUri" readonly spellcheck="false" style="width:100%;height:72px;margin-top:8px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.shareUri)}</textarea>
-      <div style="margin-top:8px"><button class="btn sm primary" data-act="copy-uri">${ICON.copy} Copy REALITY link</button></div></div>`
-      : `<div class="note-err small" style="margin-top:14px">No public address yet. Noxia's service sets it from its endpoint settings (NOXIA_RECORD / WAN port). The endpoint still runs locally.</div>`}
-    ${st.ws?.shareUri ? `<div style="margin-top:14px"><div class="row" style="display:flex;align-items:center;gap:8px"><b>Client link</b><span class="pill" style="color:#7ab8ff;border-color:rgba(122,184,255,.4)">WS · 443</span><span class="faint small">via the VPS edge on port 443 · blends as ordinary HTTPS · for restricted networks</span></div>
-      <textarea id="nxWsUri" readonly spellcheck="false" style="width:100%;height:60px;margin-top:8px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.ws.shareUri)}</textarea>
-      <div style="margin-top:8px"><button class="btn sm" data-act="copy-ws">${ICON.copy} Copy 443 link</button></div></div>` : ""}
+    ${st.tunnels?.password ? `<div class="row" style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line-2);border-radius:12px;background:rgba(124,92,255,.05)">
+      ${ICON.key}<span>Every tunnel is behind one login — <b class="mono">${h(st.tunnels.user)}</b> / <b class="mono">${h(st.tunnels.password)}</b></span>
+      <span class="spacer" style="flex:1"></span><button class="btn sm ghost" data-act="copy-pass" data-pass="${h(st.tunnels.password)}">${ICON.copy} Copy password</button></div>` : ""}
+    <details class="nx-adv" style="margin-top:14px"><summary style="cursor:pointer;color:var(--faint);font-size:12.5px">Advanced: VLESS client links (for an Xray app instead of a browser)</summary>
+      ${st.shareUri ? `<div style="margin-top:12px"><div class="row" style="display:flex;align-items:center;gap:8px"><span class="pill">REALITY</span><span class="faint small">direct · decoy front · post-quantum</span></div>
+        <textarea id="nxUri" readonly spellcheck="false" style="width:100%;height:66px;margin-top:6px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.shareUri)}</textarea>
+        <button class="btn sm" data-act="copy-uri">${ICON.copy} Copy REALITY link</button></div>` : ""}
+      ${st.ws?.shareUri ? `<div style="margin-top:12px"><div class="row" style="display:flex;align-items:center;gap:8px"><span class="pill" style="color:#7ab8ff;border-color:rgba(122,184,255,.4)">WS · 443</span><span class="faint small">via the VPS edge · blends as HTTPS</span></div>
+        <textarea id="nxWsUri" readonly spellcheck="false" style="width:100%;height:56px;margin-top:6px;background:#0d0f12;border:1px solid var(--line-2);border-radius:12px;color:#cfe0ff;font:12px var(--mono);padding:10px">${h(st.ws.shareUri)}</textarea>
+        <button class="btn sm" data-act="copy-ws">${ICON.copy} Copy 443 link</button></div>` : ""}
+    </details>
   </section>`;
 }
 
 function routesCard(st) {
   const routes = st.routes || [];
   return `<section class="card panel">
-    <div class="t-top"><div class="grow"><h3 style="margin:0">Served through Noxia</h3>
-      <p class="faint small" style="margin:4px 0 0">Each port here is reachable by a connected client, encrypted end to end. Everything else on this machine stays walled off.</p></div>
+    <div class="t-top"><div class="grow"><h3 style="margin:0">Tunnels</h3>
+      <p class="faint small" style="margin:4px 0 0">Each one is a local port served at its own <span class="mono">nx-&lt;name&gt;</span> address — just open the link in a browser, behind the login above. No VLESS client needed.</p></div>
       <button class="btn sm primary" data-act="add">${ICON.plus} Add tunnel via Noxia</button></div>
     ${routes.length ? `<div class="pages-list" style="margin-top:12px">${routes.map((r) => `
       <div class="prow"><div class="fav" style="color:#a98bff">${ICON.shield}</div>
-        <div class="grow"><div class="t-name">${h(r.label)}</div>
-          <div class="t-url mono faint small">${h(r.host)}:${h(String(r.port))}${r.source === "transfer" ? " · transferred from Burrow" : ""}${r.browser ? " · browser mode" : ""}</div></div>
+        <div class="grow" style="min-width:0"><div class="t-name">${h(r.label)}</div>
+          <div class="t-url">${r.url ? `<a href="${h(r.url)}" target="_blank" rel="noopener" data-stop>${h(r.url.replace(/^https:\/\//, ""))}</a>
+            <button class="copy" data-act="copy-text" data-text="${h(r.url)}" title="Copy link" aria-label="Copy link">${ICON.copy}</button>` : `<span class="mono faint small">${h(r.host)}:${h(String(r.port))}</span>`}
+            <span class="mono faint small"> → ${h(r.host)}:${h(String(r.port))}${r.source === "transfer" ? " · from Burrow" : ""}</span></div></div>
+        ${r.url ? `<a class="btn sm" href="${h(r.url)}" target="_blank" rel="noopener" data-stop>${ICON.globe} Open</a>` : ""}
         <button class="btn sm ghost danger" data-act="route-rm" data-id="${h(r.id)}">Remove</button></div>`).join("")}</div>`
-      : `<div class="pages-empty"><p class="muted small" style="margin-top:12px">Nothing served yet. <b>Add tunnel via Noxia</b> to pick a local port, or transfer a Burrow tunnel below.</p></div>`}
+      : `<div class="pages-empty"><p class="muted small" style="margin-top:12px">No tunnels yet. <b>Add tunnel via Noxia</b> to pick a local port — it becomes a link you open in any browser. Or transfer a Burrow tunnel below.</p></div>`}
   </section>`;
 }
 
@@ -112,7 +120,7 @@ function render() {
     return;
   }
   const st = S.data.status || {};
-  app.innerHTML = `<div class="head"><div><h1>Noxia</h1><p>VLESS + REALITY · post-quantum · a random TLS front. Serve a port encrypted, behind your keys — not the public internet.</p></div></div>
+  app.innerHTML = `<div class="head"><div><h1>Noxia</h1><p>Turn any local port into a private link you open in a browser — <span class="mono">nx-&lt;name&gt;.${h(st.tunnels?.zone || "")}</span>, behind one login, carried over your own VPS.</p></div></div>
     ${statusCard(st)}
     ${routesCard(st)}
     ${transferCard()}
@@ -132,12 +140,15 @@ function openModal(html, onReady) {
 function closeModal() { S.modal?.remove(); S.modal = null; }
 
 function addForm(browserOn) {
+  const zone = S.data?.status?.tunnels?.zone || "your-domain";
   openModal(`<h2>Add a tunnel via Noxia</h2>
-    <p class="muted">Pick a port on this machine. A connected client reaches it encrypted through Noxia; it is never exposed publicly.</p>
+    <p class="muted">Pick a port on this machine. It becomes a link you open in any browser, behind the Noxia login — never a public open port.</p>
     <form id="nxAdd" autocomplete="off">
+      <label class="field"><span>Name <span class="faint">(its address)</span></span>
+        <div class="addr" style="display:flex;align-items:center;gap:0"><span class="mono zone" style="color:var(--faint)">nx-</span><input class="input mono" id="nxName" maxlength="32" placeholder="grafana" spellcheck="false" autocapitalize="none" autofocus style="border-radius:0"><span class="mono zone" style="color:var(--faint)">.${h(zone)}</span></div></label>
       <div class="d-two">
         <label class="field"><span>Host</span><input class="input mono" id="nxHost" value="127.0.0.1" spellcheck="false"></label>
-        <label class="field"><span>Port</span><input class="input mono" id="nxPort" type="number" min="1" max="65535" placeholder="8787" autofocus></label>
+        <label class="field"><span>Port</span><input class="input mono" id="nxPort" type="number" min="1" max="65535" placeholder="8787"></label>
       </div>
       <label class="field"><span>Label <span class="faint">(optional)</span></span><input class="input" id="nxLabel" maxlength="60" placeholder="e.g. Grafana"></label>
       ${browserOn ? `<label class="check" style="display:flex;gap:8px;align-items:center;margin:4px 0 6px"><input type="checkbox" id="nxBrowser"><span>Host a browser for it (browser mode)</span></label>` : ""}
@@ -150,6 +161,7 @@ function addForm(browserOn) {
       err.textContent = "";
       const wantBrowser = browserOn && m.querySelector("#nxBrowser")?.checked;
       const body = { host: m.querySelector("#nxHost").value.trim() || "127.0.0.1", port: Number(m.querySelector("#nxPort").value),
+                     name: m.querySelector("#nxName").value.trim() || undefined,
                      label: m.querySelector("#nxLabel").value.trim() || undefined };
       try {
         go.disabled = true; go.textContent = "Adding…";
@@ -182,6 +194,8 @@ document.addEventListener("click", async (e) => {
     else if (act === "restart") { el.disabled = true; S.data.status = await api("/__gate/api/noxia/restart", { method: "POST", body: "{}" }); toast("Restarted"); render(); }
     else if (act === "copy-uri") { const t = $("#nxUri"); if (t) { await navigator.clipboard.writeText(t.value).catch(() => { t.select(); document.execCommand("copy"); }); toast("REALITY link copied"); } }
     else if (act === "copy-ws") { const t = $("#nxWsUri"); if (t) { await navigator.clipboard.writeText(t.value).catch(() => { t.select(); document.execCommand("copy"); }); toast("443 link copied"); } }
+    else if (act === "copy-text") { await navigator.clipboard.writeText(el.dataset.text || "").catch(() => {}); toast("Link copied"); }
+    else if (act === "copy-pass") { await navigator.clipboard.writeText(el.dataset.pass || "").catch(() => {}); toast("Password copied"); }
     else if (act === "add") addForm(S.data.browserMode);
     else if (act === "route-rm") { el.disabled = true; await api(`/__gate/api/noxia/routes/${el.dataset.id}`, { method: "DELETE" }); toast("Removed"); await load(); }
     else if (act === "transfer") { el.disabled = true; await doTransfer(el); }
