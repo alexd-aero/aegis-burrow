@@ -43,6 +43,7 @@ import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Burrow } from "../burrow/index.mjs";
+import { CHECK_PATH } from "../burrow/edge.mjs";
 import { checkLock } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
@@ -110,7 +111,15 @@ const TYPES = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; char
 const ORIGIN_HOST = ["0.0.0.0", "::", ""].includes(LISTEN.host) ? "127.0.0.1"
   : LISTEN.host.includes(":") ? `[${LISTEN.host}]` : LISTEN.host;
 const origin = () => ({ url: `${TLS ? "https" : "http"}://${ORIGIN_HOST}:${LISTEN.port}`, insecure: !!TLS });
-const burrow = new Burrow({ settings, dataDir: DATA, home: HOME, origin, forbiddenPorts: [LISTEN.port], log, version: VERSION });
+// The edge: wildcard tunnels on this machine's own certificate (burrow/edge.mjs),
+// on a public port of their own: 443 when this process may listen there
+// (root, or CAP_NET_BIND_SERVICE), else 8443, else 18443, unless config.json
+// says {edge: {port}}. The router forwards 443 here.
+const EDGE = { host: "0.0.0.0", upnp: true, ...settings.get("edge") };
+if (process.env.AEGIS_EDGE_PORT) EDGE.port = Number(process.env.AEGIS_EDGE_PORT);
+const EDGE_PORTS = EDGE.port ? [Number(EDGE.port)] : [443, 8443, 18443];
+const burrow = new Burrow({ settings, dataDir: DATA, home: HOME, origin, forbiddenPorts: [LISTEN.port, ...EDGE_PORTS], log, version: VERSION,
+                            edge: { port: EDGE_PORTS[0], upnp: EDGE.upnp } });
 const { tunnels, cloudflare } = burrow;
 const burrowOn = () => burrow.on;
 // Burrow's addons: the same format as Selkies Forge's (burrow/addons.mjs).
@@ -1191,6 +1200,58 @@ server.on("upgrade", (req, socket, head) => {
   if (termixMounted()) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
   proxyUpgrade(req, socket, head);
 });
+
+// ---------- the edge ----------
+// Only tunnel names get through here: never the dashboard, whatever the Host
+// says, and the client's address is the socket's (headers that claim another
+// are dropped).
+function edgeAdmit(req) {
+  if (burrow.matchHost(hostOf(req)) === null) return false;
+  for (const k of ["x-forwarded-for", "x-real-ip", "x-forwarded-proto", "x-forwarded-host"]) delete req.headers[k];
+  req.headers["cf-connecting-ip"] = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  return true;
+}
+let edgeServer = null;
+function edgeListen() {
+  if (edgeServer || !tunnels.edge.ready()) return;
+  edgeServer = createHttpsServer({
+    SNICallback: (name, cb) => { const ctx = tunnels.edge.context(name); if (ctx) cb(null, ctx); else cb(new Error("not a tunnel name")); },
+    minVersion: "TLSv1.2",
+  }, (req, res) => {
+    // the edge's check from the outside (through Cloudflare): answer with its token
+    if (hostOf(req) === tunnels.edge.checkName) {
+      const ok = new URL(req.url || "/", "http://x").pathname === CHECK_PATH;
+      res.writeHead(ok ? 200 : 404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      return res.end(ok ? tunnels.edge.checkToken : "");
+    }
+    if (edgeAdmit(req)) return handler(req, res);
+    res.writeHead(421, { "Content-Type": "text/plain" }); res.end("Misdirected request");
+  });
+  edgeServer.on("upgrade", (req, socket, head) => {
+    if (edgeAdmit(req)) server.emit("upgrade", req, socket, head);
+    else socket.end("HTTP/1.1 421 Misdirected Request\r\n\r\n");
+  });
+  edgeServer.on("tlsClientError", () => { /* scanners, names we don't serve */ });
+  edgeServer.keepAliveTimeout = 65000;
+  const tryPort = (i) => {
+    const port = EDGE_PORTS[i];
+    const fail = (e) => {
+      if (i + 1 < EDGE_PORTS.length && (e.code === "EACCES" || e.code === "EADDRINUSE")) return tryPort(i + 1);
+      log(`edge: can't listen on ${EDGE.host}:${port}:`, e.message);
+      edgeServer = null;
+    };
+    edgeServer.once("error", fail);
+    edgeServer.listen(port, EDGE.host, () => {
+      edgeServer.off("error", fail);
+      edgeServer.on("error", (e) => log("edge:", e.message));
+      if (tunnels.edge.port !== port) { tunnels.edge.port = port; tunnels.edge.upnp.at = 0; }
+      log(`edge: wildcard tunnels answer on ${EDGE.host}:${port} with this machine's certificate`);
+    });
+  };
+  tryPort(0);
+}
+tunnels.edge.onCert = edgeListen;
+edgeListen();
 
 // ---------- the local control socket (Burrow's, see burrow/index.mjs) ----------
 

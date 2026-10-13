@@ -48,13 +48,15 @@ const ACTIVITY = 60;
 export class Burrow {
   // settings: get(key) / set(patch), backed by state.json
   // origin:   () => {url, insecure}: where cloudflared reaches the dashboard
-  constructor({ settings, dataDir, home, origin, forbiddenPorts, log, version }) {
+  // edge:     {port, upnp}: where wildcard tunnels answer on this machine's own certificate (edge.mjs)
+  constructor({ settings, dataDir, home, origin, forbiddenPorts, log, version, edge }) {
     this.settings = settings;
     this.log = log || console.log;
     this.version = version;
     this.quick = new QuickTunnels({ bin: () => findCloudflared(settings.get("cloudflared"), home), origin, log: this.log, dataDir });
     this.tunnels = new TunnelManager({ dataDir, domain: settings.get("domain"), quick: this.quick, forbiddenPorts, log: this.log,
-                                       naming: settings.get("tunnelNaming") });
+                                       naming: settings.get("tunnelNaming"), edge,
+                                       onNaming: ({ mode, prefix, certs, relay }) => settings.set({ tunnelNaming: { mode, prefix, certs, relay } }) });
     if (!this.on) this.quick.stopAll();
     this.cloudflare = new Cloudflare({
       settings, dataDir, home, origin, log: this.log,
@@ -112,9 +114,7 @@ export class Burrow {
     if (path === "/tunnels/naming" && method === "PUT") {
       const body = await readJson();
       try {
-        const info = await T.setNaming(body, { force: !!body.force });
-        this.settings.set({ tunnelNaming: { mode: info.mode, prefix: info.prefix } });
-        return ok(info);
+        return ok(await T.setNaming(body, { force: !!body.force }));      // kept through onNaming (relay and certs too)
       } catch (e) {
         return { status: 400, json: { error: e.message, code: e.code || null } };
       }

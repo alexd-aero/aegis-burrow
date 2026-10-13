@@ -14,7 +14,25 @@ const sec = (id, title, sub, body) => `<section class="card lit panel set" id="$
 // How tunnels are named: a DNS record each, or one wildcard *.<prefix>.<zone>.
 function namingDraft() {
   const n = S.naming || { mode: "record", prefix: "tunnel" };
-  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel"), relay: S.nmDraft?.relay ?? (n.relay || "") };
+  const certs = n.certs && n.certs !== "auto" ? n.certs : "self";
+  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel"), relay: S.nmDraft?.relay ?? (n.relay || ""),
+           certs: S.nmDraft?.certs ?? certs };
+}
+const day = (t) => new Date(t).toISOString().slice(0, 10);
+// This machine's certificate and where the wildcard points right now.
+function edgeStatus(e, zone) {
+  if (!e) return "";
+  const cert = e.issuing ? '<span class="pill warn"><i class="spin"></i> asking Let\'s Encrypt…</span>'
+    : e.cert ? `<span class="pill ok"><i class="dot ok"></i>${h(e.cert.names[0] || "*." + e.base)} · Let's Encrypt${e.cert.staging ? " (staging)" : ""} · until ${h(day(e.cert.notAfter))}</span>`
+    : `<span class="pill err"><i class="dot err"></i>no certificate${e.error ? ": " + h(e.error) : ""}</span>`;
+  const route = e.via === "direct" && e.direct.ok ? `<span class="pill ok"><i class="dot ok"></i>straight to this machine · ${h(e.target)}</span>`
+    : e.via === "relay" ? `<span class="pill warn"><i class="dot warn"></i>through the backup relay · ${h(e.target)}</span>`
+    : e.target ? `<span class="pill warn"><i class="dot warn"></i>this machine · ${h(e.target)} · not reachable yet</span>` : '<span class="pill">finding this machine\'s address…</span>';
+  const fix = e.direct.ok ? "" : `<p class="faint small">${e.direct.why ? `Checked through ${h(e.publicIp || "the public address")}: ${h(e.direct.why)}. ` : ""}`
+    + `Forward TCP port <b>443</b> on your router to <span class="mono">${h(e.lan || "this machine")}:${h(e.port)}</span>`
+    + (e.upnp?.note ? ` (Aegis asked over UPnP; ${h(e.upnp.note)})` : "")
+    + `. The record moves here by itself within two minutes of it working${e.relay ? `; until then <span class="mono">${h(e.relay)}</span> serves the names` : ""}.</p>`;
+  return `<div class="kv-row"><span>Certificate</span>${cert}</div><div class="kv-row"><span>*.${h(e.base || zone)}</span>${route}</div>${fix}`;
 }
 function namingSummary(d) {
   const n = S.naming;
@@ -25,7 +43,13 @@ function namingHost(n, zone) { return `radio.${n.prefix ? n.prefix + "." : ""}${
 function namingForm(d) {
   if (!S.naming) return "";
   const n = namingDraft(), cur = S.naming;
-  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || n.relay !== (cur.relay || "") || !cur.active));
+  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || n.relay !== (cur.relay || "") || n.certs !== cur.certs || !cur.active));
+  const wild = `*.${n.prefix ? n.prefix + "." : ""}${d.zone}`;
+  const certHelp = {
+    self: `This machine gets a free Let's Encrypt certificate for <span class="mono">${h(wild)}</span> (checked through your Cloudflare DNS, renewed by itself) and serves the tunnels with it; <span class="mono">${h(wild)}</span> points straight here. No relay and no Cloudflare proxy sees the traffic.`,
+    relay: `<span class="mono">${h(wild)}</span> points at the relay. Caddy there fetches a free certificate for each tunnel name the first time it's opened, asking this gate first (<span class="mono">/__gate/relay-ask</span>), and passes requests here over a reverse SSH tunnel. The relay sees the traffic.`,
+    cloudflare: n.prefix ? `Through Cloudflare's proxy, which needs a certificate for <span class="mono">${h(wild)}</span> (Advanced Certificate Manager, paid); Aegis checks before it switches.` : `Through Cloudflare's proxy: its free certificate covers <span class="mono">${h(wild)}</span>. Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`,
+  }[n.certs];
   return `<div class="naming">
       <div class="row flexwrap" style="gap:12px;align-items:center">
         <b class="small">Tunnel addresses</b>
@@ -33,11 +57,16 @@ function namingForm(d) {
       </div>
       ${n.mode === "wildcard" ? `<label class="field" style="margin-top:12px"><span>Wildcard</span>
           <div class="addr"><span class="mono zone">*.</span><input class="input mono" id="nmPrefix" value="${h(n.prefix)}" maxlength="60" spellcheck="false" autocapitalize="none" placeholder="(none)"><span class="mono zone">.${h(d.zone)}</span></div></label>
-        <p class="faint small">Every tunnel is <span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>: its own name, or its port (<span class="mono">${h(namingHost(n, d.zone))}</span>, <span class="mono">3000.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>). No DNS record is added per tunnel, so new tunnels answer at once.
-        ${n.relay ? "" : n.prefix ? `A name two levels deep needs a Cloudflare certificate for <span class="mono">*.${h(n.prefix)}.${h(d.zone)}</span> (Advanced Certificate Manager, paid); Aegis checks before it switches. A relay server below gets free certificates instead.` : `Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`}</p>
-        <label class="field" style="margin-top:12px"><span>Relay server <span class="faint">(optional: its IP)</span></span>
-          <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="none: through Cloudflare"></label>
-        <p class="faint small">${n.relay ? `<span class="mono">*.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span> points at <span class="mono">${h(n.relay)}</span> (not through Cloudflare). Caddy there fetches a free Let's Encrypt certificate for each tunnel name the first time it's opened, asking this gate first (<span class="mono">/__gate/relay-ask</span>), and passes requests here over a reverse SSH tunnel.` : "A server of yours running Caddy with on-demand TLS: tunnels then need no Cloudflare certificate at all."}</p>`
+        <p class="faint small">Every tunnel is <span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>: its own name, or its port (<span class="mono">${h(namingHost(n, d.zone))}</span>, <span class="mono">3000.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>). No DNS record is added per tunnel, so new tunnels answer at once.</p>
+        <div class="row flexwrap" style="gap:12px;align-items:center;margin-top:12px">
+          <b class="small">Certificate</b>
+          <div class="seg" id="nmCerts"><button type="button" data-v="self" class="${n.certs === "self" ? "on" : ""}">This machine</button><button type="button" data-v="relay" class="${n.certs === "relay" ? "on" : ""}">A relay server</button><button type="button" data-v="cloudflare" class="${n.certs === "cloudflare" ? "on" : ""}">Cloudflare</button></div>
+        </div>
+        <p class="faint small">${certHelp}</p>
+        ${cur.active && cur.certs === "self" && n.certs === "self" ? edgeStatus(cur.edge, d.zone) : ""}
+        ${n.certs !== "cloudflare" ? `<label class="field" style="margin-top:12px"><span>${n.certs === "self" ? 'Backup relay <span class="faint">(optional: its IP)</span>' : "Relay server (its IP)"}</span>
+          <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="${n.certs === "self" ? "none" : "203.0.113.7"}"></label>
+        <p class="faint small">${n.certs === "self" ? "A server of yours running Caddy with on-demand TLS that takes over while this machine isn't reachable on port 443, and hands the names back once it is." : "A server of yours running Caddy with on-demand TLS."}</p>` : ""}`
       : `<p class="faint small" style="margin-top:10px">Each tunnel gets a DNS record of its own when it's made (<span class="mono">tunnel-3000-${h(d.mainHost)}</span>), so a brand-new name can take a minute to answer everywhere.</p>`}
       <div class="err-msg" id="nmErr">${h(S.nmErr || "")}</div>
       ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">Move every tunnel</button></div>` : ""}
@@ -455,6 +484,11 @@ function wireForms() {
     if (!btn) return;
     S.nmDraft = { ...namingDraft(), mode: btn.dataset.v }; S.nmErr = ""; render();
   });
+  $("#nmCerts")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-v]");
+    if (!btn) return;
+    S.nmDraft = { ...namingDraft(), certs: btn.dataset.v }; S.nmErr = ""; render();
+  });
   const np = $("#nmPrefix");
   if (np) {
     np.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), prefix: np.value.trim().toLowerCase().replace(/^\*?\.|\.$/g, "") }; });
@@ -578,9 +612,10 @@ document.addEventListener("click", async (e) => {
     else if (act === "naming-cancel") { S.nmDraft = null; S.nmErr = ""; render(); }
     else if (act === "naming-save") {
       const n = namingDraft(), zone = S.cf.domain.zone;
+      if (n.certs === "cloudflare") n.relay = "";
       const where = n.mode === "wildcard" ? `NAME.${n.prefix ? n.prefix + "." : ""}${zone} through one wildcard record` : `tunnel-PORT-${S.cf.domain.mainHost} with a DNS record each`;
       if (!confirm(`Move every tunnel to ${where}? Their current addresses stop working.`)) return;
-      el.disabled = true; el.innerHTML = '<i class="spin"></i> Moving…'; S.busy = true;
+      el.disabled = true; el.innerHTML = n.mode === "wildcard" && n.certs === "self" ? '<i class="spin"></i> Getting the certificate…' : '<i class="spin"></i> Moving…'; S.busy = true;
       try {
         const j = await api("/__gate/api/tunnels/naming", { method: "PUT", body: JSON.stringify(n) });
         S.naming = j; S.nmDraft = null; S.nmErr = "";

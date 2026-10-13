@@ -21,11 +21,19 @@
 // The prefix is the user's ("tunnel" by default); empty means *.<zone> itself.
 // A two-level name needs an edge certificate for *.<prefix>.<zone>, which
 // Cloudflare's free one isn't (Advanced Certificate Manager is), so the switch
-// checks the certificate first (certCovers). Or naming.relay names a server
-// (its IP) that takes the traffic instead of Cloudflare: the wildcard is then a
-// plain A record to it (not proxied), and the relay (Caddy with on-demand TLS)
-// fetches a free certificate per name, asking /__gate/relay-ask first, and
-// passes the requests on to this gate (over a reverse SSH tunnel, say).
+// checks the certificate first (certCovers). naming.certs says who holds the
+// certificate for those names:
+//   "self"        this machine: a free Let's Encrypt wildcard (edge.mjs), served
+//                 by Aegis itself; the wildcard is a plain A record to this
+//                 machine, or to naming.relay, the backup, while this machine
+//                 isn't reachable on port 443
+//   "relay"       naming.relay alone (Caddy with on-demand TLS, on a server of
+//                 yours) fetches a certificate per name, asking
+//                 /__gate/relay-ask first, and passes the requests on to this
+//                 gate (over a reverse SSH tunnel, say)
+//   "cloudflare"  Cloudflare's edge (a proxied CNAME), which needs a certificate
+//                 that covers two levels (Advanced Certificate Manager) unless
+//                 the prefix is empty
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -52,6 +60,7 @@ import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { isIP } from "node:net";
+import { Edge } from "./edge.mjs";
 
 const MINUTES = 120;            // per-minute history kept
 const SECONDS = 90;             // per-second history for the live chart
@@ -62,15 +71,26 @@ const HEALTH_EVERY_MS = 15000;
 const FAVICON_EVERY_MS = 6 * 3600 * 1000;
 // Never HTTP: not worth offering as a tunnel (ssh, smtp, dns, samba, ipp-less extras).
 const SUB_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-// {mode: "record" | "wildcard", prefix}: how tunnels on a linked domain are named
-function cleanNaming(n) {
+// {mode: "record" | "wildcard", prefix, certs, relay}: how tunnels on a linked domain are named.
+// `saved`: naming from an older version, which had no `certs`. A wildcard
+// that needed a relay or a paid certificate then is served by this machine
+// now (the relay stays, as the backup); "auto" asks Cloudflare once whether
+// its certificate covers the names after all.
+const CERTS = new Set(["self", "relay", "cloudflare"]);
+export function cleanNaming(n, { saved = false } = {}) {
   const mode = n?.mode === "wildcard" ? "wildcard" : "record";
   let prefix = n && "prefix" in n ? String(n.prefix ?? "").trim().toLowerCase().replace(/^\*?\.?|\.$/g, "") : "tunnel";
   if (prefix && !prefix.split(".").every((p) => SUB_RE.test(p))) throw new Error("The prefix is letters, digits and dashes, like tunnel (dots for more levels).");
   if (prefix.length > 60) throw new Error("That prefix is too long.");
   const relay = String(n?.relay || "").trim();
   if (relay && !isIP(relay)) throw new Error("The relay is the server's IP address, like 203.0.113.7.");
-  return { mode, prefix, relay: relay || null };
+  let certs = CERTS.has(n?.certs) ? n.certs : null;
+  if (!certs) {
+    if (saved) certs = mode !== "wildcard" ? "cloudflare" : relay ? "self" : prefix ? "auto" : "cloudflare";
+    else certs = relay ? "relay" : "cloudflare";
+  }
+  if (certs === "relay" && !relay) throw new Error("Name the relay server (its IP), or let this machine hold the certificate.");
+  return { mode, prefix, certs, relay: relay || null };
 }
 const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3306, 5432, 6379, 27017]);
 
@@ -194,9 +214,12 @@ function bucket(list, key, value, max) {
 }
 
 export class TunnelManager {
-  constructor({ dataDir, domain, quick, forbiddenPorts, log, naming }) {
+  constructor({ dataDir, domain, quick, forbiddenPorts, log, naming, edge, onNaming }) {
     this.dataDir = dataDir;
-    this.naming = cleanNaming(naming);
+    try { this.naming = cleanNaming(naming, { saved: true }); } catch { this.naming = cleanNaming(null, { saved: true }); }
+    this.onNaming = onNaming || null;       // (naming) => keep it (state.json)
+    this.edge = new Edge({ dataDir, log: log || console.log, cfApi: (...a) => this.cfApi(...a), ...(edge || {}) });
+    this.edge.onChange = () => this.repointWildcard();
     this.quick = quick;                       // QuickTunnels, used while no domain is linked
     this.forbidden = new Set(forbiddenPorts || []);
     this.log = log || console.log;
@@ -205,6 +228,7 @@ export class TunnelManager {
     mkdirSync(join(dataDir, "favicons"), { recursive: true });
     this.load();
     this.useDomain(domain);
+    if (this.naming.certs === "auto") setTimeout(() => this.resolveAuto(), 5000).unref?.();
     this.saveTimer = setInterval(() => this.save(), 30000);
     this.healthTimer = setInterval(() => this.healthAll(), HEALTH_EVERY_MS);
     setTimeout(() => this.healthAll(), 1500);
@@ -232,7 +256,14 @@ export class TunnelManager {
       this.label = this.parent = this.hostRe = null;
       for (const port of this.tunnels.keys()) this.quick?.start(port);
     }
+    this._wild = null;
+    this.syncEdge();
   }
+  get selfCerts() { return this.wildcard && this.naming.certs === "self"; }
+  // The edge serves *.<wbase> while this machine holds the certificate.
+  syncEdge() { this.edge.use(this.selfCerts ? this.wbase : null, this.naming.relay, this.checkName()); }
+  // the edge's outside check (edge.mjs): one level under the zone, named after the dashboard
+  checkName() { return this.domain ? `edge-check-${this.label}.${this.parent}` : null; }
   get mode() { return this.domain ? "domain" : "quick"; }
   get wildcard() { return !!this.domain && this.naming.mode === "wildcard"; }
   // what the wildcard covers: tunnel.example.com (or example.com with no prefix)
@@ -536,16 +567,46 @@ export class TunnelManager {
   }
 
   // ------------------------------------------------------------- one wildcard record
-  // The wildcard CNAME for every tunnel; made once. {id, name, ready}
+  // The one wildcard record for every tunnel. {id, name, content, ready}
+  wildTarget() {
+    const ip = (a) => ({ type: isIP(a) === 6 ? "AAAA" : "A", content: a, proxied: false });
+    if (this.naming.certs === "self") {
+      const t = this.edge.target();
+      if (!t) throw new Error("Waiting for this machine's public address.");
+      return ip(t.ip);
+    }
+    if (this.naming.certs === "relay") return ip(this.naming.relay);
+    return { type: "CNAME", content: `${this.domain.tunnelId}.cfargotunnel.com`, proxied: true };
+  }
   async ensureWildcard() {
-    const name = this.wildcardName();
-    if (this._wild?.name === name) return this._wild;
-    const relay = this.naming.relay;
-    const rec = await this.dnsUpsert(name, relay ? { type: isIP(relay) === 6 ? "AAAA" : "A", content: relay, proxied: false }
-                                                  : { type: "CNAME", content: `${this.domain.tunnelId}.cfargotunnel.com`, proxied: true });
-    this._wild = { id: rec.id, name, ready: !rec.created };
+    const name = this.wildcardName(), want = this.wildTarget();
+    if (this._wild?.name === name && this._wild.content === want.content) return this._wild;
+    const rec = await this.dnsUpsert(name, want);
+    this._wild = { id: rec.id, name, content: want.content, ready: !rec.created };
     if (rec.created) this.log("tunnels: one wildcard record now serves every tunnel:", name);
     return this._wild;
+  }
+  // The edge says the record should point elsewhere (this machine <-> the backup relay).
+  async repointWildcard() {
+    if (!this.selfCerts || !this.domain) return;
+    try {
+      const before = this._wild?.content;
+      const w = await this.ensureWildcard();
+      if (before !== w.content) this.log(`tunnels: ${w.name} points at ${w.content}`);
+      for (const t of this.tunnels.values()) if (t.dns?.wildcard) t.dns = { id: w.id, name: t.dns.name, wildcard: w.name, ok: true };
+    } catch (e) { this.log("tunnels: couldn't move the wildcard record:", e.message); }
+  }
+  // An older install's two-level wildcard: does Cloudflare's certificate cover
+  // it (Advanced Certificate Manager)? Then it stays there; if not, this
+  // machine takes over.
+  async resolveAuto() {
+    if (this.naming.certs !== "auto") return;
+    const covered = this.domain && this.wildcard ? await this.certCovers(`burrow-check.${this.wbase}`).catch(() => false) : true;
+    this.naming = { ...this.naming, certs: covered ? "cloudflare" : "self" };
+    if (this.wildcard) this.log("tunnels:", covered ? "Cloudflare's certificate covers" : "this machine holds the certificate for", this.wildcardName());
+    this.onNaming?.(this.naming);
+    this.syncEdge();
+    if (!covered) this.edge.ensureCert().then(() => this.repointWildcard()).catch(() => { /* edge.error says why */ });
   }
   // Does Cloudflare's edge hold a certificate for `host`? Asks the edge itself
   // (through the dashboard's own name, which is surely proxied there).
@@ -563,11 +624,13 @@ export class TunnelManager {
   namingInfo() {
     return { ...this.naming, active: this.wildcard, zone: this.parent, label: this.label,
              example: this.domain ? (this.naming.mode === "wildcard" ? `radio.${this.wbase}` : `tunnel-3000-${this.label}.${this.parent}`) : null,
-             record: this.wildcard ? this.wildcardName() : null, relay: this.naming.relay };
+             record: this.wildcard ? this.wildcardName() : null, relay: this.naming.relay,
+             edge: this.selfCerts ? this.edge.state() : null };
   }
   // The relay's question before it fetches a certificate: is this one of ours?
+  // (The backup relay asks too: it serves the names while this machine can't.)
   relayAsk(host) {
-    if (!this.wildcard || !this.naming.relay) return false;
+    if (!this.wildcard || !this.naming.relay || this.naming.certs === "cloudflare") return false;
     const port = this.matchHost(host);
     return port !== null && !!this.get(port)?.enabled;
   }
@@ -577,25 +640,42 @@ export class TunnelManager {
     const naming = cleanNaming(next);
     if (!this.domain) throw new Error("Link a domain first: without one, tunnels get trycloudflare.com names.");
     if (naming.mode === "wildcard") {
-      const probe = `burrow-check.${naming.prefix ? `${naming.prefix}.${this.parent}` : this.parent}`;
-      if (!force && !naming.relay && !(await this.certCovers(probe))) {
-        const e = new Error(`Cloudflare's certificate for ${this.parent} doesn't cover *.${naming.prefix}.${this.parent}, so browsers would refuse those addresses. ` +
-          `Name a relay server (a VPS with Caddy) to get free certificates instead, order one from Cloudflare (Advanced Certificate Manager, paid), or leave the prefix empty to use *.${this.parent}, which the free certificate covers.`);
+      const base = naming.prefix ? `${naming.prefix}.${this.parent}` : this.parent;
+      if (naming.certs === "cloudflare" && !force && !(await this.certCovers(`burrow-check.${base}`))) {
+        const e = new Error(`Cloudflare's certificate for ${this.parent} doesn't cover *.${base}, so browsers would refuse those addresses. ` +
+          `Let this machine hold the certificate instead (free, from Let's Encrypt), order one from Cloudflare (Advanced Certificate Manager, paid), or leave the prefix empty to use *.${this.parent}, which the free certificate covers.`);
         e.code = "cert";
         throw e;
       }
+      if (naming.certs === "self") {
+        // the certificate first: nothing moves unless it came
+        this.edge.use(base, naming.relay, this.checkName());
+        try {
+          await this.edge.ensureCert({ force: true });
+          await this.edge.refreshIp();
+          await this.edge.check();
+          if (!this.edge.target()) throw new Error("Couldn't find this machine's public address.");
+        } catch (e) {
+          this.syncEdge();
+          const err = new Error(`No certificate for *.${base}: ${e.message}`);
+          err.code = "acme";
+          throw err;
+        }
+      }
     }
-    const before = { mode: this.naming.mode, prefix: this.naming.prefix };
+    const before = { ...this.naming };
     this.naming = naming;
     this._wild = null;
+    this.syncEdge();
     for (const t of this.tunnels.values()) {
       if (this.wildcard && t.sub) {
         // a name that has a record of its own under the new base would shadow it
-        try { await this.checkSub(t.port, t.sub); } catch (e) { this.naming = before; throw new Error(`${t.sub} (tunnel-${t.port}): ${e.message}`); }
+        try { await this.checkSub(t.port, t.sub); } catch (e) { this.naming = before; this.syncEdge(); throw new Error(`${t.sub} (tunnel-${t.port}): ${e.message}`); }
       }
     }
     for (const port of this.tunnels.keys()) { const t = this.get(port); t.dns = null; await this.publish(port); }
     this.save();
+    this.onNaming?.(this.naming);
     await this.sweepDns().catch((e) => this.log("tunnels: DNS sweep failed:", e.message));
     this.log("tunnels: addresses are now", this.pattern());
     return this.namingInfo();
@@ -1070,5 +1150,5 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     });
   }
 
-  stop() { clearInterval(this.saveTimer); clearInterval(this.healthTimer); clearTimeout(this.bootTimer); this.quick?.stopAll(); this.save(); }
+  stop() { clearInterval(this.saveTimer); clearInterval(this.healthTimer); clearTimeout(this.bootTimer); this.edge.stop(); this.quick?.stopAll(); this.save(); }
 }
