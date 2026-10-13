@@ -231,6 +231,8 @@ setTimeout(defaultAddons, 30000);
 // addons from a link get checked for updates like Aegis × Burrow itself: their
 // cards on the Burrow page then offer the update, no visit to Addons needed
 setTimeout(() => addons.checkAll(), 120000).unref();
+// the watchdog: addons (Selkies Forge among them) that stop on their own
+setTimeout(addons.watch(60e3), 45000).unref();
 setInterval(() => addons.checkAll(), 3600e3).unref();
 setInterval(defaultAddons, 6 * 3600 * 1000);
 
@@ -865,6 +867,7 @@ async function handleAddons(req, res, path, url) {
       if (url.searchParams.get("fresh")) await addons.checkAll(15 * 60e3);
       return ok({ updates: addons.updates() });
     }
+    if (path === "/__gate/api/addons/down" && req.method === "GET") return ok({ down: addons.downList() });
     if (path === "/__gate/api/addons/scan" && req.method === "GET") return ok(await addons.scan(url.searchParams.get("fresh") ? 0 : 60000));
     if (path === "/__gate/api/addons/add" && req.method === "POST") return ok({ addon: await addons.add((await readJsonBody(req)).source) });
     if (path === "/__gate/api/addons/inspect" && req.method === "POST") {
@@ -876,7 +879,7 @@ async function handleAddons(req, res, path, url) {
       if (j[2] && req.method === "POST") { job.cancel(); return ok(job.view(1e9)); }
       return ok(job.view(Number(url.searchParams.get("since")) || 0));
     }
-    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share)$/.exec(path);
+    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share|down|autorestart)$/.exec(path);
     if (m) {
       const [, id, op] = m;
       if (op === "image") { const im = addons.image(id, url.searchParams.get("path")); return send(res, 200, im.body, { "Content-Type": im.type, "Cache-Control": "private, max-age=86400", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" }); }
@@ -893,6 +896,9 @@ async function handleAddons(req, res, path, url) {
       if (op === "action") return ok({ job: addons.action(id, b.action) });
       if (op === "check") return ok(await addons.checkUpdates(id));
       if (op === "share") return ok({ tunnel: await addons.share(id, b.on !== false, b.access === "public" ? "public" : "login") });
+      // it stopped on its own: start it again (maybe always), or leave it off
+      if (op === "down") return ok({ job: addons.answerDown(id, { start: !!b.start, always: "always" in b ? !!b.always : undefined }) });
+      if (op === "autorestart") return ok(addons.setAutoRestart(id, b.on !== false));
     }
     if (path === "/__gate/api/bridge" && req.method === "GET") return ok(await bridgeHealth({ burrow, addons }));
     const bj = /^\/__gate\/api\/bridge\/job\/([0-9a-f]{4,64})$/.exec(path);

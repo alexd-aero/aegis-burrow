@@ -328,6 +328,7 @@ export class Addons {
     this.statusCache = new Map();
     this.jobs = new Map();
     this.scanCache = null;
+    this.expectUntil = new Map();   // aid -> until when a stop is Burrow's own doing
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 
@@ -503,13 +504,15 @@ export class Addons {
     for (const j of this.jobs.values()) if (j.aid === aid && j.state === "running") fail(`${label.split(" ").pop()} is busy: ${j.label}.`);
     const job = new Job(aid, kind, label);
     this.jobs.set(job.id, job);
+    // whatever Burrow runs (stop, update, uninstall…) may take the addon down: that's no crash
+    this.expectUntil.set(aid, Infinity);
     for (const [id, j] of this.jobs) if (j.state !== "running" && Date.now() - j.started > 3600e3) this.jobs.delete(id);
     Promise.resolve().then(() => work(job)).then((res) => {
       Object.assign(job, { state: "done", result: res || null, progress: 1, phase: "done" });
     }).catch((e) => {
       Object.assign(job, { state: job.cancelled ? "cancelled" : "error", error: e.message });
       job.log(e.message, "err");
-    }).finally(() => { job.finished = Date.now(); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
+    }).finally(() => { job.finished = Date.now(); this.expectUntil.set(aid, Date.now() + 30e3); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
     return job.view();
   }
 
@@ -599,6 +602,70 @@ export class Addons {
   }
 
   job(jid) { const j = this.jobs.get(jid); if (!j) fail("No such job."); return j; }
+
+  // ---------------- the watchdog: an addon that stops on its own
+  // Every minute, each installed addon with a status script and a start (or
+  // restart) action is looked at. One that was running and now isn't, without
+  // Burrow having stopped it, is marked rec.down: the dashboard asks whether to
+  // start it again, or starts it straight away once the user said "always"
+  // (rec.autoRestart). rec.watch keeps the last state across restarts of
+  // Aegis, so an addon that died while Aegis was down is noticed too.
+  startAction(rec) { return rec.manifest.actions.find((a) => a.id === "start") || rec.manifest.actions.find((a) => a.id === "restart") || null; }
+  watch(every = 60e3) {
+    clearInterval(this.watchTimer);
+    const tick = () => this.watchOnce().catch((e) => this.log("addons: watchdog:", e.message));
+    this.watchTimer = setInterval(tick, every);
+    this.watchTimer.unref?.();
+    return tick;
+  }
+  async watchOnce() {
+    for (const rec of Object.values(this.load())) {
+      if (!rec.installed || !rec.manifest.scripts.status || !this.startAction(rec)) continue;
+      if ([...this.jobs.values()].some((j) => j.aid === rec.id && j.state === "running")) continue;
+      const st = await this.status(rec, 0);
+      const was = rec.watch?.state;
+      if (st.state === "running") {
+        if (was !== "running" || rec.down) this.patch(rec.id, { watch: { state: "running", at: Date.now() }, down: null });
+        continue;
+      }
+      const ownDoing = (this.expectUntil.get(rec.id) || 0) > Date.now();
+      if (was === "running" && !ownDoing && (st.state === "stopped" || st.state === "error")) {
+        const down = { at: Date.now(), state: st.state, detail: st.detail || "", auto: !!rec.autoRestart };
+        this.log(`addon ${rec.id}: stopped on its own (${st.state}${st.detail ? ": " + st.detail : ""})${rec.autoRestart ? "; starting it again" : "; asking whether to start it"}`);
+        this.patch(rec.id, { watch: { state: st.state, at: Date.now() }, down });
+        if (rec.autoRestart) {
+          try { this.startDown(rec.id); } catch (e) { this.log(`addon ${rec.id}: couldn't start it again:`, e.message); }
+        }
+        this.onChange?.(rec.id);
+      } else if (was !== st.state) this.patch(rec.id, { watch: { state: st.state, at: Date.now() } });
+    }
+  }
+  // The answer to "start it back up?": start it (and maybe always do), or leave it off.
+  answerDown(id, { start, always }) {
+    this.get(id);
+    if (always !== undefined) this.patch(id, { autoRestart: !!always });
+    if (!start) { this.patch(id, { down: null }); return null; }
+    const job = this.startDown(id);
+    return job;
+  }
+  startDown(id) {
+    const rec = this.get(id);
+    const a = this.startAction(rec);
+    if (!a) fail(`${rec.manifest.name} has no start action.`);
+    const job = this.action(id, a.id);
+    this.patch(id, { down: rec.down ? { ...rec.down, starting: Date.now() } : null });
+    return job;
+  }
+  setAutoRestart(id, on) { this.get(id); this.patch(id, { autoRestart: !!on }); return { id, autoRestart: !!on }; }
+  // The addons that stopped on their own, from the registry alone (no status
+  // scripts run): cheap enough for every page to poll.
+  downList() {
+    return Object.values(this.load()).filter((r) => r.installed && r.down).map((r) => ({
+      id: r.id, name: r.manifest.name, down: r.down, autoRestart: !!r.autoRestart,
+      busy: [...this.jobs.values()].some((j) => j.aid === r.id && j.state === "running"),
+      logo: r.manifest.logo ? `/__gate/api/addons/${r.id}/image?v=${(r.commit || String(r.updated || 0)).slice(0, 12)}` : null,
+    }));
+  }
 
   // Is there newer code than what this addon was fetched at? (git sources)
   async checkUpdates(id) {
@@ -705,6 +772,7 @@ export class Addons {
       actions: m.actions.map((a) => ({ id: a.id, label: a.label, confirm: a.confirm })),
       has: Object.fromEntries(SCRIPTS.map((k) => [k, k in m.scripts])),
       problems: checkRequirements(m, this.version), remote: rec.remote || null,
+      down: rec.down || null, autoRestart: !!rec.autoRestart, restartable: !!this.startAction(rec) && !!m.scripts.status,
       busy: [...this.jobs.values()].find((j) => j.aid === rec.id && j.state === "running")?.view(1e9) || null,
     };
     out.update_pending = !!(out.installed && out.installed_version && out.installed_version !== m.version);

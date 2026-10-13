@@ -146,6 +146,31 @@ function card(t) {
 
 // ------------------------------------------------------------------ views
 // Tunnels | Addons | Selkies Forge: the sides of the Burrow page.
+// An addon that stopped on its own: ask before starting it again.
+function downCards() {
+  return (S.down || []).map((d) => {
+    const when = new Date(d.down.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const starting = d.busy || d.down.starting;
+    return `<section class="card lit down-card" role="alert">
+      <div class="fav">${d.logo ? `<img src="${h(d.logo)}" alt="">` : h(d.name[0])}</div>
+      <div class="grow" style="min-width:0">
+        <div class="t-name">${h(d.name)} stopped on its own at ${h(when)}</div>
+        <div class="faint small">${starting ? "Starting it again…" : d.down.auto ? "It is set to start again by itself." : `Nothing here stopped it${d.down.detail ? `: ${h(d.down.detail)}` : "."} Start it back up?`}</div>
+        ${starting ? "" : `<label class="row small down-always"><input type="checkbox" data-down-always="${h(d.id)}"${d.autoRestart ? " checked" : ""}> Next time, start it again without asking</label>`}
+      </div>
+      ${starting ? '<span class="spin"></span>' : `<div class="row down-acts"><button class="btn sm ghost" data-act="down-leave" data-id="${h(d.id)}">Leave it off</button>
+        <button class="btn sm primary" data-act="down-start" data-id="${h(d.id)}">${ICON.restart} Start it</button></div>`}
+    </section>`;
+  }).join("");
+}
+function loadDown() {
+  return api("/__gate/api/addons/down").then((r) => {
+    const was = JSON.stringify(S.down || []), now = JSON.stringify(r.down);
+    S.down = r.down;
+    if (was !== now) render();
+  }).catch(() => {});
+}
+
 function subtabs() {
   const a = S.addon, linked = !!(a && a.addon), upd = !!(a && a.addon && a.addon.update && a.addon.update.available);
   const b = S.bridge, dot = b ? { ok: "ok", warn: "warn", fail: "err", off: "idle" }[b.state] : linked ? "ok" : "idle";
@@ -153,7 +178,7 @@ function subtabs() {
   // the Selkies Forge side only when a Forge is on this machine (or already runs us)
   const forgeReal = S.integrations.some((i) => i.full) || !!(a && (a.forge || a.addon));
   const forgeHere = forgeReal || S.view === "forge";
-  return `<nav class="subtabs" aria-label="Burrow">
+  return `${downCards()}<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
     <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${S.upd?.length ? '<span class="newchip">update</span>' : ""}</button>
     ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
@@ -913,6 +938,7 @@ function render() {
 async function refresh() {
   if (S.busy || document.hidden) return;
   S.busy = true;
+  loadDown();
   try {
     if (S.view === "detail") S.detail = await api(`/__gate/api/tunnels/${S.port}`);
     else if (S.view === "integ") S.integData = await api(`/__gate/api/integrations/${encodeURIComponent(S.integ)}/desktops`);
@@ -1229,6 +1255,13 @@ document.addEventListener("click", async (e) => {
     else if (act === "upd-later") { const u = S.upd.find((x) => x.id === el.dataset.id); if (u) laterSet(laterKey(u)); render(); }
     else if (act === "upd-done") { delete S.updDone[el.dataset.id]; delete S.updJob[el.dataset.id]; render(); }
     else if (act === "ad-check") checkUpdates(el.dataset.id);
+    else if (act === "down-start" || act === "down-leave") {
+      const always = document.querySelector(`[data-down-always="${CSS.escape(el.dataset.id)}"]`)?.checked;
+      el.disabled = true;
+      await api(`/__gate/api/addons/${el.dataset.id}/down`, { method: "POST", body: JSON.stringify({ start: act === "down-start", always: !!always }) });
+      toast(act === "down-start" ? "Starting it again" : "Left it off");
+      await loadDown(); render();
+    }
     else if (act === "ad-action") { const go2 = () => jobRun(el.dataset.id, "action", { action: el.dataset.action }); if (el.dataset.confirm && !confirm(el.dataset.confirm)) return; go2(); }
     else if (act === "ad-uninstall") uninstallForm(el.dataset.id);
     else if (act === "ad-remove") { await api(`/__gate/api/addons/${el.dataset.id}/remove`, { method: "POST", body: "{}" }); toast("Removed"); S.scan = null; refresh(); }

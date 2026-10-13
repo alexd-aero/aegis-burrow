@@ -53,7 +53,8 @@ export class Burrow {
     this.log = log || console.log;
     this.version = version;
     this.quick = new QuickTunnels({ bin: () => findCloudflared(settings.get("cloudflared"), home), origin, log: this.log, dataDir });
-    this.tunnels = new TunnelManager({ dataDir, domain: settings.get("domain"), quick: this.quick, forbiddenPorts, log: this.log });
+    this.tunnels = new TunnelManager({ dataDir, domain: settings.get("domain"), quick: this.quick, forbiddenPorts, log: this.log,
+                                       naming: settings.get("tunnelNaming") });
     if (!this.on) this.quick.stopAll();
     this.cloudflare = new Cloudflare({
       settings, dataDir, home, origin, log: this.log,
@@ -106,6 +107,18 @@ export class Burrow {
       return ok(await T.create(spec));
     }
     if (path === "/ports" && method === "GET") return ok({ ports: await T.ports() });
+    // a DNS record per tunnel, or one wildcard *.<prefix>.<zone> for all of them
+    if (path === "/tunnels/naming" && method === "GET") return ok(T.namingInfo());
+    if (path === "/tunnels/naming" && method === "PUT") {
+      const body = await readJson();
+      try {
+        const info = await T.setNaming(body, { force: !!body.force });
+        this.settings.set({ tunnelNaming: { mode: info.mode, prefix: info.prefix } });
+        return ok(info);
+      } catch (e) {
+        return { status: 400, json: { error: e.message, code: e.code || null } };
+      }
+    }
     const m = /^\/tunnels\/(\d{1,5})(\/favicon|\/kick)?$/.exec(path);
     if (!m) return null;
     const port = Number(m[1]);

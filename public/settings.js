@@ -11,6 +11,36 @@ const sec = (id, title, sub, body) => `<section class="card lit panel set" id="$
   <div class="set-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ""}</div>${body}</section>`;
 
 // ------------------------------------------------------------------ domain
+// How tunnels are named: a DNS record each, or one wildcard *.<prefix>.<zone>.
+function namingDraft() {
+  const n = S.naming || { mode: "record", prefix: "tunnel" };
+  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel") };
+}
+function namingSummary(d) {
+  const n = S.naming;
+  if (n?.active) return `<span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span> <span class="faint small">· one wildcard record, <span class="mono">${h(n.record)}</span>, serves them all</span>`;
+  return `<span class="mono">tunnel-PORT-${h(d.mainHost)}</span> <span class="faint small">or a name of your own per tunnel · a DNS record each</span>`;
+}
+function namingHost(n, zone) { return `radio.${n.prefix ? n.prefix + "." : ""}${zone}`; }
+function namingForm(d) {
+  if (!S.naming) return "";
+  const n = namingDraft(), cur = S.naming;
+  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || !cur.active));
+  return `<div class="naming">
+      <div class="row flexwrap" style="gap:12px;align-items:center">
+        <b class="small">Tunnel addresses</b>
+        <div class="seg" id="nmMode"><button type="button" data-v="record" class="${n.mode === "record" ? "on" : ""}">A DNS record per tunnel</button><button type="button" data-v="wildcard" class="${n.mode === "wildcard" ? "on" : ""}">One wildcard record</button></div>
+      </div>
+      ${n.mode === "wildcard" ? `<label class="field" style="margin-top:12px"><span>Wildcard</span>
+          <div class="addr"><span class="mono zone">*.</span><input class="input mono" id="nmPrefix" value="${h(n.prefix)}" maxlength="60" spellcheck="false" autocapitalize="none" placeholder="(none)"><span class="mono zone">.${h(d.zone)}</span></div></label>
+        <p class="faint small">Every tunnel is <span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>: its own name, or its port (<span class="mono">${h(namingHost(n, d.zone))}</span>, <span class="mono">3000.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>). No DNS record is added per tunnel, so new tunnels answer at once.
+        ${n.prefix ? `A name two levels deep needs a Cloudflare certificate for <span class="mono">*.${h(n.prefix)}.${h(d.zone)}</span> (Advanced Certificate Manager); Aegis checks before it switches. Leave the prefix empty for <span class="mono">*.${h(d.zone)}</span>, which the free certificate covers.` : `Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`}</p>`
+      : `<p class="faint small" style="margin-top:10px">Each tunnel gets a DNS record of its own when it's made (<span class="mono">tunnel-3000-${h(d.mainHost)}</span>), so a brand-new name can take a minute to answer everywhere.</p>`}
+      <div class="err-msg" id="nmErr">${h(S.nmErr || "")}</div>
+      ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">Move every tunnel</button></div>` : ""}
+    </div>`;
+}
+
 function domainBody() {
   const cf = S.cf;
   if (!cf) return '<p class="muted">Loading…</p>';
@@ -18,10 +48,11 @@ function domainBody() {
     const d = cf.domain, c = cf.connector;
     return `<div class="linked">
         <div class="kv-row"><span>Dashboard</span><a class="mono" href="https://${h(d.mainHost)}" target="_blank" rel="noopener">https://${h(d.mainHost)}</a></div>
-        <div class="kv-row"><span>Tunnels</span><span><span class="mono">tunnel-PORT-${h(d.mainHost)}</span> <span class="faint small">or a name of your own per tunnel (Burrow → a tunnel → Edit)</span></span></div>
+        <div class="kv-row"><span>Tunnels</span><span>${namingSummary(d)}</span></div>
         <div class="kv-row"><span>Connector</span>${!d.managed ? '<span class="pill">your own cloudflared service</span>'
           : c && c.running ? `<span class="pill ok"><i class="dot ok"></i>connected · post-quantum · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>not running</span>'}</div>
       </div>
+      ${namingForm(d)}
       ${c && c.log && c.log.length ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
       ${S.renaming ? `<form id="renameForm" class="link-form" autocomplete="off">
           <label class="field"><span>New name for the dashboard</span>
@@ -32,7 +63,7 @@ function domainBody() {
           <div class="row end"><button type="button" class="btn ghost" data-act="rename-cancel">Cancel</button><button class="btn primary" id="linkGo">Rename</button></div>
         </form>`
       : d.managed ? `<div class="row end"><button class="btn" data-act="rename">Change the name</button><button class="btn danger" data-act="unlink">Unlink ${h(d.mainHost)}</button></div>`
-        : `<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis manages the DNS records (the dashboard's and one per tunnel).</p>
+        : `<p class="faint small">This address is routed by a cloudflared service Aegis did not create; Aegis manages the DNS records (the dashboard's, and ${S.naming?.active ? `the tunnels' one wildcard, <span class="mono">${h(S.naming.record)}</span>` : "one per tunnel"}).</p>
            <div class="row end"><button class="btn" data-act="rename">Change the name</button></div>`}`;
   }
   if (!cf.cloudflared) {
@@ -353,7 +384,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "nmPrefix", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -416,6 +447,17 @@ function wireForms() {
       toast("Saved"); document.activeElement?.blur(); render();
     } catch (ex) { toast(ex.message); }
   });
+  $("#nmMode")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-v]");
+    if (!btn) return;
+    S.nmDraft = { ...namingDraft(), mode: btn.dataset.v }; S.nmErr = ""; render();
+  });
+  const np = $("#nmPrefix");
+  if (np) {
+    np.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), prefix: np.value.trim().toLowerCase().replace(/^\*?\.|\.$/g, "") }; });
+    np.addEventListener("change", () => { np.blur(); render(); });
+    np.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); np.blur(); render(); } });
+  }
   const mb = $("#modBurrow");
   if (mb) mb.addEventListener("change", async () => {
     if (!mb.checked && !confirm("Switch Burrow off? Its tunnels stop answering until you switch it back on (they are kept).")) { mb.checked = true; return; }
@@ -485,6 +527,7 @@ async function load() {
   try {
     const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
     S.me = me; S.cf = cf; S.termix = termix;
+    S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
     if (!S.upd && !S.checking) checkUpdates(false);
     loadLog(S.log);
   } catch (e) { toast(e.message); }
@@ -523,6 +566,20 @@ document.addEventListener("click", async (e) => {
     }
     else if (act === "log") { S.log = el.dataset.id; render(); loadLog(S.log); }
     else if (act === "rename") { S.renaming = true; S.label = null; render(); $("#label")?.focus(); }
+    else if (act === "naming-cancel") { S.nmDraft = null; S.nmErr = ""; render(); }
+    else if (act === "naming-save") {
+      const n = namingDraft(), zone = S.cf.domain.zone;
+      const where = n.mode === "wildcard" ? `NAME.${n.prefix ? n.prefix + "." : ""}${zone} through one wildcard record` : `tunnel-PORT-${S.cf.domain.mainHost} with a DNS record each`;
+      if (!confirm(`Move every tunnel to ${where}? Their current addresses stop working.`)) return;
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Moving…'; S.busy = true;
+      try {
+        const j = await api("/__gate/api/tunnels/naming", { method: "PUT", body: JSON.stringify(n) });
+        S.naming = j; S.nmDraft = null; S.nmErr = "";
+        toast(j.active ? `Tunnels now live under ${j.record}` : "Tunnels have a DNS record each again");
+      } catch (ex) { S.nmErr = ex.message; }
+      finally { S.busy = false; }
+      render();
+    }
     else if (act === "rename-cancel") { S.renaming = false; S.label = null; render(); }
     else if (act === "unlink") {
       if (!confirm(`Unlink ${S.cf.domain.mainHost}? Its DNS records and the Cloudflare tunnel are deleted, and tunnels go back to trycloudflare.com names.`)) return;

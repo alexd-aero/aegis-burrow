@@ -169,3 +169,61 @@ test("updates: checked in the background, listed for the Burrow page", async () 
     assert.deepEqual(H.updates(), []);                             // updated: the card goes away
   } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
 });
+
+// The watchdog: an addon that stops on its own is noticed, and started again
+// only once the user says so (or said "always").
+test("watchdog: stopped on its own vs stopped by Burrow", async () => {
+  const dir = tmp();
+  const flag = join(dir, "state");
+  writeFileSync(flag, "running");
+  const src = addon(tmp(), { id: "dog", actions: [{ id: "start", label: "Start", script: "start.sh" }, { id: "stop", label: "Stop", script: "stop.sh" }] },
+                    { "status.sh": `echo "{\\"state\\":\\"$(cat '${flag}')\\"}"\n`,
+                      "start.sh": `printf running > '${flag}'\n`, "stop.sh": `printf stopped > '${flag}'\n` });
+  const H = new A.Addons({ dir: join(dir, "addons"), registry: join(dir, "addons.json"), version: "2.0.0", log: () => {} });
+  const wait = async (j) => { for (let i = 0; i < 100 && H.job(j.id).state === "running"; i++) await new Promise((r) => setTimeout(r, 50)); return H.job(j.id); };
+  await H.add(src);
+  await wait(H.install("dog"));
+  H.expectUntil.clear();                         // the install was long ago
+  await H.watchOnce();
+  assert.equal(H.get("dog").watch.state, "running");
+  assert.deepEqual(H.downList(), []);
+
+  writeFileSync(flag, "stopped");                // it dies by itself
+  await H.watchOnce();
+  const [d] = H.downList();
+  assert.equal(d.id, "dog");
+  assert.equal(d.down.state, "stopped");
+  assert.equal(d.down.auto, false, "asks first");
+  await H.watchOnce();
+  assert.equal(H.downList().length, 1, "asks once, and keeps asking until answered");
+
+  await wait(H.answerDown("dog", { start: true, always: false }));
+  await H.watchOnce();
+  assert.deepEqual(H.downList(), [], "running again: the question goes");
+
+  await wait(H.action("dog", "stop"));           // stopped from Burrow: no question
+  await H.watchOnce();
+  assert.deepEqual(H.downList(), []);
+  await wait(H.action("dog", "start"));
+  H.expectUntil.clear();
+  await H.watchOnce();
+
+  H.answerDown("dog", { start: false, always: true });   // "always" from now on
+  writeFileSync(flag, "stopped");
+  await H.watchOnce();
+  for (let i = 0; i < 100 && [...H.jobs.values()].some((j) => j.state === "running"); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await H.status(H.get("dog"), 0)).state, "running", "started again without asking");
+  assert.equal(H.downList()[0].down.auto, true);
+  await H.watchOnce();
+  assert.deepEqual(H.downList(), []);
+
+  H.answerDown("dog", { start: false });
+  writeFileSync(flag, "stopped");
+  H.setAutoRestart("dog", false);
+  await H.watchOnce();
+  H.answerDown("dog", { start: false });         // "leave it off"
+  assert.deepEqual(H.downList(), []);
+  await H.watchOnce();
+  assert.deepEqual(H.downList(), [], "left off stays off without asking again");
+  rmSync(dir, { recursive: true });
+});

@@ -11,7 +11,17 @@
 //   https://<sub>.<zone>                        e.g. grafana.example.com
 // Both are one level under the zone, so Cloudflare's free certificate covers
 // them. (The dotted form tunnel-<PORT>.<label>.<zone> is accepted too, for
-// zones whose certificate covers two levels.)
+// zones whose certificate covers two levels.) Each of those names is a DNS
+// record of its own, made when the tunnel is.
+//
+// Or, with naming {mode: "wildcard", prefix} (Settings → Domain), one wildcard
+// record serves every tunnel and nothing is added per tunnel:
+//   https://<name>.<prefix>.<zone>              e.g. radio.tunnel.example.com
+// where <name> is t.sub, or the port when it has none (3000.tunnel.example.com).
+// The prefix is the user's ("tunnel" by default); empty means *.<zone> itself.
+// A two-level name needs an edge certificate for *.<prefix>.<zone>, which
+// Cloudflare's free one isn't (Advanced Certificate Manager is), so the switch
+// checks the certificate first (certCovers).
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -47,6 +57,14 @@ const HEALTH_EVERY_MS = 15000;
 const FAVICON_EVERY_MS = 6 * 3600 * 1000;
 // Never HTTP: not worth offering as a tunnel (ssh, smtp, dns, samba, ipp-less extras).
 const SUB_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+// {mode: "record" | "wildcard", prefix}: how tunnels on a linked domain are named
+function cleanNaming(n) {
+  const mode = n?.mode === "wildcard" ? "wildcard" : "record";
+  let prefix = n && "prefix" in n ? String(n.prefix ?? "").trim().toLowerCase().replace(/^\*?\.?|\.$/g, "") : "tunnel";
+  if (prefix && !prefix.split(".").every((p) => SUB_RE.test(p))) throw new Error("The prefix is letters, digits and dashes, like tunnel (dots for more levels).");
+  if (prefix.length > 60) throw new Error("That prefix is too long.");
+  return { mode, prefix };
+}
 const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3306, 5432, 6379, 27017]);
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
@@ -169,8 +187,9 @@ function bucket(list, key, value, max) {
 }
 
 export class TunnelManager {
-  constructor({ dataDir, domain, quick, forbiddenPorts, log }) {
+  constructor({ dataDir, domain, quick, forbiddenPorts, log, naming }) {
     this.dataDir = dataDir;
+    this.naming = cleanNaming(naming);
     this.quick = quick;                       // QuickTunnels, used while no domain is linked
     this.forbidden = new Set(forbiddenPorts || []);
     this.log = log || console.log;
@@ -208,15 +227,31 @@ export class TunnelManager {
     }
   }
   get mode() { return this.domain ? "domain" : "quick"; }
+  get wildcard() { return !!this.domain && this.naming.mode === "wildcard"; }
+  // what the wildcard covers: tunnel.example.com (or example.com with no prefix)
+  get wbase() { return this.naming.prefix ? `${this.naming.prefix}.${this.parent}` : this.parent; }
+  wildcardName() { return `*.${this.wbase}`; }
   hostFor(port) {
     const sub = this.tunnels.get(Number(port))?.sub;
+    if (this.wildcard) return `${sub || Number(port)}.${this.wbase}`;
     if (this.domain) return sub ? `${sub}.${this.parent}` : `tunnel-${port}-${this.label}.${this.parent}`;
     return this.quick?.host(port) || null;
   }
   urlFor(port) { const h = this.hostFor(port); return h ? `https://${h}` : null; }
-  pattern() { return this.domain ? `tunnel-PORT-${this.label}.${this.parent}` : "a random name on trycloudflare.com"; }
+  pattern() {
+    if (this.wildcard) return `NAME.${this.wbase}`;
+    return this.domain ? `tunnel-PORT-${this.label}.${this.parent}` : "a random name on trycloudflare.com";
+  }
   matchHost(host) {
     const name = String(host || "").toLowerCase().split(":")[0];
+    if (this.wildcard) {
+      const suffix = "." + this.wbase;
+      if (!name.endsWith(suffix)) return null;
+      const left = name.slice(0, -suffix.length);
+      if (left.includes(".")) return null;
+      for (const t of this.tunnels.values()) if (t.sub && left === t.sub) return t.port;
+      return /^\d{1,5}$/.test(left) && this.tunnels.has(Number(left)) && !this.tunnels.get(Number(left)).sub ? Number(left) : null;
+    }
     if (this.hostRe) {
       for (const t of this.tunnels.values()) if (t.sub && name === `${t.sub}.${this.parent}`) return t.port;
       const m = this.hostRe.exec(name);
@@ -279,9 +314,15 @@ export class TunnelManager {
     if (this.parent && sub.endsWith("." + this.parent)) sub = sub.slice(0, -this.parent.length - 1);
     if (!SUB_RE.test(sub)) throw new Error("A name is 1-40 letters, digits and dashes (not at the ends), like grafana.");
     if (/^tunnel-\d+-/.test(sub)) throw new Error("Names that start with tunnel-PORT- are Burrow's own; pick another.");
-    if (this.domain && sub === this.label) throw new Error("That is the dashboard's own name.");
+    if (/^\d+$/.test(sub)) throw new Error("A name of only digits is how tunnels without a name are reached; add a letter.");
+    if (this.domain && sub === this.label && (!this.wildcard || this.wbase === this.parent)) throw new Error("That is the dashboard's own name.");
     for (const t of this.tunnels.values()) if (t.port !== port && t.sub === sub) throw new Error(`tunnel-${t.port} already uses ${sub}.`);
-    if (this.domain) {
+    if (this.wildcard) {
+      // a record of its own would win over the wildcard, so the name would never reach us
+      const name = `${sub}.${this.wbase}`;
+      const recs = await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`);
+      if (recs.length) throw new Error(`${name} already has a ${recs[0].type} record on Cloudflare, which wins over the wildcard. Pick another name, or delete that record first.`);
+    } else if (this.domain) {
       // never take over a record that isn't ours (mail, www, a website…)
       const name = `${sub}.${this.parent}`;
       const recs = await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`);
@@ -432,6 +473,13 @@ export class TunnelManager {
     if (!t) return;
     if (!this.domain) { t.dns = null; this.quick?.start(port); return; }
     try {
+      if (this.wildcard) {
+        // nothing per tunnel: the one wildcard record (made once) answers for it
+        const w = await this.ensureWildcard();
+        t.dns = { id: w.id, name: this.hostFor(port), wildcard: w.name, ok: true, ...(w.ready ? {} : { ready: false }) };
+        if (!w.ready) this.watchDns(port);
+        return;
+      }
       t.dns = await this.dnsCreate(this.hostFor(port));
       if (t.dns.created) { t.dns.ready = false; delete t.dns.created; this.watchDns(port); }
     } catch (e) {
@@ -441,6 +489,7 @@ export class TunnelManager {
   }
   async unpublish(port, host) {
     if (!this.domain) { this.quick?.stop(port); return "none"; }
+    if (this.wildcard) return "none";          // the wildcard stays for the others
     try { return await this.dnsDelete(host || this.hostFor(port)); } catch (e) { return "error: " + e.message; }
   }
   // A new name exists at Cloudflare within seconds, but a browser that asks for
@@ -467,12 +516,70 @@ export class TunnelManager {
   async sweepDns() {
     if (!this.domain) return;
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;
-    const mine = new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
+    const mine = this.wildcard ? new Set([this.wildcardName()]) : new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
     for (const r of await this.cfApi("GET", "/dns_records?type=CNAME&per_page=1000")) {
       if (r.content !== content || r.comment !== DNS_COMMENT || mine.has(r.name) || r.name === this.domain.mainHost) continue;
       await this.cfApi("DELETE", `/dns_records/${r.id}`);
       this.log("tunnels: removed a leftover DNS record:", r.name);
     }
+  }
+
+  // ------------------------------------------------------------- one wildcard record
+  // The wildcard CNAME for every tunnel; made once. {id, name, ready}
+  async ensureWildcard() {
+    const name = this.wildcardName();
+    if (this._wild?.name === name) return this._wild;
+    const rec = await this.dnsCreate(name);
+    this._wild = { id: rec.id, name, ready: !rec.created };
+    if (rec.created) this.log("tunnels: one wildcard record now serves every tunnel:", name);
+    return this._wild;
+  }
+  // Does Cloudflare's edge hold a certificate for `host`? Asks the edge itself
+  // (through the dashboard's own name, which is surely proxied there).
+  certCovers(host) {
+    return new Promise((resolve) => {
+      const sock = tlsConnect({ host: this.domain.mainHost, port: 443, servername: host, rejectUnauthorized: false, timeout: 8000 }, () => {
+        const sans = String(sock.getPeerCertificate()?.subjectaltname || "").split(/,\s*/).map((s) => s.replace(/^DNS:/, "").toLowerCase());
+        sock.destroy();
+        resolve(sans.some((n) => n === host || (n.startsWith("*.") && host.endsWith(n.slice(1)) && !host.slice(0, -n.length + 1).includes("."))));
+      });
+      sock.on("error", () => resolve(false));
+      sock.on("timeout", () => { sock.destroy(); resolve(false); });
+    });
+  }
+  namingInfo() {
+    return { ...this.naming, active: this.wildcard, zone: this.parent, label: this.label,
+             example: this.domain ? (this.naming.mode === "wildcard" ? `radio.${this.wbase}` : `tunnel-3000-${this.label}.${this.parent}`) : null,
+             record: this.wildcard ? this.wildcardName() : null };
+  }
+  // Switch between a record per tunnel and one wildcard (or change the prefix).
+  // Every tunnel moves to its new name; the records of the old way go.
+  async setNaming(next, { force = false } = {}) {
+    const naming = cleanNaming(next);
+    if (!this.domain) throw new Error("Link a domain first: without one, tunnels get trycloudflare.com names.");
+    if (naming.mode === "wildcard") {
+      const probe = `burrow-check.${naming.prefix ? `${naming.prefix}.${this.parent}` : this.parent}`;
+      if (!force && !(await this.certCovers(probe))) {
+        const e = new Error(`Cloudflare's certificate for ${this.parent} doesn't cover *.${naming.prefix}.${this.parent}, so browsers would refuse those addresses. ` +
+          `Order one for it (SSL/TLS → Edge Certificates → Advanced Certificate Manager), or leave the prefix empty to use *.${this.parent}, which the free certificate covers.`);
+        e.code = "cert";
+        throw e;
+      }
+    }
+    const before = { mode: this.naming.mode, prefix: this.naming.prefix };
+    this.naming = naming;
+    this._wild = null;
+    for (const t of this.tunnels.values()) {
+      if (this.wildcard && t.sub) {
+        // a name that has a record of its own under the new base would shadow it
+        try { await this.checkSub(t.port, t.sub); } catch (e) { this.naming = before; throw new Error(`${t.sub} (tunnel-${t.port}): ${e.message}`); }
+      }
+    }
+    for (const port of this.tunnels.keys()) { const t = this.get(port); t.dns = null; await this.publish(port); }
+    this.save();
+    await this.sweepDns().catch((e) => this.log("tunnels: DNS sweep failed:", e.message));
+    this.log("tunnels: addresses are now", this.pattern());
+    return this.namingInfo();
   }
   // A domain was just linked: every tunnel gets its record.
   async publishAll() {

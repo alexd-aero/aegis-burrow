@@ -855,3 +855,16 @@ section.set.flash, .adv-set.flash { animation: setflash 1.6s ease-out; }
 .mnt-addr .zone { padding: 0 2px 0 12px; }
 .mnt-addr .input { width: auto; flex: 1; padding-left: 2px; }
 @media (max-width: 640px) { .srch-btn span, .srch-btn kbd { display: none; } .mnt-addr .zone { max-width: 45%; } }
+/* Settings → Domain: how tunnels are named */
+.naming { margin-top: 16px; padding: 16px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--field); }
+.naming .addr { display: inline-flex; max-width: 100%; }
+.naming .addr .zone:first-child { padding-right: 0; }
+.naming .addr .input { width: 140px; padding-left: 2px; }
+@media (max-width: 560px) { .naming .seg { display: flex; } .naming .seg button { flex: 1; } }
+/* an addon that stopped on its own */
+.down-card { display: flex; align-items: center; gap: 14px; padding: 14px 16px; margin-bottom: 14px; border-color: var(--err-line, rgba(230, 154, 139, 0.35)); }
+.down-card .fav img { width: 100%; height: 100%; object-fit: contain; }
+.down-always { gap: 8px; margin-top: 8px; color: var(--muted); cursor: pointer; }
+.down-acts { gap: 8px; flex: none; }
+@media (max-width: 560px) { .down-card { flex-wrap: wrap; } .down-acts { width: 100%; justify-content: flex-end; } }
+.down-card .t-name { white-space: normal; overflow: visible; }

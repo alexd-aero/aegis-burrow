@@ -171,3 +171,76 @@ test("a renamed tunnel's record goes with it; leftovers are swept; DNS on its wa
     assert.deepEqual(dns.filter((d) => d.startsWith("DELETE")), ["DELETE /dns_records/a"]);
   } finally { tm.stop(); }
 });
+
+// One wildcard record for every tunnel: NAME.<prefix>.<zone>.
+function wildManager(records = {}) {
+  const m = manager(records);
+  // the fake keeps a zone: GET by name, or every CNAME for the sweep
+  const zone = new Map();
+  m.tm.cfApi = async (method, path, body) => {
+    m.dns.push(`${method} ${path}`);
+    if (method === "GET" && path.includes("type=CNAME")) return [...zone.values()];
+    if (method === "GET") { const name = decodeURIComponent(/name=([^&]+)/.exec(path)[1]); return records[name] || (zone.has(name) ? [zone.get(name)] : []); }
+    if (method === "POST") { const r = { id: "r" + m.dns.length, ...body }; zone.set(body.name, r); return r; }
+    if (method === "DELETE") { for (const [k, v] of zone) if (path.endsWith("/" + v.id)) zone.delete(k); return {}; }
+    return { id: "r" + m.dns.length, ...body };
+  };
+  m.zone = zone;
+  return m;
+}
+
+test("wildcard naming: one record, NAME.prefix.zone, and back", async () => {
+  const { tm, dns, zone } = wildManager();
+  try {
+    await tm.create({ port: 3000 });
+    await tm.create({ port: 4000, sub: "radio" });
+    assert.deepEqual([...zone.keys()].sort(), ["radio.example.com", "tunnel-3000-aegis.example.com"]);
+
+    tm.certCovers = async () => false;
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel" }), /certificate/);
+    assert.equal(tm.hostFor(4000), "radio.example.com", "nothing moved after a refused switch");
+
+    tm.certCovers = async () => true;
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel" });
+    assert.equal(info.record, "*.tunnel.example.com");
+    assert.deepEqual([...zone.keys()], ["*.tunnel.example.com"], "the per-tunnel records are gone");
+    assert.equal(tm.hostFor(4000), "radio.tunnel.example.com");
+    assert.equal(tm.hostFor(3000), "3000.tunnel.example.com");
+    assert.equal(tm.matchHost("radio.tunnel.example.com"), 4000);
+    assert.equal(tm.matchHost("3000.tunnel.example.com"), 3000);
+    assert.equal(tm.matchHost("4000.tunnel.example.com"), null, "a named tunnel answers only to its name");
+    assert.equal(tm.matchHost("x.radio.tunnel.example.com"), null);
+    assert.equal(tm.matchHost("radio.example.com"), null);
+
+    const posts = dns.filter((d) => d.startsWith("POST")).length;
+    await tm.create({ port: 5000, sub: "grafana" });
+    assert.equal(dns.filter((d) => d.startsWith("POST")).length, posts, "a new tunnel adds no record");
+    assert.equal(tm.matchHost("grafana.tunnel.example.com"), 5000);
+    await assert.rejects(tm.update(5000, { sub: "123" }), /digits/);
+    await tm.remove(5000);
+    assert.ok(zone.has("*.tunnel.example.com"), "removing a tunnel keeps the wildcard");
+
+    await tm.setNaming({ mode: "wildcard", prefix: "t.home" });
+    assert.deepEqual([...zone.keys()], ["*.t.home.example.com"], "a new prefix replaces the old wildcard");
+    assert.equal(tm.hostFor(4000), "radio.t.home.example.com");
+
+    await tm.setNaming({ mode: "record" });
+    assert.deepEqual([...zone.keys()].sort(), ["radio.example.com", "tunnel-3000-aegis.example.com"]);
+    assert.equal(tm.matchHost("radio.example.com"), 4000);
+  } finally { tm.stop(); }
+});
+
+test("wildcard naming: an empty prefix is *.zone, and real records win", async () => {
+  const { tm } = wildManager({ "www.example.com": [{ type: "CNAME", name: "www.example.com", content: "elsewhere.net" }] });
+  try {
+    tm.certCovers = async () => true;
+    await tm.create({ port: 3000 });
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "" });
+    assert.equal(info.record, "*.example.com");
+    assert.equal(tm.hostFor(3000), "3000.example.com");
+    await assert.rejects(tm.update(3000, { sub: "www" }), /wins over the wildcard/);
+    await assert.rejects(tm.update(3000, { sub: "aegis" }), /dashboard/);
+    assert.equal(tm.matchHost("aegis.example.com"), null, "the dashboard's own name is never a tunnel");
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "bad_prefix" }), /prefix/);
+  } finally { tm.stop(); }
+});
