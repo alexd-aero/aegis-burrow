@@ -45,6 +45,24 @@ const ARCH_ALIASES = { amd64: "x86_64", x64: "x86_64", arm64: "aarch64", armhf: 
 const MASK = "••••••••";
 
 export class AddonError extends Error {}
+
+// systemd-run --user --scope, when this user's systemd manager is there
+// (lingering, or logged in); null otherwise. Checked once.
+let scopeCache;
+function userScope() {
+  if (scopeCache !== undefined) return scopeCache;
+  scopeCache = null;
+  try {
+    const uid = process.getuid?.();
+    const run = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+    if (uid == null || !existsSync(join(run, "bus"))) return null;
+    const bin = (process.env.PATH || "/usr/bin:/bin").split(":").map((d) => join(d, "systemd-run")).find((f) => existsSync(f));
+    if (!bin) return null;
+    scopeCache = { args: ["--user", "--scope", "--quiet", "--collect"],
+                   env: { XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(run, "bus")}` } };
+  } catch { scopeCache = null; }
+  return scopeCache;
+}
 const fail = (msg) => { throw new AddonError(msg); };
 
 // ------------------------------------------------------------------ sources
@@ -368,7 +386,14 @@ export class Addons {
     root = root || this.rootOf(rec);
     data = data || this.dataDir(rec);
     return new Promise((done) => {
-      const p = spawn("bash", [join(root, rel)], { cwd: root, env: this.env(rec, root, data, extra), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      // A job (install, update, an action like "start") runs in a scope of its
+      // own under the user's systemd: what it starts (Selkies Forge's web UI)
+      // then outlives this process, which a service manager may stop with
+      // everything in its cgroup (KillMode=control-group) on every restart.
+      const env = this.env(rec, root, data, extra);
+      const scope = job ? userScope() : null;
+      const [cmd, args] = scope ? ["systemd-run", [...scope.args, "--", "bash", join(root, rel)]] : ["bash", [join(root, rel)]];
+      const p = spawn(cmd, args, { cwd: root, env: scope ? { ...env, ...scope.env } : env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
       job?.procs.add(p);
       const lines = [], dir = { open: null, warn: [] };
       let killed = null, buf = "";
