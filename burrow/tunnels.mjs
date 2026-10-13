@@ -21,7 +21,11 @@
 // The prefix is the user's ("tunnel" by default); empty means *.<zone> itself.
 // A two-level name needs an edge certificate for *.<prefix>.<zone>, which
 // Cloudflare's free one isn't (Advanced Certificate Manager is), so the switch
-// checks the certificate first (certCovers).
+// checks the certificate first (certCovers). Or naming.relay names a server
+// (its IP) that takes the traffic instead of Cloudflare: the wildcard is then a
+// plain A record to it (not proxied), and the relay (Caddy with on-demand TLS)
+// fetches a free certificate per name, asking /__gate/relay-ask first, and
+// passes the requests on to this gate (over a reverse SSH tunnel, say).
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -47,6 +51,7 @@ import { execFile } from "node:child_process";
 import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { isIP } from "node:net";
 
 const MINUTES = 120;            // per-minute history kept
 const SECONDS = 90;             // per-second history for the live chart
@@ -63,7 +68,9 @@ function cleanNaming(n) {
   let prefix = n && "prefix" in n ? String(n.prefix ?? "").trim().toLowerCase().replace(/^\*?\.?|\.$/g, "") : "tunnel";
   if (prefix && !prefix.split(".").every((p) => SUB_RE.test(p))) throw new Error("The prefix is letters, digits and dashes, like tunnel (dots for more levels).");
   if (prefix.length > 60) throw new Error("That prefix is too long.");
-  return { mode, prefix };
+  const relay = String(n?.relay || "").trim();
+  if (relay && !isIP(relay)) throw new Error("The relay is the server's IP address, like 203.0.113.7.");
+  return { mode, prefix, relay: relay || null };
 }
 const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3306, 5432, 6379, 27017]);
 
@@ -517,8 +524,12 @@ export class TunnelManager {
     if (!this.domain) return;
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;
     const mine = this.wildcard ? new Set([this.wildcardName()]) : new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
-    for (const r of await this.cfApi("GET", "/dns_records?type=CNAME&per_page=1000")) {
-      if (r.content !== content || r.comment !== DNS_COMMENT || mine.has(r.name) || r.name === this.domain.mainHost) continue;
+    const recs = [...await this.cfApi("GET", "/dns_records?type=CNAME&per_page=1000"),
+                  ...(await this.cfApi("GET", "/dns_records?type=A&per_page=1000")).filter((r) => r.type === "A" && r.comment === DNS_COMMENT),
+                  ...(await this.cfApi("GET", "/dns_records?type=AAAA&per_page=1000")).filter((r) => r.type === "AAAA" && r.comment === DNS_COMMENT)];
+    for (const r of recs) {
+      const relayRec = r.type === "A" || r.type === "AAAA";
+      if ((!relayRec && r.content !== content) || r.comment !== DNS_COMMENT || mine.has(r.name) || r.name === this.domain.mainHost) continue;
       await this.cfApi("DELETE", `/dns_records/${r.id}`);
       this.log("tunnels: removed a leftover DNS record:", r.name);
     }
@@ -529,7 +540,9 @@ export class TunnelManager {
   async ensureWildcard() {
     const name = this.wildcardName();
     if (this._wild?.name === name) return this._wild;
-    const rec = await this.dnsCreate(name);
+    const relay = this.naming.relay;
+    const rec = await this.dnsUpsert(name, relay ? { type: isIP(relay) === 6 ? "AAAA" : "A", content: relay, proxied: false }
+                                                  : { type: "CNAME", content: `${this.domain.tunnelId}.cfargotunnel.com`, proxied: true });
     this._wild = { id: rec.id, name, ready: !rec.created };
     if (rec.created) this.log("tunnels: one wildcard record now serves every tunnel:", name);
     return this._wild;
@@ -550,7 +563,13 @@ export class TunnelManager {
   namingInfo() {
     return { ...this.naming, active: this.wildcard, zone: this.parent, label: this.label,
              example: this.domain ? (this.naming.mode === "wildcard" ? `radio.${this.wbase}` : `tunnel-3000-${this.label}.${this.parent}`) : null,
-             record: this.wildcard ? this.wildcardName() : null };
+             record: this.wildcard ? this.wildcardName() : null, relay: this.naming.relay };
+  }
+  // The relay's question before it fetches a certificate: is this one of ours?
+  relayAsk(host) {
+    if (!this.wildcard || !this.naming.relay) return false;
+    const port = this.matchHost(host);
+    return port !== null && !!this.get(port)?.enabled;
   }
   // Switch between a record per tunnel and one wildcard (or change the prefix).
   // Every tunnel moves to its new name; the records of the old way go.
@@ -559,9 +578,9 @@ export class TunnelManager {
     if (!this.domain) throw new Error("Link a domain first: without one, tunnels get trycloudflare.com names.");
     if (naming.mode === "wildcard") {
       const probe = `burrow-check.${naming.prefix ? `${naming.prefix}.${this.parent}` : this.parent}`;
-      if (!force && !(await this.certCovers(probe))) {
+      if (!force && !naming.relay && !(await this.certCovers(probe))) {
         const e = new Error(`Cloudflare's certificate for ${this.parent} doesn't cover *.${naming.prefix}.${this.parent}, so browsers would refuse those addresses. ` +
-          `Order one for it (SSL/TLS → Edge Certificates → Advanced Certificate Manager), or leave the prefix empty to use *.${this.parent}, which the free certificate covers.`);
+          `Name a relay server (a VPS with Caddy) to get free certificates instead, order one from Cloudflare (Advanced Certificate Manager, paid), or leave the prefix empty to use *.${this.parent}, which the free certificate covers.`);
         e.code = "cert";
         throw e;
       }
@@ -980,6 +999,22 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     if (!this.domain) return [];
     const recs = await this.cfApi("GET", "/dns_records?per_page=1000");
     return recs.map(({ name, type, content, proxied, comment }) => ({ name, type, content, proxied: !!proxied, comment: comment || "" }));
+  }
+  // A record of ours, made or put right: {id, name, ok, created?}
+  async dnsUpsert(name, { type, content, proxied }) {
+    const existing = await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`);
+    const rec = existing.find((r) => r.name === name);
+    const body = { type, name, content, proxied, ttl: 1, comment: DNS_COMMENT };
+    if (rec && rec.type === type && rec.content === content && !!rec.proxied === proxied) return { id: rec.id, name, ok: true };
+    if (rec) {
+      if (rec.comment !== DNS_COMMENT && !(rec.type === "CNAME" && rec.content === `${this.domain.tunnelId}.cfargotunnel.com`)) {
+        throw new Error(`${name} already has a ${rec.type} record that isn't Burrow's.`);
+      }
+      if (rec.type !== type) { await this.cfApi("DELETE", `/dns_records/${rec.id}`); }
+      else { const r = await this.cfApi("PUT", `/dns_records/${rec.id}`, body); return { id: r.id, name, ok: true }; }
+    }
+    const r = await this.cfApi("POST", "/dns_records", body);
+    return { id: r.id, name, ok: true, created: true };
   }
   async dnsCreate(name) {
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;

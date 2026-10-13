@@ -14,7 +14,7 @@ const sec = (id, title, sub, body) => `<section class="card lit panel set" id="$
 // How tunnels are named: a DNS record each, or one wildcard *.<prefix>.<zone>.
 function namingDraft() {
   const n = S.naming || { mode: "record", prefix: "tunnel" };
-  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel") };
+  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel"), relay: S.nmDraft?.relay ?? (n.relay || "") };
 }
 function namingSummary(d) {
   const n = S.naming;
@@ -25,7 +25,7 @@ function namingHost(n, zone) { return `radio.${n.prefix ? n.prefix + "." : ""}${
 function namingForm(d) {
   if (!S.naming) return "";
   const n = namingDraft(), cur = S.naming;
-  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || !cur.active));
+  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || n.relay !== (cur.relay || "") || !cur.active));
   return `<div class="naming">
       <div class="row flexwrap" style="gap:12px;align-items:center">
         <b class="small">Tunnel addresses</b>
@@ -34,7 +34,10 @@ function namingForm(d) {
       ${n.mode === "wildcard" ? `<label class="field" style="margin-top:12px"><span>Wildcard</span>
           <div class="addr"><span class="mono zone">*.</span><input class="input mono" id="nmPrefix" value="${h(n.prefix)}" maxlength="60" spellcheck="false" autocapitalize="none" placeholder="(none)"><span class="mono zone">.${h(d.zone)}</span></div></label>
         <p class="faint small">Every tunnel is <span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>: its own name, or its port (<span class="mono">${h(namingHost(n, d.zone))}</span>, <span class="mono">3000.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>). No DNS record is added per tunnel, so new tunnels answer at once.
-        ${n.prefix ? `A name two levels deep needs a Cloudflare certificate for <span class="mono">*.${h(n.prefix)}.${h(d.zone)}</span> (Advanced Certificate Manager); Aegis checks before it switches. Leave the prefix empty for <span class="mono">*.${h(d.zone)}</span>, which the free certificate covers.` : `Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`}</p>`
+        ${n.relay ? "" : n.prefix ? `A name two levels deep needs a Cloudflare certificate for <span class="mono">*.${h(n.prefix)}.${h(d.zone)}</span> (Advanced Certificate Manager, paid); Aegis checks before it switches. A relay server below gets free certificates instead.` : `Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`}</p>
+        <label class="field" style="margin-top:12px"><span>Relay server <span class="faint">(optional: its IP)</span></span>
+          <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="none: through Cloudflare"></label>
+        <p class="faint small">${n.relay ? `<span class="mono">*.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span> points at <span class="mono">${h(n.relay)}</span> (not through Cloudflare). Caddy there fetches a free Let's Encrypt certificate for each tunnel name the first time it's opened, asking this gate first (<span class="mono">/__gate/relay-ask</span>), and passes requests here over a reverse SSH tunnel.` : "A server of yours running Caddy with on-demand TLS: tunnels then need no Cloudflare certificate at all."}</p>`
       : `<p class="faint small" style="margin-top:10px">Each tunnel gets a DNS record of its own when it's made (<span class="mono">tunnel-3000-${h(d.mainHost)}</span>), so a brand-new name can take a minute to answer everywhere.</p>`}
       <div class="err-msg" id="nmErr">${h(S.nmErr || "")}</div>
       ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">Move every tunnel</button></div>` : ""}
@@ -384,7 +387,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "nmPrefix", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -457,6 +460,12 @@ function wireForms() {
     np.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), prefix: np.value.trim().toLowerCase().replace(/^\*?\.|\.$/g, "") }; });
     np.addEventListener("change", () => { np.blur(); render(); });
     np.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); np.blur(); render(); } });
+  }
+  const nr = $("#nmRelay");
+  if (nr) {
+    nr.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), relay: nr.value.trim() }; });
+    nr.addEventListener("change", () => { nr.blur(); render(); });
+    nr.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nr.blur(); render(); } });
   }
   const mb = $("#modBurrow");
   if (mb) mb.addEventListener("change", async () => {

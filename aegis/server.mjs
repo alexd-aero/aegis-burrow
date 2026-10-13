@@ -1104,6 +1104,12 @@ async function handler(req, res) {
   const url = new URL(req.url || "/", "http://x");
   const path = url.pathname;
   try {
+    // a relay (Caddy with on-demand TLS, on a server of yours) asks before it
+    // fetches a certificate for a tunnel name; only this machine may ask
+    if (path === "/__gate/relay-ask" && isThisMachine(req.socket.remoteAddress)) {
+      const name = String(url.searchParams.get("domain") || "").toLowerCase();
+      return send(res, burrow.on && tunnels.relayAsk(name) ? 200 : 404, "");
+    }
     const port = burrow.matchHost(host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,

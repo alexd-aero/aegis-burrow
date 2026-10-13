@@ -179,7 +179,8 @@ function wildManager(records = {}) {
   const zone = new Map();
   m.tm.cfApi = async (method, path, body) => {
     m.dns.push(`${method} ${path}`);
-    if (method === "GET" && path.includes("type=CNAME")) return [...zone.values()];
+    const ty = /type=([A-Z]+)/.exec(path);
+    if (method === "GET" && ty) return [...zone.values()].filter((r) => r.type === ty[1]);
     if (method === "GET") { const name = decodeURIComponent(/name=([^&]+)/.exec(path)[1]); return records[name] || (zone.has(name) ? [zone.get(name)] : []); }
     if (method === "POST") { const r = { id: "r" + m.dns.length, ...body }; zone.set(body.name, r); return r; }
     if (method === "DELETE") { for (const [k, v] of zone) if (path.endsWith("/" + v.id)) zone.delete(k); return {}; }
@@ -242,5 +243,33 @@ test("wildcard naming: an empty prefix is *.zone, and real records win", async (
     await assert.rejects(tm.update(3000, { sub: "aegis" }), /dashboard/);
     assert.equal(tm.matchHost("aegis.example.com"), null, "the dashboard's own name is never a tunnel");
     await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "bad_prefix" }), /prefix/);
+  } finally { tm.stop(); }
+});
+
+test("wildcard naming through a relay: an A record, no certificate check, relay-ask", async () => {
+  const { tm, zone } = wildManager();
+  try {
+    let asked = 0;
+    tm.certCovers = async () => { asked++; return false; };
+    await tm.create({ port: 3000, sub: "radio" });
+    await tm.create({ port: 4000 });
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel", relay: "not-an-ip" }), /IP address/);
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" });
+    assert.equal(asked, 0, "a relay brings its own certificates");
+    assert.equal(info.relay, "203.0.113.7");
+    const w = zone.get("*.tunnel.example.com");
+    assert.deepEqual([w.type, w.content, w.proxied], ["A", "203.0.113.7", false]);
+    assert.deepEqual([...zone.keys()], ["*.tunnel.example.com"]);
+    assert.equal(tm.relayAsk("radio.tunnel.example.com"), true);
+    assert.equal(tm.relayAsk("4000.tunnel.example.com"), true);
+    assert.equal(tm.relayAsk("nope.tunnel.example.com"), false, "only real tunnels get certificates");
+    await tm.update(4000, { enabled: false });
+    assert.equal(tm.relayAsk("4000.tunnel.example.com"), false, "nor paused ones");
+    // back through Cloudflare: the A record goes, a proxied CNAME comes
+    tm.certCovers = async () => true;
+    await tm.setNaming({ mode: "wildcard", prefix: "tunnel" });
+    const c = zone.get("*.tunnel.example.com");
+    assert.deepEqual([c.type, c.proxied], ["CNAME", true]);
+    assert.equal(tm.relayAsk("radio.tunnel.example.com"), false, "no relay, no questions");
   } finally { tm.stop(); }
 });
