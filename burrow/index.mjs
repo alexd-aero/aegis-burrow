@@ -111,6 +111,24 @@ export class Burrow {
     if (path === "/ports" && method === "GET") return ok({ ports: await T.ports() });
     // a DNS record per tunnel, or one wildcard *.<prefix>.<zone> for all of them
     if (path === "/tunnels/naming" && method === "GET") return ok(T.namingInfo());
+    // The Worker front's login, from the dashboard: start it with the naming the
+    // user picked; once Cloudflare says yes, that naming is applied by itself.
+    //   POST /tunnels/front/login {naming?} -> {url, status}
+    //   GET  /tunnels/front/login           -> {status: waiting|exchanging|setting-up|done|error|expired, error, naming}
+    //   POST /tunnels/front/login/finish {url}: the address the Cloudflare tab ended on
+    if (path === "/tunnels/front/login" && method === "POST") {
+      const b = await readJson();
+      const want = b.naming ? { ...b.naming, certs: "worker" } : null;
+      return ok(T.front.startLogin(async () => {
+        if (want) await T.setNaming(want);
+        else if (T.frontMode) await T.publishAll();
+      }));
+    }
+    if (path === "/tunnels/front/login" && method === "GET") return ok({ ...T.front.loginView(), naming: T.namingInfo() });
+    if (path === "/tunnels/front/login/finish" && method === "POST") {
+      try { await T.front.finishLogin((await readJson()).url); return ok({ ...T.front.loginView(), naming: T.namingInfo() }); }
+      catch (e) { return { status: 400, json: { error: e.message, ...T.front.loginView() } }; }
+    }
     // the Worker front's Cloudflare credential: {token} (Workers Scripts + Routes: Edit), or {wrangler: "<its config file>"}
     if (path === "/tunnels/front" && method === "PUT") {
       const b = await readJson();

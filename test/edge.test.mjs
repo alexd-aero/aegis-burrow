@@ -255,3 +255,33 @@ test("the Worker front: a Custom Domain per name, removed with the tunnel; only 
     assert.equal(tm.hostFor(3000), "radio.tunnel.example.com");
   } finally { tm.stop(); }
 });
+
+test("Cloudflare's login from the dashboard: PKCE, the pasted address, then the setup runs by itself", async () => {
+  const { WorkerFront } = await import("../burrow/workerfront.mjs");
+  const f = new WorkerFront({ file: join(tmp("front-"), "front.json"), log: () => {} });
+  let setUp = 0;
+  const { url } = f.startLogin(async () => { setUp++; });
+  const u = new URL(url);
+  assert.equal(u.origin + u.pathname, "https://dash.cloudflare.com/oauth2/auth");
+  assert.equal(u.searchParams.get("redirect_uri"), "http://localhost:8976/oauth/callback");
+  assert.equal(u.searchParams.get("code_challenge_method"), "S256");
+  assert.match(u.searchParams.get("scope"), /workers_routes:write/);
+  assert.match(u.searchParams.get("scope"), /offline_access/);
+  const state = u.searchParams.get("state");
+  await assert.rejects(f.finishLogin("http://localhost:8976/oauth/callback?code=abc&state=wrong"), /another login/);
+  await assert.rejects(f.finishLogin("http://localhost:8976/oauth/callback?state=" + state), /no code/);
+  const real = globalThis.fetch;
+  let sent = null;
+  globalThis.fetch = async (to, opt) => { sent = { to: String(to), body: new URLSearchParams(opt.body) };
+    return new Response(JSON.stringify({ access_token: "acc", refresh_token: "ref", expires_in: 3600 }), { status: 200 }); };
+  try {
+    await f.finishLogin(`http://localhost:8976/oauth/callback?code=abc&state=${state}`);
+  } finally { globalThis.fetch = real; }
+  assert.equal(sent.to, "https://dash.cloudflare.com/oauth2/token");
+  assert.equal(sent.body.get("grant_type"), "authorization_code");
+  assert.ok(sent.body.get("code_verifier"), "the PKCE verifier goes with the code");
+  assert.ok(f.linked);
+  assert.equal(setUp, 1, "the tunnels are set up as soon as Cloudflare says yes");
+  assert.equal(f.loginView().status, "done");
+  assert.equal(JSON.parse(readFileSync(f.file, "utf8")).oauth.refresh, "ref");
+});

@@ -22,11 +22,18 @@
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
+import { createServer } from "node:http";
 
 const API = "https://api.cloudflare.com/client/v4";
 const WRANGLER_CLIENT = "54d11594-84e4-41aa-b438-e81b8fa78ee7";     // wrangler's public OAuth client
 const COMPAT = "2026-01-01";
+const REDIRECT = "http://localhost:8976/oauth/callback";                 // the one wrangler's client allows
+// what Burrow needs: deploy one Worker and give it Custom Domains (and stay logged in)
+const SCOPES = ["account:read", "user:read", "workers:write", "workers_scripts:write", "workers_routes:write", "zone:read", "offline_access"];
+const PAGE = (title, text) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title>
+<body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#121110;color:#ece6da;font:16px system-ui,sans-serif">
+<div style="text-align:center;max-width:420px;padding:24px"><h1 style="font-weight:600;font-size:22px">${title}</h1><p style="color:#a49d92">${text}</p></div>`;
 
 export const WORKER_SOURCE = `// Aegis × Burrow: tunnel names on Cloudflare, handed to the gate through its tunnel.
 export default {
@@ -97,6 +104,78 @@ export class WorkerFront {
     try { j = JSON.parse(text); } catch { /* not JSON */ }
     if (!j.success) throw new Error((j.errors || []).map((e) => e.message).join("; ") || `HTTP ${r.status}`);
     return j.result;
+  }
+
+  // ------------------------------------------------------------ the login, from the dashboard
+  // Cloudflare's own OAuth for wrangler (PKCE). Its redirect is fixed to
+  // http://localhost:8976/oauth/callback: when the browser runs on this
+  // machine, the listener below catches it by itself; otherwise that tab
+  // ends on a page that can't load, and its address is pasted back
+  // (finishLogin takes the whole address, or just its query).
+  startLogin(onDone) {
+    this.cancelLogin();
+    const verifier = randomBytes(32).toString("base64url");
+    const state = randomBytes(18).toString("base64url");
+    const url = "https://dash.cloudflare.com/oauth2/auth?" + new URLSearchParams({
+      response_type: "code", client_id: WRANGLER_CLIENT, redirect_uri: REDIRECT, scope: SCOPES.join(" "), state,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+    });
+    const login = { verifier, state, url, status: "waiting", error: null, started: Date.now(), onDone };
+    this.login = login;
+    const srv = createServer((req, res) => {
+      const u = new URL(req.url || "/", "http://localhost");
+      if (u.pathname !== "/oauth/callback") { res.writeHead(404); return res.end(); }
+      this.finishLogin(u.search).then(
+        () => { res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(PAGE("Cloudflare is connected", "Aegis × Burrow is setting up your tunnel names. You can close this tab.")); },
+        (e) => { res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }); res.end(PAGE("That didn't work", String(e.message).replace(/[<&>]/g, ""))); });
+    });
+    srv.on("error", () => { /* 8976 busy (wrangler itself?): pasting the address still works */ });
+    srv.listen(8976, "127.0.0.1");
+    login.server = srv;
+    login.timer = setTimeout(() => { if (this.login === login && login.status === "waiting") { login.status = "expired"; this.cancelLogin(true); } }, 15 * 60e3);
+    login.timer.unref?.();
+    return { url, status: login.status };
+  }
+  cancelLogin(keep) {
+    const l = this.login;
+    if (!l) return;
+    clearTimeout(l.timer);
+    try { l.server?.close(); } catch { /* closed */ }
+    l.server = null;
+    if (!keep) this.login = null;
+  }
+  loginView() {
+    const l = this.login;
+    return l ? { status: l.status, error: l.error, url: l.status === "waiting" ? l.url : null } : { status: "none" };
+  }
+  async finishLogin(pasted) {
+    const l = this.login;
+    if (!l || l.status !== "waiting") throw new Error("There is no Cloudflare login waiting; start again.");
+    const raw = String(pasted || "").trim();
+    const q = new URLSearchParams(raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : raw);
+    if (q.get("error")) { l.status = "error"; l.error = q.get("error_description") || q.get("error"); this.cancelLogin(true); throw new Error(`Cloudflare said: ${l.error}`); }
+    const code = q.get("code");
+    if (!code) throw new Error("That address has no code in it: paste the whole address the Cloudflare tab ended on.");
+    if (q.get("state") !== l.state) throw new Error("That address belongs to another login; start again.");
+    l.status = "exchanging";
+    try {
+      const r = await fetch("https://dash.cloudflare.com/oauth2/token", {
+        method: "POST", signal: AbortSignal.timeout(20000), headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: WRANGLER_CLIENT, redirect_uri: REDIRECT, code_verifier: l.verifier }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.access_token || !j.refresh_token) throw new Error(j.error_description || j.error || `HTTP ${r.status}`);
+      this.state = { ...this.state, token: null, oauth: { access: j.access_token, refresh: j.refresh_token, expires: Date.now() + (Number(j.expires_in) || 3600) * 1000 } };
+      this.save();
+      this.log("front: Cloudflare Workers connected");
+    } catch (e) {
+      l.status = "error"; l.error = `Cloudflare didn't accept the login (${e.message})`; this.cancelLogin(true);
+      throw new Error(l.error);
+    }
+    this.cancelLogin(true);
+    l.status = "setting-up";
+    try { await l.onDone?.(); l.status = "done"; }
+    catch (e) { l.status = "error"; l.error = e.message; throw e; }
   }
 
   scriptName(label) { return `aegis-tunnels-${label}`.slice(0, 63); }

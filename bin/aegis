@@ -1008,9 +1008,9 @@ usage() {
     aegis burrow rename PORT NAME | unpublish PORT
 
   ${B}More${NC}
-    aegis front-login [--token]  let Burrow make Cloudflare Workers custom domains (tunnel names
-                                 two levels deep, free certificates): uses \`npx wrangler login\`,
-                                 or a token with Workers Scripts + Routes: Edit read from stdin
+    aegis front-login [--wildcard PREFIX | --token]
+                                 connect Cloudflare Workers: tunnel names two levels deep
+                                 (NAME.PREFIX.your-domain), free certificates, nothing open
     aegis serveo on | off | url  a public link to the dashboard, no account
     aegis termix install | remove
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
@@ -1051,22 +1051,37 @@ case "$1" in
       *) die "aegis serveo on | off | url" ;;
     esac ;;
   front-login) shift; need_installed; ensure_running
+    # Cloudflare's login for its wrangler tool, run by Aegis itself (Settings → Domain does the same).
+    # aegis front-login [--wildcard PREFIX]   (then every tunnel moves to NAME.PREFIX.<your domain>)
+    # aegis front-login --token               (an API token instead, read from stdin)
     if [ "${1:-}" = --token ]; then
-      say "paste the token, then Enter:"; IFS= read -rs tok; echo
-      body="$("$NODE" -e 'process.stdout.write(JSON.stringify({token: process.argv[1]}))' "$tok")"
-    else
-      wf=""
-      for f in "${XDG_CONFIG_HOME:-$HOME/.config}/.wrangler/config/default.toml" "$HOME/.wrangler/config/default.toml"; do [ -f "$f" ] && { wf="$f"; break; }; done
-      if [ -z "$wf" ]; then
-        say "logging in to Cloudflare with wrangler (allow it in the browser)…"
-        npx -y wrangler@4 login || die "wrangler login didn't finish"
-        for f in "${XDG_CONFIG_HOME:-$HOME/.config}/.wrangler/config/default.toml" "$HOME/.wrangler/config/default.toml"; do [ -f "$f" ] && { wf="$f"; break; }; done
-      fi
-      [ -n "$wf" ] || die "no wrangler login found"
-      body="$("$NODE" -e 'process.stdout.write(JSON.stringify({wrangler: require("fs").readFileSync(process.argv[1], "utf8")}))' "$wf")"
+      say "paste the token (Workers Scripts + Workers Routes: Edit), then Enter:"; IFS= read -rs tok; echo
+      out="$("$NODE" -e 'process.stdout.write(JSON.stringify({token: process.argv[1]}))' "$tok" | burrow_call PUT /tunnels/front -)" || die "$out"
+      ok "Cloudflare Workers connected"; exit 0
     fi
-    out="$(printf '%s' "$body" | burrow_call PUT /tunnels/front -)" || die "$out"
-    ok "Cloudflare Workers connected: pick \"Cloudflare Worker\" under Settings → Domain → Certificate" ;;
+    naming="null"
+    [ "${1:-}" = --wildcard ] && naming="$("$NODE" -e 'process.stdout.write(JSON.stringify({mode:"wildcard", prefix: process.argv[1], certs:"worker"}))' "${2:-tunnel}")"
+    out="$(burrow_call POST /tunnels/front/login "{\"naming\":$naming}")" || die "$out"
+    url="$(printf '%s' "$out" | jget url)"
+    title "Connect Cloudflare Workers"
+    say "1. open this link and click Allow:"; echo; echo "   $url"; echo
+    open_url "$url" >/dev/null 2>&1 || true
+    say "2. the tab then goes to localhost:8976. On this machine that finishes by itself;"
+    say "   on another one it shows a page that can't load: paste its whole address here."
+    while :; do
+      st="$(burrow_call GET /tunnels/front/login | jget status)"
+      case "$st" in
+        done) ok "Cloudflare Workers connected$([ "$naming" != null ] && echo ": every tunnel is moving to NAME.${2:-tunnel}.<your domain>")"; break ;;
+        error|expired|none) die "the Cloudflare login stopped ($(burrow_call GET /tunnels/front/login | jget error))" ;;
+      esac
+      if IFS= read -r -t 2 line && [ -n "$line" ]; then
+        body="$("$NODE" -e 'process.stdout.write(JSON.stringify({url: process.argv[1]}))' "$line")"
+        spin_start "connecting"
+        out="$(printf '%s' "$body" | burrow_call POST /tunnels/front/login/finish -)"; rc=$?
+        spin_stop
+        [ $rc -eq 0 ] || bad "$out"
+      fi
+    done ;;
   logs) shift; cmd_logs "$@" ;;
   termix) shift; need_installed; cmd_termix "$@" ;;
   burrow) shift; need_installed; cmd_burrow "$@" ;;

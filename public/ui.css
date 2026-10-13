@@ -240,6 +240,8 @@ details.adv summary { cursor: pointer; color: var(--muted); font-size: 12.5px; m
         animation: spin .7s linear infinite; vertical-align: -2px; }
 .btn.primary .spin { border-color: rgba(0,0,0,.2); border-top-color: #000; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.note-box { padding: 14px 16px; margin-top: 12px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--field); }
+.note-box p { margin: 0 0 8px; }
 .note-err { padding: 14px 16px; margin-bottom: 14px; border-color: rgba(255,90,82,.35); }
 pre.log { margin: 12px 0 0; padding: 10px 12px; max-height: 220px; overflow: auto; border-radius: 10px; background: var(--field);
           border: 1px solid var(--line); font: 11.5px/1.55 var(--mono); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }

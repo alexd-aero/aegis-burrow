@@ -42,11 +42,54 @@ function namingSummary(d) {
 }
 // The Worker front needs a Cloudflare credential that may edit Workers.
 function frontForm(f) {
+  if (S.frontLogin) return frontLoginPanel();
   if (f?.linked) return `<div class="kv-row"><span>Workers</span><span class="pill ok"><i class="dot ok"></i>connected${f.script ? ` · <span class="mono">${h(f.script)}</span>` : ""}</span></div>`;
-  return `<label class="field" style="margin-top:12px"><span>Cloudflare API token <span class="faint">(Workers Scripts: Edit, Workers Routes: Edit)</span></span>
+  return `<p class="faint small" style="margin-top:10px">This needs one more yes from Cloudflare: permission to put up the Worker and its Custom Domains (Cloudflare's own login for its <span class="mono">wrangler</span> tool). The button below asks for it, then sets everything up.</p>
+    <details class="adv"><summary>Or use an API token</summary>
+      <label class="field" style="margin-top:10px"><span>Cloudflare API token <span class="faint">(Workers Scripts: Edit, Workers Routes: Edit)</span></span>
       <div class="row" style="gap:8px"><input class="input mono" id="frToken" type="password" autocomplete="off" spellcheck="false" placeholder="paste a token">
       <button type="button" class="btn" data-act="front-token">Connect</button></div></label>
-    <p class="faint small">Make one under My Profile → API Tokens (template "Edit Cloudflare Workers"), or run <span class="mono">npx wrangler login</span> on this machine and <span class="mono">aegis front-login</span>.</p>`;
+      <p class="faint small">Make one under My Profile → API Tokens, from the "Edit Cloudflare Workers" template.</p></details>`;
+}
+// While Cloudflare's login is open in another tab.
+function frontLoginPanel() {
+  const l = S.frontLogin;
+  if (l.status === "exchanging" || l.status === "setting-up") {
+    return `<div class="kv-row"><span>Cloudflare</span><span class="pill warn"><i class="spin"></i> ${l.status === "exchanging" ? "connecting…" : "putting up the Worker and every tunnel name…"}</span></div>`;
+  }
+  return `<div class="note-box">
+      <p><b>Allow it in the Cloudflare tab.</b> ${l.url ? `<a class="link" href="${h(l.url)}" target="_blank" rel="noopener">Open it again</a>` : ""}</p>
+      <p class="faint small">When you click Allow, that tab goes to <span class="mono">localhost:8976</span>. If this browser runs on the machine Aegis runs on, that's all: it finishes by itself. Anywhere else, the tab shows a page that can't be reached. That's expected: copy its whole address and paste it here.</p>
+      <div class="row" style="gap:8px"><input class="input mono" id="frPaste" autocomplete="off" spellcheck="false" placeholder="http://localhost:8976/oauth/callback?code=…">
+      <button type="button" class="btn primary" data-act="front-finish">Finish</button><button type="button" class="btn ghost" data-act="front-cancel">Cancel</button></div>
+      ${l.error ? `<div class="err-msg">${h(l.error)}</div>` : ""}
+    </div>`;
+}
+// Start Cloudflare's login (naming: what to switch to once it's done), and follow it.
+async function frontConnect(naming) {
+  const tab = window.open("about:blank", "_blank");           // opened now, while the click still counts
+  try {
+    const j = await api("/__gate/api/tunnels/front/login", { method: "POST", body: JSON.stringify({ naming }) });
+    S.frontLogin = { status: j.status, url: j.url, error: null };
+    if (tab) tab.location.href = j.url; else window.open(j.url, "_blank");
+  } catch (ex) { tab?.close(); S.nmErr = ex.message; S.frontLogin = null; }
+  render();
+  followFrontLogin();
+}
+async function followFrontLogin() {
+  clearTimeout(S.frontPoll);
+  if (!S.frontLogin) return;
+  try {
+    const j = await api("/__gate/api/tunnels/front/login");
+    if (j.status === "done") { S.frontLogin = null; S.naming = j.naming; S.nmDraft = null; S.nmErr = ""; toast(`Cloudflare connected · tunnels live under ${j.naming.record || "their names"}`); render(); return; }
+    if (j.status === "error" || j.status === "expired" || j.status === "none") {
+      S.frontLogin = null; S.nmErr = j.status === "expired" ? "The Cloudflare login timed out; start again." : (j.error || "The Cloudflare login stopped."); render(); return;
+    }
+    const was = S.frontLogin.status;
+    S.frontLogin = { ...S.frontLogin, status: j.status };
+    if (was !== j.status) render();
+  } catch { /* try again */ }
+  S.frontPoll = setTimeout(followFrontLogin, 2000);
 }
 function namingHost(n, zone) { return `radio.${n.prefix ? n.prefix + "." : ""}${zone}`; }
 function namingForm(d) {
@@ -80,7 +123,7 @@ function namingForm(d) {
         <p class="faint small">${n.certs === "self" ? "A server of yours running Caddy with on-demand TLS that takes over while this machine isn't reachable on port 443, and hands the names back once it is." : "A server of yours running Caddy with on-demand TLS."}</p>` : ""}`
       : `<p class="faint small" style="margin-top:10px">Each tunnel gets a DNS record of its own when it's made (<span class="mono">tunnel-3000-${h(d.mainHost)}</span>), so a brand-new name can take a minute to answer everywhere.</p>`}
       <div class="err-msg" id="nmErr">${h(S.nmErr || "")}</div>
-      ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">Move every tunnel</button></div>` : ""}
+      ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">${n.mode === "wildcard" && n.certs === "worker" && !cur.front?.linked ? "Connect Cloudflare &amp; move every tunnel" : "Move every tunnel"}</button></div>` : ""}
     </div>`;
 }
 
@@ -427,7 +470,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -620,6 +663,17 @@ document.addEventListener("click", async (e) => {
     }
     else if (act === "log") { S.log = el.dataset.id; render(); loadLog(S.log); }
     else if (act === "rename") { S.renaming = true; S.label = null; render(); $("#label")?.focus(); }
+    else if (act === "front-finish") {
+      const v = $("#frPaste")?.value.trim();
+      if (!v) return;
+      el.disabled = true; S.frontLogin = { ...S.frontLogin, status: "exchanging", error: null }; render();
+      try {
+        const j = await api("/__gate/api/tunnels/front/login/finish", { method: "POST", body: JSON.stringify({ url: v }) });
+        if (j.status === "done") { S.frontLogin = null; S.naming = j.naming; S.nmDraft = null; toast(`Cloudflare connected · tunnels live under ${j.naming.record || "their names"}`); }
+      } catch (ex) { S.frontLogin = S.frontLogin && { ...S.frontLogin, status: "waiting", error: ex.message }; }
+      render(); followFrontLogin();
+    }
+    else if (act === "front-cancel") { clearTimeout(S.frontPoll); S.frontLogin = null; render(); }
     else if (act === "front-token") {
       const v = $("#frToken")?.value.trim();
       if (!v) return;
@@ -634,6 +688,7 @@ document.addEventListener("click", async (e) => {
       if (n.certs === "cloudflare" || n.certs === "worker") n.relay = "";
       const where = n.mode === "wildcard" ? `NAME.${n.prefix ? n.prefix + "." : ""}${zone} through one wildcard record` : `tunnel-PORT-${S.cf.domain.mainHost} with a DNS record each`;
       if (!confirm(`Move every tunnel to ${where}? Their current addresses stop working.`)) return;
+      if (n.mode === "wildcard" && n.certs === "worker" && !S.naming.front?.linked) { S.nmErr = ""; return frontConnect(n); }
       el.disabled = true; el.innerHTML = n.mode === "wildcard" && (n.certs === "self" || n.certs === "worker") ? '<i class="spin"></i> Setting up the certificates…' : '<i class="spin"></i> Moving…'; S.busy = true;
       try {
         const j = await api("/__gate/api/tunnels/naming", { method: "PUT", body: JSON.stringify(n) });
