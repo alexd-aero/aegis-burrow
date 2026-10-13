@@ -1096,7 +1096,7 @@ case "$1" in
       const row = (k, x, f) => console.log(`  ${k.padEnd(14)} ${x?.error ? D + "could not ask: " + x.error + N : f(x?.result)}`);
       console.log("");
       row("GreyNoise", s.greynoise, (g) => !g?.seen ? "never seen scanning" : [g.classification, g.scanner && "mass scanner", g.benign && "known service", g.name].filter(Boolean).join(", "));
-      row("vonweber.nl", s.vonweber, (x) => x?.listed ? `BANNED since ${x.since} (${x.hits}x)` : `not among ${x?.total} banned`);
+      row("vonweber.nl", s.vonweber, (x) => x?.listed ? `BANNED since ${x.since} (${x.hits}x)` : "not on the elsnet ban list");
       row("Blocklists", s.dnsbl, (d) => d?.skipped || Object.entries(d || {}).map(([k, x]) => `${k}: ${x.listed ? "LISTED " + x.why.join("/") : x.error || "clean"}`).join(" · "));
       row("StopForumSpam", s.sfs, (x) => x?.reports ? `${x.reports} reports, last ${x.lastSeen}` : "no reports");
       row("Shodan", s.shodan, (x) => !x?.seen ? "nothing indexed" : `ports ${x.ports.join(",") || "-"}${x.vulns ? `, ${x.vulns} vulns` : ""}${x.tags.length ? `, ${x.tags.join(",")}` : ""}`);

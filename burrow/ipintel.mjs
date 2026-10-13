@@ -40,7 +40,8 @@ export async function fetchVonweber(ip) {
   return r.text();
 }
 // What the page says about one IP: listed (with its host name, since when, how
-// many times) or not, and how many entries the list has. `page` is its HTML.
+// many times) or not. `total` is how many entries the page showed (with ?ip= it
+// shows the part of the list around that address). `page` is its HTML.
 export function parseVonweber(page, ip) {
   const text = page.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ");
   const total = Number((/(\d+)\s+blacklisted\s+hosts and\s+IPs/i.exec(text) || [])[1]) || null;
