@@ -19,9 +19,13 @@
 //            visitor would. (Asking the public address from inside the house
 //            proves nothing: many routers don't loop back, or answer with
 //            their own admin page. That is only tried second.)
-//   relay    the backup relay (naming.relay, a server with Caddy) while it
-//            isn't: three failed checks in a row move the record there, two
-//            good ones bring it back
+//   relay    the relay (naming.relay, a server with Caddy) while it isn't:
+//            three failed checks in a row move the record there, two good ones
+//            bring it back. A relay with Caddy's layer4 module passes the
+//            encrypted bytes of these names through to this machine unopened
+//            (aegis/server.mjs, the relay port), so the certificate is still
+//            this one; Burrow checks for that too (relayPass). Only when this
+//            machine can't be reached does the relay answer with its own.
 // With no relay the record stays on this machine's address either way.
 
 import { createSecureContext, connect as tlsConnect } from "node:tls";
@@ -71,6 +75,7 @@ export class Edge {
     this.retryAt = 0;
     this.publicIp = null;
     this.direct = { ok: null, fails: 0, oks: 0, checked: null, why: null };
+    this.relayPass = null;     // does the relay hand back our own certificate? (passthrough)
     this.upnp = { at: 0, ok: null, note: null, lan: null };
     this.onChange = null;      // where the record should point changed
     this.onCert = null;        // a certificate is ready (first one, or renewed)
@@ -105,11 +110,12 @@ export class Edge {
       this.timer = setInterval(() => this.tick(), CHECK_EVERY_MS);
       this.timer.unref?.();
       setTimeout(() => this.tick(), 1500).unref?.();
-    } else if (!this.base) this.stop();
+    } else if (!this.base && this.timer) { this.stop(); this.onStop?.(); }
     if (this.target()?.ip !== before) this.onChange?.();
   }
   stop() { clearInterval(this.timer); this.timer = null; }
   ready() { return !!(this.base && this.cur); }
+  // (onStop: set by Aegis, called when the edge stops serving)
 
   async tick() {
     if (!this.base || !this.timer || this._ticking) return;
@@ -242,9 +248,23 @@ export class Edge {
       sock.on("timeout", () => { sock.destroy(); resolve({ ok: false, why: "port 443 doesn't answer there" }); });
     });
   }
+  // Through the relay, is it still our certificate? (it passes the bytes through)
+  probeRelay() {
+    return new Promise((resolve) => {
+      if (!this.relay || !this.cur) return resolve(null);
+      const sock = tlsConnect({ host: this.relay, port: 443, servername: `burrow-check.${this.base}`, rejectUnauthorized: false, timeout: 8000 }, () => {
+        const fp = sock.getPeerCertificate()?.fingerprint256;
+        sock.destroy();
+        resolve(fp === this.cur.fingerprint);
+      });
+      sock.on("error", () => resolve(false));
+      sock.on("timeout", () => { sock.destroy(); resolve(false); });
+    });
+  }
   async check() {
     if (!this.base) return;
     const before = this.target()?.ip;
+    this.relayPass = await this.probeRelay();
     const r = await this.probe();
     const d = this.direct;
     d.checked = Date.now(); d.why = r.ok ? null : r.why;
@@ -295,7 +315,7 @@ export class Edge {
                          staging: !!this.cur.directory && this.cur.directory !== LETSENCRYPT } : null,
       issuing: !!this.issuing, error: this.error,
       direct: { ok: this.direct.ok, checked: this.direct.checked, why: this.direct.why },
-      via: t?.via || null, target: t?.ip || null,
+      via: t?.via || null, target: t?.ip || null, relayPass: this.relayPass,
       upnp: { ok: this.upnp.ok, note: this.upnp.note, at: this.upnp.at || null },
     };
   }

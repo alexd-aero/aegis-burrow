@@ -111,6 +111,18 @@ export class Burrow {
     if (path === "/ports" && method === "GET") return ok({ ports: await T.ports() });
     // a DNS record per tunnel, or one wildcard *.<prefix>.<zone> for all of them
     if (path === "/tunnels/naming" && method === "GET") return ok(T.namingInfo());
+    // the Worker front's Cloudflare credential: {token} (Workers Scripts + Routes: Edit), or {wrangler: "<its config file>"}
+    if (path === "/tunnels/front" && method === "PUT") {
+      const b = await readJson();
+      try {
+        if (b.wrangler) {
+          const val = (k) => String(b.wrangler).split("\n").find((l) => l.startsWith(k + " = "))?.slice(k.length + 3).trim().replace(/^"|"$/g, "");
+          T.front.setCredential({ oauth: { oauth_token: val("oauth_token"), refresh_token: val("refresh_token"), expiration_time: val("expiration_time") } });
+        } else T.front.setCredential({ token: b.token });
+        await T.front.bearer();
+        return ok(T.namingInfo());
+      } catch (e) { return { status: 400, json: { error: e.message } }; }
+    }
     if (path === "/tunnels/naming" && method === "PUT") {
       const body = await readJson();
       try {

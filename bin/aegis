@@ -1008,6 +1008,9 @@ usage() {
     aegis burrow rename PORT NAME | unpublish PORT
 
   ${B}More${NC}
+    aegis front-login [--token]  let Burrow make Cloudflare Workers custom domains (tunnel names
+                                 two levels deep, free certificates): uses \`npx wrangler login\`,
+                                 or a token with Workers Scripts + Routes: Edit read from stdin
     aegis serveo on | off | url  a public link to the dashboard, no account
     aegis termix install | remove
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
@@ -1047,6 +1050,23 @@ case "$1" in
       url) s="$(serveo_url)"; if [ -n "$s" ]; then echo "$s"; elif serveo_wanted; then die "not up yet (ssh to serveo.net still connecting, or blocked)"; else die "off: aegis serveo on"; fi ;;
       *) die "aegis serveo on | off | url" ;;
     esac ;;
+  front-login) shift; need_installed; ensure_running
+    if [ "${1:-}" = --token ]; then
+      say "paste the token, then Enter:"; IFS= read -rs tok; echo
+      body="$("$NODE" -e 'process.stdout.write(JSON.stringify({token: process.argv[1]}))' "$tok")"
+    else
+      wf=""
+      for f in "${XDG_CONFIG_HOME:-$HOME/.config}/.wrangler/config/default.toml" "$HOME/.wrangler/config/default.toml"; do [ -f "$f" ] && { wf="$f"; break; }; done
+      if [ -z "$wf" ]; then
+        say "logging in to Cloudflare with wrangler (allow it in the browser)…"
+        npx -y wrangler@4 login || die "wrangler login didn't finish"
+        for f in "${XDG_CONFIG_HOME:-$HOME/.config}/.wrangler/config/default.toml" "$HOME/.wrangler/config/default.toml"; do [ -f "$f" ] && { wf="$f"; break; }; done
+      fi
+      [ -n "$wf" ] || die "no wrangler login found"
+      body="$("$NODE" -e 'process.stdout.write(JSON.stringify({wrangler: require("fs").readFileSync(process.argv[1], "utf8")}))' "$wf")"
+    fi
+    out="$(printf '%s' "$body" | burrow_call PUT /tunnels/front -)" || die "$out"
+    ok "Cloudflare Workers connected: pick \"Cloudflare Worker\" under Settings → Domain → Certificate" ;;
   logs) shift; cmd_logs "$@" ;;
   termix) shift; need_installed; cmd_termix "$@" ;;
   burrow) shift; need_installed; cmd_burrow "$@" ;;

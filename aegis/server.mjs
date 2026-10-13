@@ -44,6 +44,8 @@ import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
+import { readProxyHeader } from "../burrow/proxyproto.mjs";
+import { createServer as createNetServer, connect as netConnect } from "node:net";
 import { checkLock } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
@@ -1107,8 +1109,19 @@ async function tunnelRequest(port, req, res, path, url, host) {
 
 // ---------- server ----------
 
+// A request the Worker front handed over (burrow/workerfront.mjs): it came
+// through the dashboard's own tunnel, for a tunnel's name.
+function frontClaim(req) {
+  if (req.headers["x-aegis-front-key"] === undefined) return;
+  const f = tunnels.front.claim(req, isThisMachine(req.socket.remoteAddress));
+  if (!f) { req.headers.host = "front.invalid"; return; }
+  req.headers.host = f.host;
+  if (f.ip) req.headers["cf-connecting-ip"] = f.ip;
+}
+
 async function handler(req, res) {
   res.req = req;
+  frontClaim(req);
   const host = hostOf(req);
   const url = new URL(req.url || "/", "http://x");
   const path = url.pathname;
@@ -1182,6 +1195,7 @@ function tlsOptions() {
 const server = TLS ? createHttpsServer(tlsOptions(), handler) : createHttpServer(handler);
 
 server.on("upgrade", (req, socket, head) => {
+  frontClaim(req);
   const host = hostOf(req);
   const port = burrow.matchHost(host);
   if (port !== null) {
@@ -1208,9 +1222,34 @@ server.on("upgrade", (req, socket, head) => {
 function edgeAdmit(req) {
   if (burrow.matchHost(hostOf(req)) === null) return false;
   for (const k of ["x-forwarded-for", "x-real-ip", "x-forwarded-proto", "x-forwarded-host"]) delete req.headers[k];
-  req.headers["cf-connecting-ip"] = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  const relayed = isLoopback(req.socket.remoteAddress) ? relayedFrom.get(req.socket.remotePort) : null;
+  req.headers["cf-connecting-ip"] = relayed || String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
   return true;
 }
+// The relay's passthrough: a relay server (Caddy with layer4) can pass the
+// encrypted bytes of tunnel names here unopened, so this machine's
+// certificate is the one the browser sees and the relay reads nothing. It
+// reaches this loopback port through a reverse SSH tunnel and puts a PROXY
+// protocol header first, which says who the visitor is.
+const RELAY_PORT = Number(process.env.AEGIS_EDGE_RELAY_PORT || EDGE.relayPort || 4443);
+// (The rest is handed to the edge's own port over loopback: the TLS server
+// reads sockets natively, so bytes already read can't be given back to it.)
+const relayedFrom = new Map();          // our loopback port toward the edge -> the visitor's address
+const relayIn = createNetServer((sock) => {
+  if (!isLoopback(sock.remoteAddress) || !edgeServer?.listening) return sock.destroy();
+  sock.on("error", () => {});
+  readProxyHeader(sock).then(({ src }) => {
+    const up = netConnect(tunnels.edge.port, "127.0.0.1", () => {
+      const lp = up.localPort;
+      if (src) { relayedFrom.set(lp, src); up.once("close", () => relayedFrom.delete(lp)); }
+      sock.pipe(up); up.pipe(sock);
+    });
+    up.on("error", () => sock.destroy());
+    sock.on("close", () => up.destroy());
+  }).catch(() => sock.destroy());
+});
+relayIn.on("error", (e) => log(`edge: the relay port 127.0.0.1:${RELAY_PORT}:`, e.message));
+relayIn.listen(RELAY_PORT, "127.0.0.1");
 let edgeServer = null;
 function edgeListen() {
   if (edgeServer || !tunnels.edge.ready()) return;
@@ -1233,25 +1272,33 @@ function edgeListen() {
   });
   edgeServer.on("tlsClientError", () => { /* scanners, names we don't serve */ });
   edgeServer.keepAliveTimeout = 65000;
-  const tryPort = (i) => {
-    const port = EDGE_PORTS[i];
-    const fail = (e) => {
-      if (i + 1 < EDGE_PORTS.length && (e.code === "EACCES" || e.code === "EADDRINUSE")) return tryPort(i + 1);
-      log(`edge: can't listen on ${EDGE.host}:${port}:`, e.message);
-      edgeServer = null;
-    };
-    edgeServer.once("error", fail);
-    edgeServer.listen(port, EDGE.host, () => {
-      edgeServer.off("error", fail);
-      edgeServer.on("error", (e) => log("edge:", e.message));
-      if (tunnels.edge.port !== port) { tunnels.edge.port = port; tunnels.edge.upnp.at = 0; }
-      log(`edge: wildcard tunnels answer on ${EDGE.host}:${port} with this machine's certificate`);
-    });
+  const srv = edgeServer;
+  let i = 0;
+  const fail = (e) => {
+    if (srv !== edgeServer) return;
+    if (i + 1 < EDGE_PORTS.length && (e.code === "EACCES" || e.code === "EADDRINUSE")) { i++; return srv.listen(EDGE_PORTS[i], EDGE.host); }
+    log(`edge: can't listen on ${EDGE.host}:${EDGE_PORTS[i]}:`, e.message);
+    edgeServer = null;
   };
-  tryPort(0);
+  srv.on("error", fail);
+  srv.once("listening", () => {
+    srv.off("error", fail);
+    srv.on("error", (e) => log("edge:", e.message));
+    const port = srv.address().port;
+    if (tunnels.edge.port !== port) { tunnels.edge.port = port; tunnels.edge.upnp.at = 0; }
+    log(`edge: wildcard tunnels answer on ${EDGE.host}:${port} with this machine's certificate`);
+  });
+  srv.listen(EDGE_PORTS[0], EDGE.host);
 }
 tunnels.edge.onCert = edgeListen;
-edgeListen();
+// this machine stopped holding the certificate: nothing listens for it any more
+tunnels.edge.onStop = () => {
+  if (!edgeServer) return;
+  const srv = edgeServer; edgeServer = null;
+  srv.close(); srv.closeAllConnections?.();
+  log("edge: stopped (this machine no longer holds the tunnels' certificate)");
+};
+if (tunnels.selfCerts) edgeListen();
 
 // ---------- the local control socket (Burrow's, see burrow/index.mjs) ----------
 

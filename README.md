@@ -209,17 +209,16 @@ Termix normally answers at the root of the dashboard's address (the home page st
 | **Its own password** | A password just for this tunnel, to share with someone who shouldn't have your login. Your login still works there too. It is sealed in the browser on its way (like the login) and kept only as a scrypt hash; a new password signs out everyone who had the old one. |
 | **Public** | Anyone with the link. |
 
-### One wildcard for every tunnel, on your own certificate
+### Tunnel names two levels deep, free, with nothing open at home
 
-**Settings → Domain → One wildcard record** puts every tunnel at `NAME.tunnel.example.com` through a single `*.tunnel.example.com` record, so a new tunnel answers the moment it's made. Cloudflare's free certificate stops one level short of that, so pick who holds the certificate:
+**Settings → Domain → One wildcard record** puts every tunnel at `NAME.tunnel.example.com`. Cloudflare's free certificate stops one level short of that, so pick who holds the certificates:
 
 | | |
 |---|---|
-| **This machine** (the default) | Aegis gets a free Let's Encrypt certificate for `*.tunnel.example.com` itself (proved through your Cloudflare DNS, renewed 30 days early) and serves the tunnels with it on port 443 (8443 when it may not listen there). The wildcard points straight at this machine: no relay and no Cloudflare proxy holds a key or sees the traffic. Forward port **443** on your router to this machine (Aegis asks over UPnP first; Settings shows the exact port). |
+| **Cloudflare Worker** (the default) | Every tunnel name becomes a [Workers Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) of one small Worker, which Cloudflare gives a certificate for exactly that name, at any depth, for free. The Worker hands each request to Aegis through the dashboard's own Cloudflare tunnel, with a secret only the two of them know. No port is open at home and your address is never in DNS. A new name gets its certificate within a few minutes. Connect it once with `aegis front-login` (it uses `npx wrangler login`) or an API token with *Workers Scripts: Edit* and *Workers Routes: Edit*. |
+| **This machine** | Aegis gets a Let's Encrypt certificate for `*.tunnel.example.com` itself (proved through your Cloudflare DNS, renewed 30 days early) and serves the tunnels on port 443 (8443 when it may not listen there). Needs port 443 forwarded to this machine; Aegis asks over UPnP and checks from the outside, through Cloudflare. |
 | **A relay server** | A server of yours with Caddy (on-demand TLS) answers for the names and passes requests here over a reverse SSH tunnel. |
 | **Cloudflare** | Through Cloudflare's proxy, if your plan covers two levels (Advanced Certificate Manager), or with no prefix at all (`*.example.com`). |
-
-With **This machine** a relay can be the **backup**: Aegis checks every minute that its own certificate comes back through your public address on port 443. Three misses in a row point the wildcard at the relay; two good checks bring it home. Installs that already used a relay, or a two-level wildcard without the paid certificate, move to this machine on update, with the relay kept as the backup.
 
 ### Burrow Pages: your repositories behind a password (an addon)
 

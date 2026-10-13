@@ -146,6 +146,7 @@ function selfManager() {
   e.refreshIp = async () => { e.publicIp = "198.51.100.20"; return e.publicIp; };
   e.probe = async () => (reachable ? { ok: true } : { ok: false, why: "port 443 is closed there" });
   e.mapPort = async () => {};
+  e.probeRelay = async () => false;
   return { tm, zone, e, setReachable: (v) => { reachable = v; } };
 }
 const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -193,5 +194,64 @@ test("this machine without a backup: the record stays here, reachable or not", a
     await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "t2", certs: "self" }), /No certificate for \*\.t2\.example\.com: rate limited/);
     assert.equal(tm.hostFor(3000), "3000.tunnel.example.com");
     assert.equal(e.base, "tunnel.example.com", "the edge is back on the old name");
+  } finally { tm.stop(); }
+});
+
+test("the PROXY header a relay puts first: v1 and v2, the bytes after it kept", async () => {
+  const { parseProxyHeader, readProxyHeader } = await import("../burrow/proxyproto.mjs");
+  assert.deepEqual(parseProxyHeader(Buffer.from("PROXY TCP4 203.0.113.7 10.0.0.1 51000 443\r\n\x16\x03")), { header: 43, src: "203.0.113.7" });
+  assert.equal(parseProxyHeader(Buffer.from("PROXY TCP4 203.0")), null, "needs more");
+  assert.throws(() => parseProxyHeader(Buffer.from("\x16\x03\x01\x02\x00")), /PROXY/);
+  const v2 = Buffer.concat([Buffer.from([0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a, 0x21, 0x11, 0x00, 0x0c]),
+                            Buffer.from([198, 51, 100, 9, 10, 0, 0, 1, 0xc3, 0x50, 0x01, 0xbb]), Buffer.from("hello")]);
+  assert.deepEqual(parseProxyHeader(v2), { header: 28, src: "198.51.100.9" });
+  // on a real socket, split across writes
+  const { createServer, connect } = await import("node:net");
+  const got = await new Promise((resolve) => {
+    const srv = createServer((s) => readProxyHeader(s).then(({ src }) => {
+      let rest = ""; s.on("data", (d) => { rest += d; }); s.on("end", () => { srv.close(); resolve({ src, rest }); }); s.resume();
+    }));
+    srv.listen(0, "127.0.0.1", () => {
+      const c = connect(srv.address().port, "127.0.0.1", () => { c.write(v2.subarray(0, 10)); setTimeout(() => { c.end(v2.subarray(10)); }, 30); });
+    });
+  });
+  assert.deepEqual(got, { src: "198.51.100.9", rest: "hello" });
+});
+
+test("the Worker front: a Custom Domain per name, removed with the tunnel; only its own key is believed", async () => {
+  const { tm, zone } = selfManager();
+  const f = tm.front, domains = new Map();
+  tm.cf = () => ({ zone: "z1", token: "t", account: "a1" });
+  f.state.token = "tok";
+  f.deploy = async (label, origin) => { f.deployed = { script: `aegis-tunnels-${label}`, origin }; return f.deployed; };
+  f.addDomain = async (host, script) => { domains.set(host, script); return { hostname: host }; };
+  f.removeDomain = async (host) => (domains.delete(host) ? 1 : 0);
+  f.certReady = async () => true;
+  try {
+    await tm.create({ port: 3000, sub: "radio" });
+    zone.set("*.tunnel.example.com", { id: "w1", type: "A", name: "*.tunnel.example.com", content: "203.0.113.7", comment: "aegis (burrow tunnels)" });
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "worker" });
+    assert.equal(info.certs, "worker");
+    assert.equal(info.front.script, "aegis-tunnels-aegis");
+    assert.deepEqual([...domains], [["radio.tunnel.example.com", "aegis-tunnels-aegis"]]);
+    assert.ok(!zone.has("*.tunnel.example.com"), "the old wildcard record (to a relay) is swept");
+    await tm.create({ port: 4000 });
+    assert.ok(domains.has("4000.tunnel.example.com"), "a new tunnel gets its name at once");
+    await tm.update(4000, { sub: "grafana" });
+    assert.ok(!domains.has("4000.tunnel.example.com") && domains.has("grafana.tunnel.example.com"), "a rename moves the domain");
+    await tm.remove(4000);
+    assert.ok(!domains.has("grafana.tunnel.example.com"), "removing a tunnel removes its domain");
+    assert.equal(tm.relayAsk("radio.tunnel.example.com"), false);
+    // what Aegis believes
+    const req = (h) => ({ headers: { ...h } });
+    const good = req({ "x-aegis-front-key": f.state.key, "x-aegis-front-host": "radio.tunnel.example.com", "x-aegis-front-ip": "198.51.100.4" });
+    assert.deepEqual(f.claim(good, true), { host: "radio.tunnel.example.com", ip: "198.51.100.4" });
+    assert.equal(good.headers["x-aegis-front-key"], undefined, "the key never goes further");
+    assert.equal(f.claim(req({ "x-aegis-front-key": "nope", "x-aegis-front-host": "radio.tunnel.example.com" }), true), null, "a wrong key");
+    assert.equal(f.claim(req({ "x-aegis-front-key": f.state.key, "x-aegis-front-host": "radio.tunnel.example.com" }), false), null, "not through this machine's tunnel");
+    // without a credential, nothing moves
+    f.state.token = null;
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "t2", certs: "worker" }), /Worker isn't ready/);
+    assert.equal(tm.hostFor(3000), "radio.tunnel.example.com");
   } finally { tm.stop(); }
 });

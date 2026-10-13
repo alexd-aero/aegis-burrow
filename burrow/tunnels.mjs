@@ -31,6 +31,10 @@
 //                 yours) fetches a certificate per name, asking
 //                 /__gate/relay-ask first, and passes the requests on to this
 //                 gate (over a reverse SSH tunnel, say)
+//   "worker"      Cloudflare, free and with nothing open at home: every name is a
+//                 Custom Domain of one small Worker, which comes with a
+//                 certificate for exactly that name (workerfront.mjs); the
+//                 Worker hands requests here through the dashboard's tunnel
 //   "cloudflare"  Cloudflare's edge (a proxied CNAME), which needs a certificate
 //                 that covers two levels (Advanced Certificate Manager) unless
 //                 the prefix is empty
@@ -61,6 +65,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkS
 import { join } from "node:path";
 import { isIP } from "node:net";
 import { Edge } from "./edge.mjs";
+import { WorkerFront } from "./workerfront.mjs";
 
 const MINUTES = 120;            // per-minute history kept
 const SECONDS = 90;             // per-second history for the live chart
@@ -76,7 +81,7 @@ const SUB_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 // that needed a relay or a paid certificate then is served by this machine
 // now (the relay stays, as the backup); "auto" asks Cloudflare once whether
 // its certificate covers the names after all.
-const CERTS = new Set(["self", "relay", "cloudflare"]);
+const CERTS = new Set(["worker", "self", "relay", "cloudflare"]);
 export function cleanNaming(n, { saved = false } = {}) {
   const mode = n?.mode === "wildcard" ? "wildcard" : "record";
   let prefix = n && "prefix" in n ? String(n.prefix ?? "").trim().toLowerCase().replace(/^\*?\.?|\.$/g, "") : "tunnel";
@@ -220,6 +225,7 @@ export class TunnelManager {
     this.onNaming = onNaming || null;       // (naming) => keep it (state.json)
     this.edge = new Edge({ dataDir, log: log || console.log, cfApi: (...a) => this.cfApi(...a), ...(edge || {}) });
     this.edge.onChange = () => this.repointWildcard();
+    this.front = new WorkerFront({ file: join(dataDir, "cf", "front.json"), log: log || console.log });
     this.quick = quick;                       // QuickTunnels, used while no domain is linked
     this.forbidden = new Set(forbiddenPorts || []);
     this.log = log || console.log;
@@ -236,6 +242,8 @@ export class TunnelManager {
     this.dnsAnswers = publicDnsAnswers;
     this.bootTimer = setTimeout(() => {
       for (const t of this.tunnels.values()) if (t.dns?.ok && t.dns.ready === false) this.watchDns(t.port);
+      // a Worker Custom Domain's certificate: checked again (it may have been mistaken for an older record's)
+      for (const t of this.tunnels.values()) if (t.dns?.front) { t.dns.ready = false; this.watchFront(t.port); }
       this.sweepDns().catch((e) => this.log("tunnels: DNS sweep failed:", e.message));
     }, 20000).unref?.();
   }
@@ -261,7 +269,11 @@ export class TunnelManager {
   }
   get selfCerts() { return this.wildcard && this.naming.certs === "self"; }
   // The edge serves *.<wbase> while this machine holds the certificate.
-  syncEdge() { this.edge.use(this.selfCerts ? this.wbase : null, this.naming.relay, this.checkName()); }
+  syncEdge() {
+    this.edge.use(this.selfCerts ? this.wbase : null, this.naming.relay, this.checkName());
+    // an outside-check record left from when this machine held the certificate (it points at this address): gone
+    if (!this.selfCerts && this.domain && !this._checkSwept) { this._checkSwept = true; this.edge.dropCheckRecord({ name: this.checkName() }); }
+  }
   // the edge's outside check (edge.mjs): one level under the zone, named after the dashboard
   checkName() { return this.domain ? `edge-check-${this.label}.${this.parent}` : null; }
   get mode() { return this.domain ? "domain" : "quick"; }
@@ -511,6 +523,14 @@ export class TunnelManager {
     if (!t) return;
     if (!this.domain) { t.dns = null; this.quick?.start(port); return; }
     try {
+      if (this.frontMode) {
+        // a Custom Domain of the Worker, with its own certificate
+        const host = this.hostFor(port), { script } = await this.ensureFront();
+        await this.front.addDomain(host, script);
+        t.dns = { name: host, front: true, ok: true, ready: false };
+        this.watchFront(port);
+        return;
+      }
       if (this.wildcard) {
         // nothing per tunnel: the one wildcard record (made once) answers for it
         const w = await this.ensureWildcard();
@@ -527,8 +547,35 @@ export class TunnelManager {
   }
   async unpublish(port, host) {
     if (!this.domain) { this.quick?.stop(port); return "none"; }
+    if (this.frontMode) {
+      try { return (await this.front.removeDomain(host || this.hostFor(port))) ? "deleted" : "none"; } catch (e) { return "error: " + e.message; }
+    }
     if (this.wildcard) return "none";          // the wildcard stays for the others
     try { return await this.dnsDelete(host || this.hostFor(port)); } catch (e) { return "error: " + e.message; }
+  }
+  get frontMode() { return this.wildcard && this.naming.certs === "worker"; }
+  // The Worker, deployed once per run (and again when the dashboard's name changes).
+  async ensureFront() {
+    const { account, zone } = this.cf();
+    this.front.accountId = account; this.front.zoneId = zone;
+    if (!this.front.linked) throw new Error("Connect Cloudflare Workers first (Settings → Domain).");
+    return this.front.deploy(this.label, this.domain.mainHost);
+  }
+  // A new Custom Domain's certificate takes a minute or a few: "on its way" till then.
+  watchFront(port) {
+    const t0 = now();
+    const tick = async () => {
+      const t = this.get(port);
+      if (!t?.dns?.front || t.dns.ready !== false) return;
+      if (await this.front.certReady(t.dns.name)) {
+        t.dns.ready = true; t.dns.readyAt = now(); this.save();
+        this.log("tunnels:", t.dns.name, "has its certificate after", Math.round((now() - t0) / 1000) + "s");
+        return;
+      }
+      if (now() - t0 > 30 * 60e3) { t.dns.ready = true; this.save(); return; }
+      setTimeout(tick, 15000).unref?.();
+    };
+    setTimeout(tick, 5000).unref?.();
   }
   // A new name exists at Cloudflare within seconds, but a browser that asks for
   // it too early is told "no such name" and believes it for up to 30 minutes.
@@ -554,7 +601,7 @@ export class TunnelManager {
   async sweepDns() {
     if (!this.domain) return;
     const content = `${this.domain.tunnelId}.cfargotunnel.com`;
-    const mine = this.wildcard ? new Set([this.wildcardName()]) : new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
+    const mine = this.frontMode ? new Set() : this.wildcard ? new Set([this.wildcardName()]) : new Set([...this.tunnels.keys()].map((p) => this.hostFor(p)));
     const recs = [...await this.cfApi("GET", "/dns_records?type=CNAME&per_page=1000"),
                   ...(await this.cfApi("GET", "/dns_records?type=A&per_page=1000")).filter((r) => r.type === "A" && r.comment === DNS_COMMENT),
                   ...(await this.cfApi("GET", "/dns_records?type=AAAA&per_page=1000")).filter((r) => r.type === "AAAA" && r.comment === DNS_COMMENT)];
@@ -625,12 +672,13 @@ export class TunnelManager {
     return { ...this.naming, active: this.wildcard, zone: this.parent, label: this.label,
              example: this.domain ? (this.naming.mode === "wildcard" ? `radio.${this.wbase}` : `tunnel-3000-${this.label}.${this.parent}`) : null,
              record: this.wildcard ? this.wildcardName() : null, relay: this.naming.relay,
-             edge: this.selfCerts ? this.edge.state() : null };
+             edge: this.selfCerts ? this.edge.state() : null,
+             front: { linked: this.front.linked, script: this.front.deployed?.script || null, error: this.front.error } };
   }
   // The relay's question before it fetches a certificate: is this one of ours?
   // (The backup relay asks too: it serves the names while this machine can't.)
   relayAsk(host) {
-    if (!this.wildcard || !this.naming.relay || this.naming.certs === "cloudflare") return false;
+    if (!this.wildcard || !this.naming.relay || this.naming.certs === "cloudflare" || this.naming.certs === "worker") return false;
     const port = this.matchHost(host);
     return port !== null && !!this.get(port)?.enabled;
   }
@@ -662,6 +710,18 @@ export class TunnelManager {
           throw err;
         }
       }
+    }
+    if (naming.mode === "wildcard" && naming.certs === "worker") {
+      try {
+        const { account, zone } = this.cf();
+        this.front.accountId = account; this.front.zoneId = zone;
+        if (!this.front.linked) throw new Error("connect Cloudflare Workers first.");
+        await this.front.deploy(this.label, this.domain.mainHost);
+      } catch (e) { const err = new Error(`The Worker isn't ready: ${e.message}`); err.code = "front"; throw err; }
+    }
+    if (this.frontMode) {
+      // the Custom Domains of the old names go (they would shadow the new way)
+      for (const port of this.tunnels.keys()) await this.unpublish(port);
     }
     const before = { ...this.naming };
     this.naming = naming;
@@ -1060,7 +1120,7 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
     const pem = readFileSync(this.domain.cert, "utf8");
     const b64 = /-----BEGIN [A-Z ]+-----\s*([\s\S]+?)\s*-----END/.exec(pem)[1].replace(/\s+/g, "");
     const d = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
-    this._cf = { zone: d.zoneID, token: d.apiToken };
+    this._cf = { zone: d.zoneID, token: d.apiToken, account: d.accountID };
     return this._cf;
   }
   async cfApi(method, path, body) {
