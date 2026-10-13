@@ -5,7 +5,7 @@ import { distroLogo, distroLabel } from "./distros.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
-const S = { upd: [], updJob: {}, updDone: {}, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
+const S = { intel: {}, intelOpen: null, scanning: false, upd: [], updJob: {}, updDone: {}, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
             mode: "domain", pattern: "", integrations: [], integ: null, integData: null, forgeSummary: {}, addon: null,
             addons: null, scan: null, scanning: false, bridge: null, bridgeBusy: false };
 
@@ -901,17 +901,17 @@ function renderDetail() {
       </section>
     </div>
 
-    <section class="card panel" style="margin-bottom:14px"><h3>Clients <span class="faint">${fmtN(d.clients)} seen</span></h3>
+    <section class="card panel" style="margin-bottom:14px"><div class="row" style="justify-content:space-between;align-items:center"><h3 style="margin:0">Clients <span class="faint">${fmtN(d.clients)} seen</span></h3>${d.clientList.length ? `<button class="btn sm" data-act="scan-clients" ${S.scanning ? "disabled" : ""}>${S.scanning ? '<i class="spin"></i> Checking every IP…' : "Scan all"}</button>` : ""}</div>
       ${d.clientList.length ? `<div class="scroll"><table>
         <thead><tr><th></th><th>Client</th><th>Browser</th><th>Requests</th><th>Served</th><th>Open</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
         <tbody>${d.clientList.map((c) => `<tr>
           <td><i class="dot ${c.active ? "ok" : Date.now() - c.last < 120000 ? "warn" : "idle"}"></i></td>
-          <td class="mono">${flag(c.country)} ${h(c.ip)}${c.country ? ` <span class="faint">${h(c.country)}</span>` : ""}</td>
+          <td class="mono">${flag(c.country)} ${h(c.ip)}${c.country ? ` <span class="faint">${h(c.country)}</span>` : ""}${intelBadge(c.ip)}</td>
           <td>${h(c.agent || "–")}</td><td class="mono">${fmtN(c.requests)}</td><td class="mono">${fmtB(c.bytesOut)}</td>
           <td class="mono">${c.active || ""}</td><td class="faint">${ago(c.first)}</td><td>${ago(c.last)}</td>
-          <td style="text-align:right">${c.active ? `<button class="btn sm ghost" data-act="kick" data-ip="${h(c.ip)}">Kick</button>` : ""}
+          <td style="text-align:right">${S.intel[c.ip] ? "" : `<button class="btn sm ghost" data-act="check-ip" data-ip="${h(c.ip)}">Check</button>`}${c.active ? `<button class="btn sm ghost" data-act="kick" data-ip="${h(c.ip)}">Kick</button>` : ""}
             ${blocked.has(c.ip) ? `<button class="btn sm" data-act="unblock" data-ip="${h(c.ip)}">Unblock</button>` : `<button class="btn sm ghost danger" data-act="block" data-ip="${h(c.ip)}">Block</button>`}</td>
-        </tr>`).join("")}</tbody></table></div>` : '<p class="muted" style="margin:0">Nobody has used this tunnel yet.</p>'}
+        </tr>${S.intelOpen === c.ip ? `<tr class="intel-row"><td></td><td colspan="8">${intelDetails(c.ip)}</td></tr>` : ""}`).join("")}</tbody></table></div>` : '<p class="muted" style="margin:0">Nobody has used this tunnel yet.</p>'}
       ${[...blocked].filter((ip) => !d.clientList.some((c) => c.ip === ip)).map((ip) => `<div class="row" style="margin-top:10px"><span class="pill err">blocked</span><span class="mono">${h(ip)}</span><button class="btn sm" data-act="unblock" data-ip="${h(ip)}">Unblock</button></div>`).join("")}
     </section>
 
@@ -924,6 +924,34 @@ function renderDetail() {
           <td class="mono">${fmtB(r.bytes)}</td><td class="mono">${flag(r.country)} ${h(r.ip)}</td></tr>`).join("")}</tbody></table></div>`
         : '<p class="muted" style="margin:0">No requests yet. Open the link to see them arrive here live.</p>'}
     </section>`;
+}
+
+// ---- an IP's reputation (burrow/ipintel.mjs) ----
+const LEVEL = { malicious: ["err", "malicious"], suspicious: ["warn", "suspicious"], notice: ["", "worth a look"], clean: ["ok", "clean"] };
+function intelBadge(ip) {
+  const r = S.intel[ip];
+  if (!r) return "";
+  if (r.loading) return ' <span class="pill"><i class="spin"></i> checking</span>';
+  if (r.error) return ` <span class="pill err" title="${h(r.error)}">check failed</span>`;
+  const [cls, label] = LEVEL[r.verdict.level] || LEVEL.notice;
+  return ` <button type="button" class="pill ${cls}" data-act="intel-open" data-ip="${h(ip)}" title="${h(r.verdict.why.join(" · ") || "nothing on record")}">${label}${r.verdict.why.length ? ` · ${h(r.verdict.why[0])}` : ""}</button>`;
+}
+function intelDetails(ip) {
+  const r = S.intel[ip];
+  if (!r || r.loading || r.error) return "";
+  if (r.private) return `<div class="faint small">A private or local address: one of yours.</div>`;
+  const src = r.sources, o = r.owner || {};
+  const line = (name, x, fmt) => `<div class="kv-row"><span>${name}</span><span>${x?.error ? `<span class="faint">couldn't ask: ${h(x.error)}</span>` : fmt(x?.result)}</span></div>`;
+  const yes = (t) => `<span class="pill err">${h(t)}</span>`, no = (t) => `<span class="faint">${h(t)}</span>`;
+  return `<div class="intel">
+    <div class="kv-row"><span>Owner</span><span>${h([o.org, o.city, o.country].filter(Boolean).join(" · ") || "unknown")}${o.hostname ? ` <span class="mono faint">${h(o.hostname)}</span>` : ""}</span></div>
+    ${line("GreyNoise", src.greynoise, (g) => !g?.seen ? no("never seen scanning the internet") : `${g.classification === "malicious" ? yes("malicious") : g.scanner ? '<span class="pill warn">mass scanner</span>' : ""} ${g.benign ? '<span class="pill ok">known service</span>' : ""} ${h(g.name || "")} <span class="faint">${g.lastSeen ? "last seen " + h(g.lastSeen) : ""}</span>`)}
+    ${line("vonweber.nl", src.vonweber, (v) => v?.listed ? `${yes("banned")} since ${h(v.since)}${v.host ? ` <span class="mono faint">${h(v.host)}</span>` : ""} <span class="faint">(${v.hits}×, of ${v.total} on the list)</span>` : no(`not among the ${v?.total || "?"} banned`))}
+    ${line("Blocklists", src.dnsbl, (d) => d?.skipped ? no(d.skipped + ": not checked") : Object.entries(d || {}).map(([k, x]) => x.listed ? yes(`${k}: ${x.why.join(", ")}`) : x.error ? `<span class="faint">${h(k)}: ${h(x.error)}</span>` : `<span class="faint">${h(k)} clean</span>`).join(" · "))}
+    ${line("StopForumSpam", src.sfs, (x) => x?.reports ? `${yes(x.reports + " reports")} <span class="faint">last ${h(x.lastSeen || "?")}</span>` : no("no reports"))}
+    ${line("Shodan", src.shodan, (x) => !x?.seen ? no("nothing indexed") : `ports <span class="mono">${h(x.ports.join(", ") || "none")}</span>${x.vulns ? ` · ${x.vulns} vulns` : ""}${x.tags.length ? ` · ${h(x.tags.join(", "))}` : ""}`)}
+    ${line("Tor", src.tor, (x) => x?.skipped ? no(x.skipped) : x?.exit ? '<span class="pill warn">exit node</span>' : no("not an exit node"))}
+  </div>`;
 }
 
 function render() {
@@ -1280,6 +1308,24 @@ document.addEventListener("click", async (e) => {
       toast(v === "public" ? "Anyone with the link can open it" : v === "password" ? "It opens with its own password (or your login)" : "Login required"); refresh();
     }
     else if (act === "password") passwordForm(S.detail);
+    else if (act === "check-ip") {
+      const ip = el.dataset.ip;
+      S.intel[ip] = { loading: true }; render();
+      try { S.intel[ip] = await api(`/__gate/api/ipintel/${encodeURIComponent(ip)}`); S.intelOpen = ip; }
+      catch (ex) { S.intel[ip] = { error: ex.message }; }
+      render();
+    }
+    else if (act === "scan-clients") {
+      S.scanning = true; render();
+      try {
+        const j = await api(`/__gate/api/tunnels/${port}/scan`, { method: "POST", body: "{}" });
+        Object.assign(S.intel, j.results);
+        const bad = Object.values(j.results).filter((r) => r.verdict && ["malicious", "suspicious"].includes(r.verdict.level)).length;
+        toast(`${Object.keys(j.results).length} IPs checked · ${bad} flagged`);
+      } catch (ex) { toast(ex.message); }
+      S.scanning = false; render();
+    }
+    else if (act === "intel-open") { S.intelOpen = S.intelOpen === el.dataset.ip ? null : el.dataset.ip; render(); }
     else if (act === "kick") { const r = await api(`/__gate/api/tunnels/${port}/kick`, { method: "POST", body: JSON.stringify({ ip: el.dataset.ip }) }); toast(`Closed ${r.kicked} connection${r.kicked === 1 ? "" : "s"}`); refresh(); }
     else if (act === "block") { await patch(port, { block: el.dataset.ip }); toast(`${el.dataset.ip} blocked`); refresh(); }
     else if (act === "unblock") { await patch(port, { unblock: el.dataset.ip }); toast(`${el.dataset.ip} unblocked`); refresh(); }

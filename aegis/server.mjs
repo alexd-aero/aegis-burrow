@@ -34,7 +34,7 @@
 
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces } from "node:os";
@@ -77,6 +77,40 @@ const lockout = () => {
 };
 
 function log(...args) { console.log(new Date().toISOString(), ...args); }
+
+// ---------- the audit log ----------
+// Who did what, kept apart from the noise: every sign-in (and failed one), sign-out,
+// password change, tunnel change from the dashboard, Termix opened and every Termix
+// terminal connection, and requests for Termix turned away for want of a sign-in.
+// data/audit.log, one JSON object per line (mode 600), rolled over at 5 MB; also in
+// the journal as "audit: ...". `aegis audit` and Settings → Activity show it.
+const AUDIT_FILE = () => join(DATA, "audit.log");
+const auditQuiet = new Map();          // "event|ip" -> last time (events that can flood)
+function audit(event, req, extra = {}) {
+  const ip = req ? clientIp(req) : "local";
+  if (extra.quiet) {
+    const k = `${event}|${ip}`, last = auditQuiet.get(k) || 0;
+    if (Date.now() - last < 60000) return;
+    auditQuiet.set(k, Date.now());
+    if (auditQuiet.size > 5000) auditQuiet.clear();
+    delete extra.quiet;
+  }
+  const e = { t: new Date().toISOString(), event, ip,
+              ...(req ? { host: hostOf(req), ua: String(req.headers["user-agent"] || "").slice(0, 200) } : {}),
+              ...(req && sessionOf(req) ? { sid: String(sessionOf(req).sid).slice(0, 8) } : {}), ...extra };
+  log("audit:", event, ip, ...Object.entries(extra).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`));
+  try {
+    const f = AUDIT_FILE();
+    try { if (statSync(f).size > 5 * 1024 * 1024) renameSync(f, f + ".1"); } catch { /* none yet */ }
+    appendFileSync(f, JSON.stringify(e) + "\n", { mode: 0o600 });
+  } catch (err) { log("audit: couldn't write", err.message); }
+}
+function auditRead(n = 200) {
+  try {
+    const lines = readFileSync(AUDIT_FILE(), "utf8").trim().split("\n").slice(-Math.min(2000, n));
+    return lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
+  } catch { return []; }
+}
 
 function loadKey() {
   const p = join(HOME, "secret.key");
@@ -412,8 +446,8 @@ async function unlockRoute(t, req, res, url, host) {
   let f;
   try { f = await unwrapSealed(await readJsonBody(req)); }
   catch { recordFail(ip); return sendJson(res, 400, { error: "Secure handshake failed. Reload and try again." }); }
-  if (!checkLock(t.lock, f.password)) { recordFail(ip); log("unlock wrong password", ip, host); return sendJson(res, 401, { error: "Wrong password." }); }
-  fails.delete(ip); log("unlock ok", ip, host);
+  if (!checkLock(t.lock, f.password)) { recordFail(ip); log("unlock wrong password", ip, host); audit("tunnel password wrong", req); return sendJson(res, 401, { error: "Wrong password." }); }
+  fails.delete(ip); log("unlock ok", ip, host); audit("tunnel unlocked", req);
   return sendJson(res, 200, { ok: true, next: safeNext(f.next, "/") }, { "Set-Cookie": unlockCookie(req, t) });
 }
 
@@ -587,32 +621,33 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/auth" && req.method === "POST") {
     const ip = clientIp(req);
     if (tooManyFails(ip)) {
-      log("auth throttled", ip, host);
+      log("auth throttled", ip, host); audit("sign-in throttled", req);
       return sendJson(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
     }
     let creds;
     try { creds = await unwrapSealed(await readJsonBody(req)); }
     catch (e) {
-      recordFail(ip); log("auth decrypt failed", ip, e.message);
+      recordFail(ip); log("auth decrypt failed", ip, e.message); audit("sign-in garbled", req);
       return sendJson(res, 400, { error: "Secure handshake failed. Reload and try again." });
     }
     if (!checkCredentials(creds.username, creds.password)) {
       recordFail(ip); log("auth bad credentials", ip, host);
+      audit("sign-in failed", req, { user: String(creds.username || "").slice(0, 64), why: creds.username === settings.auth()?.username ? "wrong password" : "unknown username" });
       return sendJson(res, 401, { error: "Invalid username or password." });
     }
-    fails.delete(ip); log("auth ok", ip, host);
+    fails.delete(ip); log("auth ok", ip, host); audit("sign-in", req, { user: String(creds.username || "") });
     return sendJson(res, 200, { ok: true, next: safeNext(creds.next, "/") }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
   }
   if (path === "/__gate/logout") {
     const s = sessionOf(req);
-    if (isMain && s) { revoke(s.sid); log("logout", clientIp(req), "sid revoked"); }
+    if (isMain && s) { revoke(s.sid); log("logout", clientIp(req), "sid revoked"); audit("sign-out", req); }
     const to = isMain ? "/__gate/login" : hasDomain ? `https://${mainHost()}/__gate/logout` : "/";
     return send(res, 302, "", { Location: to, "Set-Cookie": clearSessionCookie(req) });
   }
   if (path === "/__gate/sso/callback" && req.method === "GET") {
     const t = openTicket(url.searchParams.get("t"), host);
     if (!t) {
-      log("sso ticket refused", clientIp(req), host);
+      log("sso ticket refused", clientIp(req), host); audit("sign-in link refused", req);
       return messagePage(res, 403, "Sign-in expired", 'That sign-in link expired. <a href="/">Try again</a>.');
     }
     return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/"), "Set-Cookie": sessionCookie(req, t.sid) });
@@ -785,7 +820,13 @@ async function handleApi(req, res, path, url) {
       }
       return b;
     };
-    const br = await burrow.handle(req.method, path.slice("/__gate/api".length), tunnelBody);
+    const apiPath = path.slice("/__gate/api".length);
+    const br = await burrow.handle(req.method, apiPath, tunnelBody);
+    if (br && req.method !== "GET" && /^\/tunnels/.test(apiPath) && br.status < 400) {
+      const t = br.json || {};
+      audit(req.method === "POST" && apiPath === "/tunnels" ? "tunnel created" : req.method === "DELETE" ? "tunnel removed" : `tunnel ${apiPath.split("/").slice(2).join("/") || "changed"}`,
+            req, { tunnel: t.port || t.removed || apiPath.split("/")[2] || null, ...(t.target ? { target: t.target } : {}), ...(t.access ? { access: t.access } : {}) });
+    }
     if (br) return br.body !== undefined ? send(res, br.status, br.body, br.headers) : sendJson(res, br.status, br.json);
     if (path === "/__gate/api/addon" && req.method === "GET") {
       const v = addonView({ tunnels, control: burrow.controlView(), burrow: burrow.status() });
@@ -853,14 +894,15 @@ async function handleApi(req, res, path, url) {
       if (tooManyFails(ip)) return sendJson(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
       let f;
       try { f = await unwrapSealed(await readJsonBody(req)); } catch { return sendJson(res, 400, { error: "Secure handshake failed. Reload and try again." }); }
-      if (!checkCredentials(settings.auth().username, f.current)) { recordFail(ip); return sendJson(res, 401, { error: "The current password is wrong." }); }
+      if (!checkCredentials(settings.auth().username, f.current)) { recordFail(ip); audit("password change refused", req, { why: "wrong current password" }); return sendJson(res, 401, { error: "The current password is wrong." }); }
       const username = String(f.username || settings.auth().username).trim();
       if (!/^[A-Za-z0-9._@-]{2,64}$/.test(username)) return sendJson(res, 400, { error: "Username: 2-64 letters, digits, . _ @ -" });
       if (String(f.password || "").length < 10) return sendJson(res, 400, { error: "Use at least 10 characters." });
       setPassword(username, f.password);
-      log("password changed from", ip, "- every other session is signed out");
+      log("password changed from", ip, "- every other session is signed out"); audit("password changed", req, { user: username });
       return sendJson(res, 200, { ok: true }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
     }
+    if (path === "/__gate/api/audit" && req.method === "GET") return sendJson(res, 200, { events: auditRead(Number(url.searchParams.get("n")) || 300) });
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
@@ -1158,6 +1200,7 @@ async function handler(req, res) {
     if (!settings.auth()) return send(res, 302, "", { Location: "/__gate/setup" + url.search });
     if (!isAuthed(req)) {
       const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
+      if (path !== "/" && termixUpstream()) audit("termix refused: not signed in", req, { path: path.slice(0, 120), quiet: true });
       return wantsHtml
         ? send(res, 302, "", { Location: "/__gate/login" + (path === "/" ? "" : "?next=" + encodeURIComponent(safeNext(req.url, "/"))) })
         : sendJson(res, 401, { error: "login required" });
@@ -1173,6 +1216,7 @@ async function handler(req, res) {
     }
     if (path === "/" && req.method === "GET" && isPageLoad(req)) {
       if (parseCookies(req.headers.cookie)[goName(req)] !== "termix") return page(res, "home.html", withRenew);
+      audit("termix opened", req);
       return proxy(req, res, { setCookie: [`${goName(req)}=; ${cookieAttrs(req, 0)}`, renew].filter(Boolean) });
     }
     proxy(req, res, renew ? { setCookie: renew } : undefined);
@@ -1204,7 +1248,10 @@ server.on("upgrade", (req, socket, head) => {
     if (!mayOpen(req, t)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
-  if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
+  if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) {
+    if (termixUpstream()) audit("termix connection refused: not signed in", req, { path: String(req.url || "").slice(0, 120), quiet: true });
+    socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return;
+  }
   const m = mountAt(new URL(req.url || "/", "http://x").pathname);
   if (m) {
     const headers = upstreamHeaders(req);
@@ -1212,6 +1259,7 @@ server.on("upgrade", (req, socket, head) => {
     return proxyUpgrade(req, socket, head, m.up, req.url.slice(m.prefix.length) || "/", headers);
   }
   if (termixMounted()) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
+  audit("termix connection", req, { path: String(req.url || "").split("?")[0].slice(0, 120) });
   proxyUpgrade(req, socket, head);
 });
 
@@ -1333,6 +1381,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/serveo" && method === "POST") { setServeo((await readJson()).on !== false); return ok(serveo.state()); }
   // the home screen and `aegis status`
   if (path === "/overview" && method === "GET") return ok(await overview());
+  if (path === "/audit" && method === "GET") return ok({ events: auditRead(300) });
   // aegis setup: the first login, from the terminal
   if (path === "/setup" && method === "POST") {
     if (settings.auth()) return no(409, "The login already exists. Change it with: aegis passwd");
@@ -1340,7 +1389,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
     if (!USER_RE.test(username)) return no(400, "Username: 2-64 letters, digits, . _ @ -");
     if (String(f.password || "").length < 10) return no(400, "Use at least 10 characters.");
     setPassword(username, String(f.password));
-    log("setup: login created for", username, "from the command line");
+    log("setup: login created for", username, "from the command line"); audit("login created", null, { from: "command line", user: username });
     return ok({ ok: true, user: username });
   }
   // aegis passwd: a new login; every browser is signed out
@@ -1350,7 +1399,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
     if (!USER_RE.test(username)) return no(400, "Username: 2-64 letters, digits, . _ @ -");
     if (String(f.password || "").length < 10) return no(400, "Use at least 10 characters.");
     setPassword(username, String(f.password));
-    log("password changed from the command line - every session is signed out");
+    log("password changed from the command line - every session is signed out"); audit("password changed", null, { from: "command line", user: username });
     return ok({ ok: true, user: username });
   }
   // the pack

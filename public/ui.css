@@ -870,3 +870,9 @@ section.set.flash, .adv-set.flash { animation: setflash 1.6s ease-out; }
 .down-acts { gap: 8px; flex: none; }
 @media (max-width: 560px) { .down-card { flex-wrap: wrap; } .down-acts { width: 100%; justify-content: flex-end; } }
 .down-card .t-name { white-space: normal; overflow: visible; }
+
+/* an IP's reputation, under its client row */
+.intel { padding: 6px 0 10px; }
+.intel .kv-row { padding: 6px 0; }
+.intel .kv-row > span:first-child { min-width: 120px; color: var(--muted); }
+button.pill { cursor: pointer; font: inherit; font-size: 11px; }

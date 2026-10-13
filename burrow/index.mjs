@@ -42,6 +42,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { TunnelManager } from "./tunnels.mjs";
 import { Cloudflare, QuickTunnels, findCloudflared } from "./cloudflare.mjs";
+import { checkIp, checkMany } from "./ipintel.mjs";
 
 const ACTIVITY = 60;
 
@@ -97,6 +98,11 @@ export class Burrow {
   // null when the path isn't Burrow's.
   async handle(method, path, readJson) {
     const ok = (json) => ({ status: 200, json });
+    // an IP's reputation (ipintel.mjs): GET /ipintel/<ip>
+    const ipm = /^\/ipintel\/([0-9a-fA-F.:]{3,45})$/.exec(path);
+    if (ipm && method === "GET") {
+      try { return ok(await checkIp(ipm[1])); } catch (e) { return { status: 400, json: { error: e.message } }; }
+    }
     if (path !== "/ports" && !path.startsWith("/tunnels")) return null;
     if (!this.on) return { status: 409, json: { error: "Burrow is switched off. Turn it on under Settings → Modules." } };
     const T = this.tunnels;
@@ -149,7 +155,7 @@ export class Burrow {
         return { status: 400, json: { error: e.message, code: e.code || null } };
       }
     }
-    const m = /^\/tunnels\/(\d{1,5})(\/favicon|\/kick)?$/.exec(path);
+    const m = /^\/tunnels\/(\d{1,5})(\/favicon|\/kick|\/scan)?$/.exec(path);
     if (!m) return null;
     const port = Number(m[1]);
     if (m[2] === "/favicon") {
@@ -159,6 +165,12 @@ export class Burrow {
                                                      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } };
     }
     if (m[2] === "/kick" && method === "POST") return ok({ kicked: T.kick(port, (await readJson()).ip || null) });
+    // every client of the tunnel through the IP checks (the most recent first)
+    if (m[2] === "/scan" && method === "POST") {
+      const d = T.details(port);
+      if (!d) return { status: 404, json: { error: "No such tunnel." } };
+      return ok({ results: await checkMany([...d.clientList].sort((a, b) => (b.last || 0) - (a.last || 0)).map((c) => c.ip)) });
+    }
     if (m[2]) return null;
     if (method === "GET") { const d = T.details(port); return d ? ok(d) : { status: 404, json: { error: "No such tunnel." } }; }
     if (method === "PATCH") return ok(await T.update(port, await readJson()));

@@ -481,6 +481,7 @@ function render() {
     ${sec("modules", "Modules", "What Aegis runs besides the gate.", modulesBody())}
     ${sec("domain", "Domain", "Where the dashboard and the tunnels live.", domainBody())}
     ${sec("termix", "Termix", "Optional. A terminal for this machine and your servers, behind the same login.", termixBody())}
+    ${sec("activity", "Activity", "Every sign-in and failed one, Termix sessions and tunnel changes, with where they came from. Also on this machine: <span class=\"mono\">aegis audit</span>.", activityBody())}
     ${sec("account", "Login", "One login for the dashboard, Termix and every tunnel. A tunnel can also have a password of its own (Burrow → the tunnel → Password).", accountBody())}
     ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
     ${advancedBody()}`;
@@ -620,11 +621,32 @@ function wireForms() {
   });
 }
 
+// ------------------------------------------------------------------ activity (the audit log)
+function activityBody() {
+  const ev = S.audit;
+  if (!ev) return '<p class="muted">Loading…</p>';
+  if (!ev.length) return '<p class="muted">Nothing yet: sign-ins, Termix sessions and tunnel changes show up here from now on.</p>';
+  const bad = (e) => /failed|refused|wrong|throttled|garbled/.test(e);
+  const browser = (ua) => !ua ? "" : (/Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : /curl/i.test(ua) ? "curl" : "other")
+    + (/Windows/.test(ua) ? " · Windows" : /Android/.test(ua) ? " · Android" : /iPhone|iPad/.test(ua) ? " · iOS" : /CrOS/.test(ua) ? " · ChromeOS" : /Mac OS/.test(ua) ? " · macOS" : /Linux/.test(ua) ? " · Linux" : "");
+  const rows = ev.slice(0, S.auditAll ? 300 : 40).map((e) => {
+    const { t, event, ip, host, ua, sid, ...x } = e;
+    const more = Object.entries(x).map(([k, v]) => `${h(k)}=${h(String(v))}`).join(" ");
+    return `<tr><td class="faint mono">${h(t.replace("T", " ").slice(0, 19))}</td>
+      <td>${bad(event) ? `<span class="pill err">${h(event)}</span>` : /^sign-in$|password changed/.test(event) ? `<span class="pill ok">${h(event)}</span>` : h(event)}</td>
+      <td class="mono">${h(ip)}${ip && ip !== "local" ? ` <button class="btn sm ghost" data-act="audit-ip" data-ip="${h(ip)}">Check</button>` : ""}${S.auditIntel?.[ip] ? ` <span class="pill ${S.auditIntel[ip].level === "malicious" ? "err" : S.auditIntel[ip].level === "suspicious" ? "warn" : "ok"}" title="${h(S.auditIntel[ip].why)}">${h(S.auditIntel[ip].level)}</span>` : ""}</td>
+      <td class="faint">${h(browser(ua))}</td><td class="faint small">${more}</td></tr>`;
+  }).join("");
+  return `<div class="scroll"><table><thead><tr><th>When (UTC)</th><th>What</th><th>From</th><th>Browser</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${ev.length > 40 && !S.auditAll ? '<div class="row end" style="margin-top:10px"><button class="btn sm" data-act="audit-all">Show all</button></div>' : ""}`;
+}
+
 async function load() {
   try {
     const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
     S.me = me; S.cf = cf; S.termix = termix;
     S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
+    S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
     loadLog(S.log);
   } catch (e) { toast(e.message); }
@@ -672,6 +694,13 @@ document.addEventListener("click", async (e) => {
         if (j.status === "done") { S.frontLogin = null; S.naming = j.naming; S.nmDraft = null; toast(`Cloudflare connected · tunnels live under ${j.naming.record || "their names"}`); }
       } catch (ex) { S.frontLogin = S.frontLogin && { ...S.frontLogin, status: "waiting", error: ex.message }; }
       render(); followFrontLogin();
+    }
+    else if (act === "audit-all") { S.auditAll = true; render(); }
+    else if (act === "audit-ip") {
+      el.disabled = true; el.innerHTML = '<i class="spin"></i>';
+      try { const r = await api(`/__gate/api/ipintel/${encodeURIComponent(el.dataset.ip)}`); S.auditIntel = { ...(S.auditIntel || {}), [el.dataset.ip]: { level: r.verdict.level, why: [r.owner?.org, ...r.verdict.why].filter(Boolean).join(" · ") } }; }
+      catch (ex) { toast(ex.message); }
+      render();
     }
     else if (act === "front-cancel") { clearTimeout(S.frontPoll); S.frontLogin = null; render(); }
     else if (act === "front-token") {

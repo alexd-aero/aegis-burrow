@@ -285,3 +285,15 @@ test("Cloudflare's login from the dashboard: PKCE, the pasted address, then the 
   assert.equal(f.loginView().status, "done");
   assert.equal(JSON.parse(readFileSync(f.file, "utf8")).oauth.refresh, "ref");
 });
+
+test("vonweber.nl's ban list, read from its page: listed with host and date, or not", async () => {
+  const { parseVonweber } = await import("../burrow/ipintel.mjs");
+  const page = `<p>24562 blacklisted <br>hosts and <br>IPs for elsnet.org on 14-10-2026</p><pre>
+ - 223.226.102.69 2024/09/15-18:45:02 2
+ host_bb.wishnetkolkata.com 223.223.149.161 2015/08/28-11:12:21 1
+ - 23.226.102.6 2021/01/01-00:00:00 1</pre>`;
+  assert.deepEqual(parseVonweber(page, "223.223.149.161"), { listed: true, host: "host_bb.wishnetkolkata.com", since: "2015-08-28 11:12:21", hits: 1, total: 24562 });
+  assert.deepEqual(parseVonweber(page, "223.226.102.69"), { listed: true, host: null, since: "2024-09-15 18:45:02", hits: 2, total: 24562 });
+  assert.deepEqual(parseVonweber(page, "3.226.102.69"), { listed: false, total: 24562 }, "a suffix of a listed IP isn't it");
+  assert.throws(() => parseVonweber("<html>maintenance</html>", "1.2.3.4"), /didn't look like the list/);
+});
