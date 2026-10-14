@@ -956,3 +956,46 @@ button.pill { cursor: pointer; font: inherit; font-size: 11px; }
 .hello .nt { margin-left: auto; }
 .hello .nt + .gear { margin-left: 0; }
 @media (max-width: 640px) { .nt-pop { position: fixed; left: 12px; right: 12px; top: 64px; width: auto; max-height: calc(100vh - 80px); } }
+/* notices, v2: cards grouped by day, addresses as rows */
+.nt-pop { width: min(430px, calc(100vw - 24px)); }
+.nt-chip { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: rgba(255,90,82,.14); color: #ff8a84; border: 1px solid rgba(255,90,82,.3); }
+.nt-list { list-style: none; margin: 0; padding: 4px 10px 12px; display: grid; gap: 8px; }
+.nt-day { margin: 8px 4px 0; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+.nt-card2 { position: relative; padding: 11px 12px 10px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(255,255,255,.02); overflow: hidden; }
+.nt-card2::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--muted); opacity: .5; }
+.nt-card2.warn::before { background: var(--warn); opacity: 1; } .nt-card2.critical::before { background: var(--err); opacity: 1; }
+.nt-card2.unread { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.14); }
+.nt-card2:not(.unread) { opacity: .7; }
+.nt-h { display: flex; gap: 10px; align-items: flex-start; }
+.nt-src { flex: none; width: 20px; height: 20px; border-radius: 5px; margin-top: 1px; object-fit: contain; }
+.nt-ht { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.nt-ht b { font-size: 13.5px; font-weight: 600; color: var(--text); line-height: 1.35; overflow-wrap: anywhere; }
+.nt-unread { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--err); box-shadow: 0 0 8px rgba(255,90,82,.6); }
+.nt-card2.warn .nt-unread { background: var(--warn); box-shadow: 0 0 8px rgba(242,193,78,.5); }
+.nt-card2.info .nt-unread { background: #9aa3ae; box-shadow: none; }
+.nt-body { margin: 6px 0 0 30px; font-size: 12.5px; color: var(--muted); line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
+.nt-rows { margin: 8px 0 0 30px; display: grid; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.nt-row { display: grid; grid-template-columns: 20px auto 1fr auto; align-items: center; gap: 8px; padding: 6px 9px; font-size: 12px; color: var(--muted); text-decoration: none; border-top: 1px solid var(--line); min-width: 0; }
+.nt-row:first-child { border-top: 0; }
+a.nt-row:hover { background: rgba(255,255,255,.05); color: var(--text); }
+.nt-flag { font-size: 13px; line-height: 1; text-align: center; }
+.nt-lbl { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+.nt-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.nt-tag { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line-2); color: var(--muted); white-space: nowrap; }
+.nt-more { margin: 6px 0 0 30px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: underline; }
+span.nt-more { display: inline-block; text-decoration: none; }
+.nt-f { display: flex; gap: 6px; margin: 9px 0 0 30px; }
+.nt-f:empty { display: none; }
+.nt-empty { padding: 22px 12px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.nt-empty b { color: var(--text); }
+.nt-bcard { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(255,90,82,.4); background: linear-gradient(180deg, rgba(255,90,82,.09), rgba(255,90,82,.03)); }
+.nt-bcard .nt-src { width: 28px; height: 28px; border-radius: 7px; }
+.nt-bcard .nt-txt b { font-size: 14px; }
+.nt-pills { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 4px; }
+.nt-pill { font: 11.5px var(--mono); padding: 2px 8px; border-radius: 99px; border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.25); color: var(--text); }
+@media (max-width: 560px) { .nt-bcard { flex-wrap: wrap; } .nt-row { grid-template-columns: 20px auto 1fr; } .nt-row .nt-tag { display: none; } .nt-body, .nt-rows, .nt-more, .nt-f { margin-left: 0; } }
+.nt-row { grid-template-columns: 20px 1fr auto; padding: 7px 9px; }
+.nt-two { display: grid; min-width: 0; gap: 1px; }
+.nt-two .nt-sub { font-size: 11.5px; color: var(--faint); }
+a.nt-row:hover .nt-two .nt-sub { color: var(--muted); }
+@media (max-width: 560px) { .nt-row { grid-template-columns: 20px 1fr; } }

@@ -57,11 +57,16 @@ export async function chrome(active) {
 
 // ------------------------------------------------------------------ notices
 // Warnings addons put on the dashboard (Bulwark: attacks, bans, waves): a bell
-// in the top bar with the unread count and a list, and a banner for an unread
-// critical one. Checked again every 30 s.
+// in the top bar with the unread count, a list grouped by day (each notice with
+// its addon's logo, and its addresses as rows that open in the addon), and a
+// banner for an unread critical one. Checked again every 30 s.
 const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
 const SRC = (s) => s === "aegis" ? "Aegis" : s.charAt(0).toUpperCase() + s.slice(1);
-let nState = null, nTimer = null;
+const flagOf = (cc) => /^[A-Z]{2}$/.test(cc || "") ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : "";
+const srcLogo = (s) => s === "aegis" ? "/__gate/logos/aegis-burrow.svg" : `/__gate/api/addons/${encodeURIComponent(s)}/image`;
+const dayOf = (t) => { const d = new Date(t), today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
+  return d.toDateString() === today.toDateString() ? "Today" : d.toDateString() === y.toDateString() ? "Yesterday" : d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); };
+let nState = null, nTimer = null, nOpen = new Set();
 export function notices(me) {
   nState = me?.notices || nState;
   if (!nState) return;
@@ -94,41 +99,57 @@ async function togglePop() {
   const pop = document.querySelector(".nt-pop"), b = document.querySelector(".nt-bell");
   if (!pop.hidden) return closePop();
   pop.hidden = false; b.setAttribute("aria-expanded", "true");
-  pop.innerHTML = '<p class="muted small" style="padding:14px">Loading…</p>';
-  try { const j = await api("/__gate/api/notices"); nState = j; paintPop(j.notices); } catch (e) { pop.innerHTML = `<p class="err-msg" style="padding:14px">${h(e.message)}</p>`; }
+  pop.innerHTML = '<p class="muted small" style="padding:16px">Loading…</p>';
+  try { const j = await api("/__gate/api/notices"); nState = j; paintPop(j.notices); } catch (e) { pop.innerHTML = `<p class="err-msg" style="padding:16px">${h(e.message)}</p>`; }
 }
 function closePop() { const pop = document.querySelector(".nt-pop"); if (pop && !pop.hidden) { pop.hidden = true; document.querySelector(".nt-bell")?.setAttribute("aria-expanded", "false"); } }
+// one address (or thing) a notice is about
+const itemRow = (i) => `<${i.link ? `a href="${h(i.link)}"` : "div"} class="nt-row" data-nt-go>
+    <span class="nt-flag" aria-hidden="true">${flagOf(i.cc) || "·"}</span><span class="nt-two"><span class="nt-lbl">${h(i.label)}</span>${i.sub ? `<span class="nt-sub" title="${h(i.sub)}">${h(i.sub)}</span>` : ""}</span>
+    ${i.tag ? `<span class="nt-tag">${h(i.tag)}</span>` : "<span></span>"}</${i.link ? "a" : "div"}>`;
+function noticeCard(n) {
+  const items = n.items || [], open = nOpen.has(n.id), shown = open ? items : items.slice(0, 4);
+  const more = (n.total || items.length) - shown.length;
+  return `<li class="nt-card2 ${h(n.level)}${n.read ? "" : " unread"}" data-id="${h(n.id)}">
+    <div class="nt-h"><img class="nt-src" src="${h(srcLogo(n.source))}" alt="" width="20" height="20" onerror="this.style.visibility='hidden'">
+      <div class="nt-ht"><b>${h(n.title)}</b><span class="nt-meta">${h(SRC(n.source))} · ${h(ago(n.t))}${n.first && n.t - n.first > 60000 ? ` · since ${h(ago(n.first))}` : ""}</span></div>
+      ${n.read ? "" : '<i class="nt-unread" title="Unread"></i>'}</div>
+    ${n.body ? `<p class="nt-body">${h(n.body)}</p>` : ""}
+    ${shown.length ? `<div class="nt-rows">${shown.map(itemRow).join("")}</div>` : ""}
+    ${more > 0 && items.length > shown.length ? `<button type="button" class="nt-more" data-nt-more>Show ${items.length - shown.length} more</button>` : more > 0 ? `<span class="nt-more faint">+${more} earlier</span>` : ""}
+    <div class="nt-f">${n.link ? `<a class="btn sm" href="${h(n.link)}" data-nt-go>Open in ${h(SRC(n.source))}</a>` : ""}${n.read ? "" : '<button type="button" class="btn ghost sm" data-nt-read>Mark read</button>'}</div></li>`;
+}
 function paintPop(list) {
   const pop = document.querySelector(".nt-pop");
-  const items = list.length ? list.map((n) => `<li class="nt-item${n.read ? "" : " unread"}" data-id="${h(n.id)}">
-      <i class="nt-dot ${h(n.level)}"></i>
-      <div class="nt-txt"><div class="nt-top"><b>${h(n.title)}</b>${n.count > 1 ? `<span class="nt-x">×${n.count}</span>` : ""}</div>
-        ${n.body ? `<p>${h(n.body)}</p>` : ""}
-        <div class="nt-meta">${h(SRC(n.source))} · ${h(ago(n.t))}${n.link ? ` · <a href="${h(n.link)}">Open</a>` : ""}</div></div></li>`).join("")
-    : '<li class="nt-empty">Nothing to report. Warnings from Bulwark and other addons show up here.</li>';
-  pop.innerHTML = `<div class="nt-head"><b>Notices</b><span class="spacer"></span>
+  let html = "", last = null;
+  for (const n of list) { const d = dayOf(n.t); if (d !== last) { html += `<li class="nt-day">${h(d)}</li>`; last = d; } html += noticeCard(n); }
+  pop.innerHTML = `<div class="nt-head"><b>Notices</b>${nState.unread ? `<span class="nt-chip">${nState.unread} new</span>` : ""}<span class="spacer"></span>
       ${nState.unread ? '<button type="button" class="btn ghost sm" data-nt="read">Mark all read</button>' : ""}
       ${list.some((n) => n.read) ? '<button type="button" class="btn ghost sm" data-nt="clear">Clear read</button>' : ""}</div>
-    <ul class="nt-list">${items}</ul>`;
+    <ul class="nt-list">${html || '<li class="nt-empty"><b>All quiet.</b><br>Warnings from Bulwark and other addons show up here: attacks, bans, waves.</li>'}</ul>`;
   pop.onclick = async (e) => {
     e.stopPropagation();
-    const b = e.target.closest("[data-nt]");
-    if (b) { const j = await api(`/__gate/api/notices/${b.dataset.nt}`, { method: "POST", body: JSON.stringify({ all: true }) }); nState = j; paintBell(); noticeBanner(); paintPop(j.notices); return; }
-    const li = e.target.closest(".nt-item.unread");
-    if (li) { const j = await api("/__gate/api/notices/read", { method: "POST", body: JSON.stringify({ ids: [li.dataset.id] }) }); nState = j; paintBell(); noticeBanner(); if (!e.target.closest("a")) paintPop(j.notices); }
+    const b = e.target.closest("[data-nt]"), card = e.target.closest(".nt-card2");
+    const reread = async (body) => { const j = await api(`/__gate/api/notices/${body.clear ? "clear" : "read"}`, { method: "POST", body: JSON.stringify(body) }); nState = j; paintBell(); noticeBanner(); return j; };
+    if (b) { const j = await reread(b.dataset.nt === "clear" ? { clear: true, all: true } : { all: true }); paintPop(j.notices); return; }
+    if (!card) return;
+    if (e.target.closest("[data-nt-more]")) { nOpen.add(card.dataset.id); paintPop(list); return; }
+    if (e.target.closest("[data-nt-read]")) { const j = await reread({ ids: [card.dataset.id] }); paintPop(j.notices); return; }
+    if (e.target.closest("[data-nt-go]") && card.classList.contains("unread")) reread({ ids: [card.dataset.id] }).catch(() => {});      // following it counts as reading it
   };
 }
 function noticeBanner() {
   const b = nState?.banner, cur = document.querySelector(".nt-banner");
   if (!b) { cur?.remove(); return; }
-  if (cur?.dataset.id === b.id) return;
+  if (cur?.dataset.id === b.id && cur.dataset.t === String(b.t)) return;
   cur?.remove();
   const main = document.querySelector("#opts") || document.querySelector("main");
   if (!main) return;
   const el = document.createElement("section");
-  el.className = "nt-banner"; el.dataset.id = b.id; el.setAttribute("role", "alert");
-  el.innerHTML = `<div class="nt-card"><i class="nt-dot critical"></i><div class="nt-txt"><b>${h(b.title)}</b>${b.count > 1 ? ` <span class="nt-x">×${b.count}</span>` : ""}
-      ${b.body ? `<p>${h(b.body)}</p>` : ""}<div class="nt-meta">${h(SRC(b.source))} · ${h(ago(b.t))}</div></div>
+  el.className = "nt-banner"; el.dataset.id = b.id; el.dataset.t = String(b.t); el.setAttribute("role", "alert");
+  const chips = (b.items || []).map((i) => `<span class="nt-pill">${flagOf(i.cc)} ${h(i.label)}</span>`).join("") + ((b.total || 0) > (b.items || []).length ? `<span class="nt-pill faint">+${b.total - b.items.length}</span>` : "");
+  el.innerHTML = `<div class="nt-bcard"><img class="nt-src" src="${h(srcLogo(b.source))}" alt="" width="28" height="28" onerror="this.style.visibility='hidden'">
+      <div class="nt-txt"><b>${h(b.title)}</b>${b.body ? `<p>${h(b.body)}</p>` : ""}${chips ? `<div class="nt-pills">${chips}</div>` : ""}<div class="nt-meta">${h(SRC(b.source))} · ${h(ago(b.t))}</div></div>
       <div class="nt-acts">${b.link ? `<a class="btn sm" href="${h(b.link)}">Open</a>` : ""}<button type="button" class="btn ghost sm" data-nt-dismiss>Dismiss</button></div></div>`;
   main.before(el);
   el.querySelector("[data-nt-dismiss]").addEventListener("click", async () => {

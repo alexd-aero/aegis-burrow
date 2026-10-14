@@ -108,8 +108,10 @@ function audit(event, req, extra = {}) {
 }
 // ---------- notices: warnings addons (and Aegis) put on the dashboard ----------
 // data/notices.json, newest first (200 kept). An addon calls ctx.notify({level,
-// title, body, link, key}); the same key while still unread updates that notice
-// (count goes up) instead of adding another. The bell in the top bar lists
+// title, body, link, key, items}); items are a list ({label, cc, sub, tag, link},
+// 60 kept). The same key while still unread grows that notice instead of adding
+// another: new items go on top of the old ones (never instead of them), and a
+// title like "Bulwark banned {n} {address|addresses}" counts them. The bell in the top bar lists
 // them; an unread critical one also shows as a banner on every page.
 const NOTICES_FILE = () => join(DATA, "notices.json");
 const NOTICE_LEVELS = new Set(["info", "warn", "critical"]);
@@ -123,21 +125,32 @@ function noticesSave() {
   try { writeFileSync(NOTICES_FILE() + ".tmp", JSON.stringify(noticesCache.slice(0, 200)), { mode: 0o600 }); renameSync(NOTICES_FILE() + ".tmp", NOTICES_FILE()); }
   catch (e) { log("notices: couldn't save", e.message); }
 }
+const noticeLink = (l) => typeof l === "string" && /^\/__gate\/[\w\-./?=&#%:]*$/.test(l) ? l : null;     // only the dashboard's own pages
+const noticeItems = (items) => (Array.isArray(items) ? items : []).slice(0, 60).map((i) => ({
+  label: String(i?.label || "").slice(0, 80), cc: /^[A-Z]{2}$/.test(i?.cc || "") ? i.cc : "", sub: String(i?.sub || "").slice(0, 200),
+  tag: String(i?.tag || "").slice(0, 24), link: noticeLink(i?.link), t: Number(i?.t) || Date.now() })).filter((i) => i.label);
+// "Bulwark banned {n} {address|addresses}" -> "Bulwark banned 3 addresses"
+const noticeTitle = (tpl, n) => tpl.replace(/\{n\}/g, String(n)).replace(/\{([^|{}]*)\|([^|{}]*)\}/g, (_, one, many) => (n === 1 ? one : many));
 function notify(source, n = {}) {
   const level = NOTICE_LEVELS.has(n.level) ? n.level : "info";
-  const title = String(n.title || "").trim().slice(0, 160);
-  if (!title) throw new Error("A notice needs a title.");
+  const tpl = String(n.title || "").trim().slice(0, 160);
+  if (!tpl) throw new Error("A notice needs a title.");
   const body = String(n.body || "").slice(0, 1200), key = n.key ? String(n.key).slice(0, 120) : null;
-  const link = typeof n.link === "string" && /^\/__gate\/[\w\-./?=&#%]*$/.test(n.link) ? n.link : null;     // only the dashboard's own pages
+  const link = noticeLink(n.link), items = noticeItems(n.items);
   const list = noticesLoad(), now = Date.now();
   const same = key && list.find((x) => x.source === source && x.key === key && !x.read);
   if (same) {
-    Object.assign(same, { t: now, level: level === "critical" || same.level !== "critical" ? level : same.level, title, body, link, count: (same.count || 1) + 1 });
+    const fresh = new Set(items.map((i) => i.label));
+    const merged = [...items, ...(same.items || []).filter((i) => !fresh.has(i.label))].slice(0, 60);
+    const total = (same.total || (same.items || []).length || 1) + items.filter((i) => !(same.items || []).some((o) => o.label === i.label)).length;
+    Object.assign(same, { t: now, level: level === "critical" || same.level !== "critical" ? level : same.level, tpl, title: noticeTitle(tpl, items.length ? total : (same.count || 1) + 1),
+                          body: body || same.body, link: link || same.link, items: merged, total: items.length ? total : same.total, count: (same.count || 1) + 1 });
   } else {
     const times = (noticeRate.get(source) || []).filter((t) => now - t < 3600e3);
     if (times.length >= 30) return null;                                      // an addon gone wild: the bell isn't a log
     times.push(now); noticeRate.set(source, times);
-    list.unshift({ id: randomBytes(6).toString("hex"), t: now, source, level, title, body, link, key, read: false, count: 1 });
+    const title = noticeTitle(tpl, items.length || 1);
+    list.unshift({ id: randomBytes(6).toString("hex"), t: now, first: now, source, level, tpl, title, body, link, key, items, total: items.length, read: false, count: 1 });
     log(`notice: [${level}] ${source}: ${title}`);
   }
   noticesSave();
@@ -148,7 +161,7 @@ function noticesView() {
   const unread = list.filter((x) => !x.read);
   const top = unread.find((x) => x.level === "critical") || null;
   return { unread: unread.length, worst: unread.some((x) => x.level === "critical") ? "critical" : unread.some((x) => x.level === "warn") ? "warn" : unread.length ? "info" : null,
-           banner: top ? { id: top.id, source: top.source, title: top.title, body: top.body, link: top.link, t: top.t, count: top.count } : null };
+           banner: top ? { id: top.id, source: top.source, title: top.title, body: top.body, link: top.link, t: top.t, count: top.count, items: (top.items || []).slice(0, 4), total: top.total || 0 } : null };
 }
 
 function auditRead(n = 200) {
