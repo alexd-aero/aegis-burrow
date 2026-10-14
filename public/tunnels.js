@@ -181,7 +181,7 @@ function subtabs() {
   return `${downCards()}<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
     <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${S.upd?.length ? '<span class="newchip">update</span>' : ""}</button>
-    <button data-act="tab" data-v="shield" class="${S.view === "shield" ? "on" : ""}">${ICON.shield}Shield${S.shield?.stats?.bans ? `<span class="count">${S.shield.stats.bans}</span>` : ""}</button>
+    ${bulwark() ? "" : `<button data-act="tab" data-v="shield" class="${S.view === "shield" ? "on" : ""}">${ICON.shield}Shield${S.shield?.stats?.bans ? `<span class="count">${S.shield.stats.bans}</span>` : ""}</button>`}
     ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
   </nav>`;
 }
@@ -983,7 +983,10 @@ function shSwitch(key, on, title, sub) {
   return `<label class="sh-opt"><span class="grow"><b>${title}</b><span class="faint small">${sub}</span></span>
     <span class="switch"><input type="checkbox" data-act="sh-set" data-k="${key}" ${on ? "checked" : ""} aria-label="${h(title)}"><i></i></span></label>`;
 }
+// Bulwark (github.com/alexd-aero/bulwark), when installed, takes the built-in shield's place
+const bulwark = () => !!S.me?.extensions?.some((x) => x.id === "bulwark");
 function renderShield() {
+  if (bulwark()) { location.href = "/__gate/bulwark/"; return; }
   const v = S.shield;
   const head = `<div class="head"><div><h1>Shield</h1><p>Every request to a tunnel or the dashboard is checked first: blocklisted addresses, payloads and the scanners behind them are turned away before they reach an app.</p></div></div>${subtabs()}`;
   if (!v) { app.innerHTML = head + '<p class="muted"><i class="spin"></i> Loading…</p>'; return; }
@@ -1056,6 +1059,11 @@ function renderShield() {
   }
 }
 async function shieldPost(path, body, msg) {
+  if (bulwark() && body?.ip && /^\/(ban|unban|allow|disallow)$/.test(path)) {
+    await api(`/__gate/api/x/bulwark/ip/${encodeURIComponent(body.ip)}${path}`, { method: "POST", body: JSON.stringify(body) });
+    if (msg) toast(msg);
+    return refresh();
+  }
   S.shield = await api(`/__gate/api/shield${path}`, { method: "POST", body: JSON.stringify(body || {}) });
   if (msg) toast(msg);
   if (S.view === "detail") refresh(); else render();

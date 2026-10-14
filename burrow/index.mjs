@@ -79,7 +79,10 @@ export class Burrow {
       remote: (ip, { probe }) => checkIp(ip, { light: true, probe, deadline: 0 }),
       onBan: (ip) => { for (const port of this.tunnels.tunnels.keys()) this.tunnels.kick(port, ip); },
     });
-    useLists((ip) => this.shield.lookup(ip), (ip) => (this.shield.lists.has("tor") ? this.shield.lookup(ip).some((l) => l.id === "tor") : null));
+    // an addon may take the shield's place (Bulwark: its guard runs inside the gate); then its lists answer
+    this.guardExt = null;
+    const lookupIp = (ip) => (this.guardExt?.lookup ? this.guardExt.lookup(ip) : this.shield.lookup(ip));
+    useLists(lookupIp, (ip) => { const l = lookupIp(ip); return l.length || this.shield.lists.has("tor") ? l.some((x) => x.id === "tor") : null; });
     this.clients = new Map();     // "selkies-forge" -> {name, version, first, last, calls}
     this.activity = [];           // newest first: {at, client, action, port, name}
     this.control = null;
@@ -115,7 +118,7 @@ export class Burrow {
     // an IP's reputation (ipintel.mjs): GET /ipintel/<ip>
     const ipm = /^\/ipintel\/([0-9a-fA-F.:]{3,45})$/.exec(path);
     if (ipm && method === "GET") {
-      try { return ok({ ...(await checkIp(ipm[1])), shield: this.shield.peek(ipm[1]) }); } catch (e) { return { status: 400, json: { error: e.message } }; }
+      try { return ok({ ...(await checkIp(ipm[1])), shield: this.peekIp(ipm[1]) }); } catch (e) { return { status: 400, json: { error: e.message } }; }
     }
     if (path === "/shield" || path.startsWith("/shield/")) return this.shieldRoute(method, path, readJson);
     if (path !== "/ports" && !path.startsWith("/tunnels")) return null;
@@ -189,7 +192,7 @@ export class Burrow {
     if (m[2]) return null;
     if (method === "GET") {
       const d = T.details(port);
-      if (d) for (const c of d.clientList) c.shield = this.shield.peek(c.ip);
+      if (d) for (const c of d.clientList) c.shield = this.peekIp(c.ip);
       return d ? ok(d) : { status: 404, json: { error: "No such tunnel." } };
     }
     if (method === "PATCH") return ok(await T.update(port, await readJson()));
@@ -197,6 +200,11 @@ export class Burrow {
     return null;
   }
 
+  // what the shield knows about an address: the guard addon's, or the built-in one's
+  peekIp(ip) {
+    if (this.guardExt?.peek) { try { return this.guardExt.peek(ip); } catch { /* the built-in below */ } }
+    return this.shield.peek(ip);
+  }
   async shieldRoute(method, path, readJson) {
     const ok = (json) => ({ status: 200, json });
     const S = this.shield;

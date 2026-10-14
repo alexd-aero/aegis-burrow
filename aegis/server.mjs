@@ -199,6 +199,13 @@ function pagesView() {
 //   start(ctx)  stop()  handle({method, path, query, json(), unseal(), via})
 //     -> {status, json} | {status, body, type}
 //
+// and, for a shield (Bulwark), hooks on every request (synchronous, cheap):
+//   guard(ip, info) -> null | {status, body}   before anything else; takes the
+//                                               built-in shield's place while loaded
+//   observe(ip, info, {status, bytes, ms})      when the response is done
+//   signedIn(ip)  peek(ip)  lookup(ip)          sign-ins; badges; IP checks
+//   mount() -> {prefix, upstream, headers, name}   its app under the dashboard's login
+//
 // Routes: /__gate/api/x/<id>/… (signed in) and /x/<id>/… on the control
 // socket; the panel is /__gate/x/<id>/ui.js. Burrow Pages is the first.
 const extensions = new Map();          // id -> { mod, commit, ctx, ui }
@@ -206,6 +213,8 @@ function extContext(rec) {
   const id = rec.id, own = (port) => { const t = tunnels.get(port); if (!t || t.app !== id) throw new Error("That tunnel isn't this addon's."); return t; };
   return {
     id, hostVersion: VERSION, dataDir: addons.dataDir(rec), root: addons.rootOf(rec),
+    legacyShield: join(DATA, "shield"),
+    kick: (ip) => { let n = 0; for (const t of tunnels.list()) n += tunnels.kick(t.port, ip); return n; },
     log: (...a) => log(`${id}:`, ...a),
     setting: (key) => { const r = addons.load()[id]; return r?.settings?.[key] ?? r?.manifest.settings.find((s) => s.key === key)?.default ?? ""; },
     domain: () => { const d = settings.get("domain"); return d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join("."), managed: !!d.managed } : null; },
@@ -240,9 +249,19 @@ async function syncExtensions() {
       x.mod = await import(`${pathToFileURL(join(addons.rootOf(rec), b.extension)).href}?v=${Date.now()}`);
       x.ctx = extContext(rec);
       await x.mod.start?.(x.ctx);
-      log(`${rec.id}: running inside Burrow`);
+      log(`${rec.id}: running inside Burrow${x.mod.guard ? " (guarding every request)" : ""}`);
     } catch (e) { x.error = e.message; log(`${rec.id}: its extension failed to start:`, e.message); }
   }
+  useGuard();
+}
+// the shield in use: a guard addon's (Bulwark) while one is loaded, else the built-in one
+let guardExt = null;
+function useGuard() {
+  const g = [...extensions.values()].find((x) => typeof x.mod.guard === "function" && !x.error)?.mod || null;
+  if (g === guardExt) return;
+  guardExt = g; burrow.guardExt = g;
+  if (g) { burrow.shield.stop(); log("shield: an addon guards every request now; the built-in shield rests"); }
+  else if (process.env.AEGIS_SHIELD_OFFLINE !== "1") { burrow.shield.start(); log("shield: the built-in shield guards every request"); }
 }
 async function extRoute(id, path, method, query, json, via) {
   const x = extensions.get(id);
@@ -256,7 +275,8 @@ setInterval(syncExtensions, 60000);
 // Addons that come with Aegis × Burrow: each is installed once, by itself, a
 // little after the first start (or the update that brought it). One you
 // uninstall stays uninstalled: state.json's defaultAddons remembers it was done.
-const DEFAULT_ADDONS = [{ id: PAGES, source: "https://github.com/alexd-aero/burrow-pages" }];
+const DEFAULT_ADDONS = [{ id: PAGES, source: "https://github.com/alexd-aero/burrow-pages" },
+                        { id: "bulwark", source: "https://github.com/alexd-aero/bulwark" }];
 async function defaultAddons() {
   if (process.env.AEGIS_NO_DEFAULT_ADDONS) return;
   for (const d of DEFAULT_ADDONS) {
@@ -643,6 +663,7 @@ async function handleGate(req, res, path, url, host, isMain) {
     }
     fails.delete(ip); log("auth ok", ip, host); audit("sign-in", req, { user: String(creds.username || "") });
     burrow.shield.trust(ip);
+    try { guardExt?.signedIn?.(ip); } catch { /* the addon's business */ }
     return sendJson(res, 200, { ok: true, next: safeNext(creds.next, "/") }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
   }
   if (path === "/__gate/logout") {
@@ -1016,6 +1037,13 @@ function mounts() {
   if (want.termix && termixUpstream()) out.push({ id: "termix", name: "Termix", prefix: want.termix, up: termixUpstream(), keepHost: true, meta: "termix-base-path" });
   const f = want["selkies-forge"] && listIntegrations().find((i) => i.kind === "selkies-forge" && i.url);
   if (f && up(f.url)) out.push({ id: "selkies-forge", name: "Selkies Forge", prefix: want["selkies-forge"], up: up(f.url), keepHost: false });
+  // an addon's own app, under the dashboard's login (Bulwark: /__gate/bulwark)
+  for (const [id, x] of extensions) {
+    let m = null;
+    try { m = typeof x.mod.mount === "function" ? x.mod.mount() : x.mod.mount; } catch { m = null; }
+    if (!m?.prefix || !/^\/__gate\/[a-z0-9][a-z0-9-]{1,30}$/.test(m.prefix) || !up(m.upstream)) continue;
+    out.push({ id, name: m.name || id, prefix: m.prefix, up: up(m.upstream), keepHost: false, headers: m.headers || null });
+  }
   return out;
 }
 const mountAt = (path) => mounts().find((m) => path === m.prefix || path.startsWith(m.prefix + "/")) || null;
@@ -1036,6 +1064,7 @@ function viewOf(integ) {
 
 function proxyMount(m, req, res, upPath) {
   const headers = upstreamHeaders(req);
+  if (m.headers) Object.assign(headers, m.headers);
   if (!m.keepHost) {
     // a Forge bound to localhost only answers to its own name, and checks Origin against it
     const upOrigin = `${m.up.https ? "https" : "http"}://${m.up.host}:${m.up.port}`;
@@ -1176,10 +1205,24 @@ const SIGN_IN_PATHS = new Set(["/__gate/login", "/__gate/login.css", "/__gate/lo
 function shieldStop(req, path, host) {
   const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
   if (isMain && SIGN_IN_PATHS.has(path)) return null;
-  return burrow.shield.gate(clientIp(req), {
-    method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""),
-    trusted: () => isAuthed(req),
-  });
+  const ip = clientIp(req);
+  if (guardExt) {
+    const H = req.headers;
+    const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
+                   referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
+                   via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
+                   port: burrow.matchHost(host), main: isMain, trusted: () => isAuthed(req) };
+    req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
+    try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
+  }
+  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), trusted: () => isAuthed(req) });
+}
+// the guard addon's log line, once the response is done (never in the request's way)
+function observeDone(req, res, extra = {}) {
+  const g = req._guard;
+  if (!g || !guardExt?.observe) return;
+  try { guardExt.observe(g.ip, g.info, { status: extra.status ?? res?.statusCode ?? 0, bytes: Math.max(0, (req.socket?.bytesWritten || 0) - g.bytes0), ms: Date.now() - g.info.t0 }); }
+  catch { /* never in the way */ }
 }
 
 async function handler(req, res) {
@@ -1196,6 +1239,7 @@ async function handler(req, res) {
       return send(res, burrow.on && tunnels.relayAsk(name) ? 200 : 404, "");
     }
     const stop = shieldStop(req, path, host);
+    if (req._guard) res.once("close", () => observeDone(req, res));
     if (stop) return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close" });
     const port = burrow.matchHost(host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
@@ -1265,6 +1309,7 @@ server.on("upgrade", (req, socket, head) => {
   frontClaim(req);
   const host = hostOf(req);
   const stop = shieldStop(req, new URL(req.url || "/", "http://x").pathname, host);
+  if (req._guard) { req._guard.info.ws = true; observeDone(req, null, { status: stop ? stop.status : 101 }); }
   if (stop) { socket.end(`HTTP/1.1 ${stop.status} ${stop.status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`); return; }
   const port = burrow.matchHost(host);
   if (port !== null) {
