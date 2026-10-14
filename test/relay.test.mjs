@@ -119,3 +119,26 @@ test("setup: a one-time link, a script that locks the user down, registration pi
   link.forget();
   assert.equal(link.configured(), false);
 });
+
+test("Caddy with sites imported by name: the old import line becomes the agent's, a missing one is added", async () => {
+  const key = randomBytes(32), dir = tmp();
+  const sites = join(dir, "sites"), cf = join(dir, "Caddyfile");
+  execFileSync("mkdir", ["-p", sites]);
+  writeFileSync(join(sites, "aegis-tunnels.caddy"), "*.tunnel.example.com { }\n");
+  writeFileSync(cf, `{\n}\nimport ${sites}/console.caddy\nimport ${sites}/aegis-tunnels.caddy\n`);
+  const agent = startAgent({ key: key.toString("base64url"), suffix: ".tunnel.example.com", upstreamPort: 1, controlPort: await free(), httpPort: await free(), mode: "caddy",
+                             certDir: join(dir, "certs"), caddySite: join(sites, "aegis-relay.caddy"), replaces: join(sites, "aegis-tunnels.caddy"), caddyfile: cf, reload: false }, { log: () => {} });
+  try {
+    execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "2", "-subj", "/CN=x",
+                             "-addext", "subjectAltName=DNS:*.tunnel.example.com", "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem")], { stdio: "ignore" });
+    agent.installCert(readFileSync(join(dir, "c.pem"), "utf8"), readFileSync(join(dir, "k.pem"), "utf8"));
+    const text = readFileSync(cf, "utf8");
+    assert.ok(text.includes(`import ${sites}/aegis-relay.caddy`), text);
+    assert.ok(!text.includes("aegis-tunnels.caddy"), "the old site's import line is gone");
+    assert.equal(text.match(/aegis-relay\.caddy/g).length, 1, "imported once");
+    // a Caddyfile with a glob over the folder is left alone
+    writeFileSync(cf, `import ${sites}/*\n`);
+    agent.installCert(readFileSync(join(dir, "c.pem"), "utf8"), readFileSync(join(dir, "k.pem"), "utf8"));
+    assert.equal(readFileSync(cf, "utf8"), `import ${sites}/*\n`);
+  } finally { agent.close(); }
+});

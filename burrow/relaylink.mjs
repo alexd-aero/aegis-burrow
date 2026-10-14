@@ -237,8 +237,9 @@ say "Node.js $("$NODE" -v) at $NODE"
 MODE=tls; SITE=""; REPLACES=""
 if ss -ltnp 2>/dev/null | grep -E '[:.]443 ' | grep -q caddy; then
   MODE=caddy
-  if [ -d /etc/caddy/sites ] && grep -q 'sites/' /etc/caddy/Caddyfile 2>/dev/null; then SITE=/etc/caddy/sites/aegis-relay.caddy
-  else SITE=/etc/aegis-relay/caddy.site; grep -qF "import $SITE" /etc/caddy/Caddyfile || printf '\\nimport %s\\n' "$SITE" >> /etc/caddy/Caddyfile; fi
+  # the agent writes its site there with the first certificate, imports it in the
+  # Caddyfile (or takes over an older site's import line), and checks with caddy validate
+  if [ -d /etc/caddy/sites ]; then SITE=/etc/caddy/sites/aegis-relay.caddy; else SITE=/etc/aegis-relay/caddy.site; fi
   # an older hand-made site for the same names gives way when the agent's comes
   for f in /etc/caddy/sites/aegis-tunnels.caddy; do [ -f "$f" ] && grep -q ${q(`*${cfg.suffix}`)} "$f" && REPLACES="$f"; done
   say "Caddy is on :443: it keeps TLS, the agent sits behind it"

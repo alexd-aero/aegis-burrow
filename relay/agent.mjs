@@ -23,10 +23,10 @@ import { createServer as httpsServer } from "node:https";
 import { createSecureContext } from "node:tls";
 import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, chownSync, statSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.0.1";
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
 
 // ------------------------------------------------------------------ the signature (same as Aegis's relaylink.mjs)
@@ -135,6 +135,39 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
 }
 `;
   }
+  // Caddy: our site file, imported by the Caddyfile (a glob over its folder, or a line of
+  // its own; an older hand-made site's import line becomes ours), checked with
+  // `caddy validate` before the reload, and everything put back if it doesn't pass.
+  function caddyInstall() {
+    const site = cfg.caddySite, cf = cfg.caddyfile || "/etc/caddy/Caddyfile";
+    const undo = [];
+    const keep = (f) => { if (existsSync(f)) { const b = readFileSync(f); undo.push(() => writeFileSync(f, b)); } else undo.push(() => { try { renameSync(f, f + ".failed"); } catch { /* gone */ } }); };
+    try {
+      if (existsSync(cf)) {
+        let text = readFileSync(cf, "utf8");
+        const before = text;
+        if (cfg.replaces) text = text.split("\n").map((l) => (l.trim() === `import ${cfg.replaces}` ? l.replace(cfg.replaces, site) : l)).join("\n");
+        const dir = dirname(site), covered = text.includes(site) || new RegExp(`import\\s+${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}/\\*`).test(text);
+        if (!covered) text = text.replace(/\n*$/, `\n\nimport ${site}\n`);
+        if (text !== before) { keep(cf); writeFileSync(cf, text); }
+      }
+      if (cfg.replaces && existsSync(cfg.replaces)) {
+        const old = cfg.replaces;
+        renameSync(old, old + ".before-aegis-relay");
+        undo.push(() => renameSync(old + ".before-aegis-relay", old));
+        log("moved aside", old);
+      }
+      if (!existsSync(site) || readFileSync(site, "utf8") !== caddySite()) { keep(site); mkdirSync(dirname(site), { recursive: true }); writeFileSync(site, caddySite()); }
+      if (cfg.reload === false) return;
+      execFileSync("caddy", ["validate", "--config", cf, "--adapter", "caddyfile"], { stdio: "pipe", timeout: 30000 });
+    } catch (e) {
+      for (const u of undo.reverse()) { try { u(); } catch { /* best effort */ } }
+      const why = String(e.stderr || e.message).split("\n").filter(Boolean).pop();
+      log("caddy didn't accept the change, put back as it was:", why);
+      throw new Error(`Caddy didn't accept the relay's site (${why}); nothing was changed`);
+    }
+    execFile("systemctl", ["reload", "caddy"], (e) => log(e ? `caddy reload failed: ${e.message}` : "caddy reloaded with the new certificate"));
+  }
   function installCert(cert, privKey) {
     const x = new X509Certificate(cert);
     mkdirSync(cfg.certDir, { recursive: true });
@@ -142,12 +175,8 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     write(certFile, cert, 0o644);
     write(keyFile, privKey, 0o640);
     if (cfg.caddyGroup !== undefined) { try { chownSync(keyFile, 0, cfg.caddyGroup); } catch { /* not root: tests */ } }
-    if (cfg.mode === "caddy") {
-      const site = cfg.caddySite;
-      if (cfg.replaces && existsSync(cfg.replaces)) { renameSync(cfg.replaces, cfg.replaces + ".before-aegis-relay"); log("moved aside", cfg.replaces); }
-      if (!existsSync(site) || readFileSync(site, "utf8") !== caddySite()) { mkdirSync(dirname(site), { recursive: true }); writeFileSync(site, caddySite()); }
-      if (cfg.reload !== false) execFile("systemctl", ["reload", "caddy"], (e) => log(e ? `caddy reload failed: ${e.message}` : "caddy reloaded with the new certificate"));
-    } else loadCtx();
+    if (cfg.mode === "caddy") caddyInstall();
+    else loadCtx();
     log(`certificate for ${x.subjectAltName} until ${x.validTo}`);
     return { fingerprint: x.fingerprint256, notAfter: Date.parse(x.validTo) };
   }
