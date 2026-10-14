@@ -551,6 +551,7 @@ export class TunnelManager {
   async unpublish(port, host) {
     if (!this.domain) { this.quick?.stop(port); return "none"; }
     if (this.frontMode) {
+      try { const { account, zone } = this.cf(); this.front.accountId = account; this.front.zoneId = zone; } catch { /* the call below says why */ }
       try { return (await this.front.removeDomain(host || this.hostFor(port))) ? "deleted" : "none"; }
       catch (e) { this.log("tunnels: couldn't remove", host || this.hostFor(port), "from the Worker:", e.message); return "error: " + e.message; }
     }
@@ -739,7 +740,12 @@ export class TunnelManager {
     if (leavingFront) {
       // the Worker's Custom Domains go, every one (old names too): their records would shadow the new way
       let gone;
-      try { gone = await this.front.removeAll(); }
+      try {
+        // which account and zone: only set when the Worker was deployed in this run (accounts/null otherwise)
+        const { account, zone } = this.cf();
+        this.front.accountId = account; this.front.zoneId = zone;
+        gone = await this.front.removeAll();
+      }
       catch (e) {
         this.syncEdge();
         for (const port of this.tunnels.keys()) await this.publish(port);          // put back what did go

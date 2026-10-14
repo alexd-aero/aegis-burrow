@@ -289,12 +289,15 @@ test("leaving the Worker front: names checked first, every Custom Domain removed
                                        zone.set(hostname, { id: "z-" + hostname, type: "AAAA", name: hostname, content: "100::", proxied: true, meta: { read_only: true } }); },
       removeDomain: async () => 0, certReady: async () => true,
       removeAll: async () => {
+        assert.equal(front.accountId, "acc-1", "it knows which account (not accounts/null)");
+        assert.equal(front.zoneId, "zone-1");
         if (front.failNext) { front.failNext = false; throw new Error("Authentication error"); }
         const gone = [...domains.keys()]; domains.clear(); front.removed.push(...gone);
         setTimeout(() => { for (const h of gone) zone.delete(h); }, 50);          // Cloudflare drops the records a moment later
         return gone;
       } };
     tm.front = front;
+    tm.cf = () => ({ account: "acc-1", zone: "zone-1" });
     for (const h of ["chat-demo.tunnel.example.com", "4000.tunnel.example.com", "22.tunnel.example.com"]) await front.addDomain(h);   // 22: an old tunnel's
     // a failure removing them: rejected, still on the Worker, its names put back
     front.failNext = true;
