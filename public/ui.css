@@ -863,6 +863,36 @@ section.set.flash, .adv-set.flash { animation: setflash 1.6s ease-out; }
 .naming .addr .zone:first-child { padding-right: 0; }
 .naming .addr .input { width: 140px; padding-left: 2px; }
 @media (max-width: 560px) { .naming .seg { display: flex; } .naming .seg button { flex: 1; } }
+/* where visitors arrive: four cards */
+.routes { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 8px; margin: 8px 0 10px; }
+.route { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left; padding: 12px 13px; border-radius: 11px;
+         border: 1px solid var(--line-2); background: rgba(255,255,255,.02); color: var(--muted); cursor: pointer; font: inherit; transition: border-color .15s, background .15s; }
+.route:hover { border-color: var(--line-hi); }
+.route.on { border-color: rgba(255,255,255,.4); background: #15171a; color: var(--text); box-shadow: 0 0 0 3px rgba(255,255,255,.05); }
+.route:focus-visible { outline: 2px solid rgba(255,255,255,.5); outline-offset: 2px; }
+.route-top { display: flex; align-items: center; gap: 8px; width: 100%; }
+.route-top b { color: var(--text); font-size: 14px; font-weight: 600; }
+.route small { font-size: 12px; line-height: 1.4; color: var(--muted); }
+.tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line-2); color: var(--muted); white-space: nowrap; }
+.tag.ok { color: var(--ok); border-color: rgba(61,220,151,.35); background: rgba(61,220,151,.07); }
+.tag.warn { color: var(--warn); border-color: rgba(242,193,78,.35); background: rgba(242,193,78,.06); }
+.tag.cur { margin-left: auto; color: var(--text); border-color: var(--line-hi); }
+.vps-row { gap: 8px; flex-wrap: wrap; } .vps-row .input { flex: 1 1 180px; min-width: 0; } .vps-row .btn { flex: none; }
+.naming .kv-row .pill { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; max-width: 100%; }
+.vps-cmd { margin-top: 12px; padding: 12px 14px; border-radius: 11px; border: 1px dashed var(--line-hi); background: rgba(255,255,255,.02); }
+.vps-cmd p { margin: 0 0 8px; } .vps-cmd p:last-child { margin: 8px 0 0; }
+.vps-cmd .input { font-size: 12.5px; }
+.warn-box { border-color: rgba(242,193,78,.35); background: rgba(242,193,78,.04); }
+.warn-box ul { margin: 0 0 10px; padding-left: 18px; color: var(--muted); } .warn-box li { margin: 3px 0; }
+label.check { display: flex; align-items: center; gap: 9px; cursor: pointer; font-size: 13.5px; }
+label.check input { width: 16px; height: 16px; accent-color: var(--warn); }
+.wk-meter { margin-top: 12px; padding: 12px 14px; border-radius: 11px; border: 1px solid var(--line-2); }
+.wk-meter .bar { height: 8px; border-radius: 99px; background: rgba(255,255,255,.06); margin: 10px 0 6px; overflow: hidden; }
+.wk-meter .bar i { display: block; height: 100%; border-radius: inherit; background: var(--ok); transition: width .6s ease; }
+.wk-meter .bar.warn i { background: var(--warn); } .wk-meter .bar.err i { background: var(--err); }
+.wk-meter .livedot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 7px; vertical-align: 1px; animation: wkpulse 1.6s ease-in-out infinite; }
+@keyframes wkpulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .wk-meter .livedot { animation: none; } .wk-meter .bar i { transition: none; } }
 /* an addon that stopped on its own */
 .down-card { display: flex; align-items: center; gap: 14px; padding: 14px 16px; margin-bottom: 14px; border-color: var(--err-line, rgba(230, 154, 139, 0.35)); }
 .down-card .fav img { width: 100%; height: 100%; object-fit: contain; }

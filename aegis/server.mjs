@@ -47,7 +47,7 @@ import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
 import { createServer as createNetServer, connect as netConnect } from "node:net";
 import { RelayLink } from "../burrow/relaylink.mjs";
-import { checkLock } from "../burrow/tunnels.mjs";
+import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
@@ -641,13 +641,19 @@ async function handleGate(req, res, path, url, host, isMain) {
 
   // ---- Aegis Relay: the one-time install script for your VPS, and its "done" (both need the setup link's token)
   if (path === "/__gate/relay/agent.sh" && req.method === "GET" && isMain) {
-    const sc = tunnels.wildcard ? relayLink.script(url.searchParams.get("t"), { suffix: "." + tunnels.wbase, base: `https://${mainHost() || host}` }) : null;
+    const sc = relayLink.script(url.searchParams.get("t"), { base: `https://${mainHost() || host}` });
     if (!sc) return send(res, 404, "echo 'That setup link has expired or is wrong: make a new one in Aegis → Settings → Domain.' >&2; exit 1\n", { "Content-Type": "text/plain; charset=utf-8" });
     audit("relay setup script fetched", req, { relay: relayLink.state.token?.host });
     return send(res, 200, sc, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
   }
   if (path === "/__gate/relay/register" && req.method === "POST" && isMain) {
-    try { const r = relayLink.register(url.searchParams.get("t"), await readJsonBody(req)); audit("relay registered", req, { relay: relayLink.state.vps?.host }); setTimeout(superviseRelay, 500); return sendJson(res, 200, r); }
+    try {
+      const r = relayLink.register(url.searchParams.get("t"), await readJsonBody(req));
+      audit("relay registered", req, { relay: relayLink.state.vps?.host });
+      // the installer waits for this: can this machine really reach the agent over the locked-down SSH user?
+      const v = await verifyRelay();
+      return sendJson(res, 200, { ...r, linked: v.ok, error: v.error });
+    }
     catch (e) { return sendJson(res, 400, { error: e.message }); }
   }
 
@@ -1210,6 +1216,7 @@ function frontClaim(req) {
   if (req.headers["x-aegis-front-key"] === undefined) return;
   const f = tunnels.front.claim(req, isThisMachine(req.socket.remoteAddress));
   if (!f) { req.headers.host = "front.invalid"; return; }
+  tunnels.countFront();                 // against Cloudflare's daily limit (Settings → Domain shows it)
   req.headers.host = f.host;
   if (f.ip) req.headers["cf-connecting-ip"] = f.ip;
 }
@@ -1461,9 +1468,36 @@ relayServer.on("error", (e) => log(`relay: 127.0.0.1:${RELAY_LINK_PORT}:`, e.mes
 const relayWanted = () => {
   const n = tunnels.naming, v = relayLink.state.vps;
   if (!relayLink.configured() || !burrow.on || !tunnels.domain || n.mode !== "wildcard" || !v || n.relay !== v.host) return false;
-  return n.certs === "relay" || (n.certs === "self" && tunnels.edge.target()?.via === "relay");
+  return n.certs === "relay" || (n.certs === "self" && (n.route === "vps" || tunnels.edge.target()?.via === "relay"));
+};
+const relayListen = () => relayServer.listening ? Promise.resolve() : new Promise((resolve, reject) => {
+  const fail = (e) => reject(new Error(`the relay listener (127.0.0.1:${RELAY_LINK_PORT}) couldn't start: ${e.message}`));
+  relayServer.once("error", fail);
+  relayServer.listen(RELAY_LINK_PORT, "127.0.0.1", () => { relayServer.off("error", fail); resolve(); });
+});
+// Bring the link up (if it isn't), wait for the agent to answer through it,
+// and leave it running only if the tunnels use it. -> {ok, error}
+async function verifyRelay(ms = 30000) {
+  if (!relayLink.configured()) return { ok: false, error: "no relay agent is registered" };
+  try { await relayListen(); } catch (e) { return { ok: false, error: e.message }; }
+  const v = await relayLink.verify(RELAY_LINK_PORT, ms);
+  superviseRelay();
+  return v;
+}
+// Before the tunnels move to the VPS: the agent there is linked and checked,
+// and holds this machine's certificate (else nothing moves).
+tunnels.beforeVps = async (naming) => {
+  const v = relayLink.state.vps;
+  if (!relayLink.configured() || v?.host !== naming.relay) throw new Error(`Link ${naming.relay} first: run the install command on it (Settings → Domain → Your VPS).`);
+  await relayListen();
+  const r = await relayLink.verify(RELAY_LINK_PORT, 30000);
+  if (!r.ok) { superviseRelay(); throw new Error(`Couldn't reach the agent on ${v.host}: ${r.error}. Nothing was moved.`); }
+  try { await relayLink.pushCert(tunnels.edge.cur); }
+  catch (e) { throw new Error(`${v.host} didn't take the certificate (${e.message}). Nothing was moved.`); }
+  if (!relayLink.agent?.cert) throw new Error(`${v.host} has no certificate yet. Nothing was moved.`);
 };
 function superviseRelay() {
+  if (relayLink.verifying) return;
   const want = relayWanted();
   if (want && !relayServer.listening) relayServer.listen(RELAY_LINK_PORT, "127.0.0.1", () => relayLink.start(RELAY_LINK_PORT));
   else if (want && !relayLink.running()) relayLink.start(RELAY_LINK_PORT);
@@ -1481,14 +1515,21 @@ setTimeout(superviseRelay, 8000).unref();
 async function relayRoute(method, path, readJson) {
   const ok = (json) => ({ status: 200, json });
   try {
-    if (path === "/relay" && method === "GET") return ok({ ...relayLink.view(), wanted: relayWanted(), naming: { mode: tunnels.naming.mode, certs: tunnels.naming.certs, relay: tunnels.naming.relay } });
+    if (path === "/relay" && method === "GET") return ok({ ...relayLink.view(), wanted: relayWanted(), naming: { mode: tunnels.naming.mode, certs: tunnels.naming.certs, relay: tunnels.naming.relay, route: tunnels.naming.route } });
     if (path === "/relay/setup" && method === "POST") {
-      if (!tunnels.wildcard) return { status: 409, json: { error: "A relay carries the one wildcard (Settings → Domain → One wildcard record) first." } };
-      const b = await readJson(), r = relayLink.setup({ host: b.host || tunnels.naming.relay, port: b.port });
+      if (!tunnels.domain) return { status: 409, json: { error: "Link a domain first: the relay carries its tunnel names." } };
+      const b = await readJson();
+      // the names the agent answers for: the wildcard in use, or the one about to be (the prefix being set up)
+      const prefix = b.prefix !== undefined ? cleanNaming({ mode: "wildcard", prefix: b.prefix, certs: "self" }).prefix : tunnels.wildcard ? tunnels.naming.prefix : "tunnel";
+      const r = relayLink.setup({ host: b.host || tunnels.naming.relay, port: b.port, suffix: "." + (prefix ? `${prefix}.${tunnels.parent}` : tunnels.parent) });
       const base = `https://${mainHost()}`;
       return ok({ ...r, command: `curl -fsSL '${base}/__gate/relay/agent.sh?t=${r.token}' | sudo bash` });
     }
-    if (path === "/relay/forget" && method === "POST") { relayLink.forget(); superviseRelay(); return ok(relayLink.view()); }
+    if (path === "/relay/check" && method === "POST") { await verifyRelay(); return ok({ ...relayLink.view(), wanted: relayWanted() }); }
+    if (path === "/relay/forget" && method === "POST") {
+      if (tunnels.wildcard && tunnels.naming.certs === "self" && tunnels.naming.route === "vps") return { status: 409, json: { error: "The tunnels go through this VPS: move them elsewhere first (Settings → Domain)." } };
+      relayLink.forget(); superviseRelay(); return ok(relayLink.view());
+    }
     if (path === "/relay/push" && method === "POST") return ok(await relayLink.pushCert({ ...tunnels.edge.cur, force: true }) || {});
   } catch (e) { return { status: 400, json: { error: e.message } }; }
   return null;

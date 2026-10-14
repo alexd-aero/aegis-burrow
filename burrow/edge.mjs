@@ -27,6 +27,11 @@
 //            this one; Burrow checks for that too (relayPass). Only when this
 //            machine can't be reached does the relay answer with its own.
 // With no relay the record stays on this machine's address either way.
+//
+// route "vps" (Settings → Domain → Your VPS) skips all of that: the record is
+// the relay's, always. Nothing is checked or asked of the router at home, and
+// no check record is made; the certificate is still this machine's (Aegis
+// Relay's agent gets a copy, burrow/relaylink.mjs).
 
 import { createSecureContext, connect as tlsConnect } from "node:tls";
 import { execFile } from "node:child_process";
@@ -68,6 +73,7 @@ export class Edge {
     this.acme = new Acme({ dir, directory: directory || process.env.AEGIS_ACME_DIRECTORY || LETSENCRYPT, log: this.log });
     this.base = null;          // tunnel.example.com: the edge serves *.<base>
     this.relay = null;         // the backup relay's IP
+    this.route = "home";       // "vps": always through the relay, home is never tried
     this.cur = null;           // {key, cert, notAfter, fingerprint, names, issued}
     this.ctx = null;
     this.issuing = null;
@@ -88,9 +94,11 @@ export class Edge {
   // What the certificate covers.
   names() { return this.base ? [`*.${this.base}`, ...(this.checkName ? [this.checkName] : [])] : []; }
 
-  // Serve *.<base> (or nothing: null), with `relay` as the backup.
-  use(base, relay, checkName) {
+  // Serve *.<base> (or nothing: null), with `relay` as the backup (route
+  // "home") or as the only way in (route "vps").
+  use(base, relay, checkName, route = "home") {
     relay = relay || null;
+    route = route === "vps" && relay ? "vps" : "home";
     checkName = base ? checkName || null : null;
     const before = this.target()?.ip;
     if (this.checkRec && this.checkRec.name !== checkName) this.dropCheckRecord(this.checkRec);
@@ -106,6 +114,11 @@ export class Edge {
       if (this.cur) this.onCert?.();
     }
     this.relay = relay;
+    if (route !== this.route) {
+      this.route = route;
+      this.direct = { ok: null, fails: 0, oks: 0, checked: null, why: null };
+      if (route === "vps" && this.checkName) this.dropCheckRecord(this.checkRec || { name: this.checkName });     // nothing points home
+    }
     if (this.base && !this.timer) {
       this.timer = setInterval(() => this.tick(), CHECK_EVERY_MS);
       this.timer.unref?.();
@@ -122,6 +135,7 @@ export class Edge {
     this._ticking = true;
     try {
       await this.ensureCert().catch(() => { /* kept in this.error */ });
+      if (this.route === "vps") { this.relayPass = await this.probeRelay(); return; }
       await this.refreshIp();
       if (this.upnpOn && Date.now() - this.upnp.at > UPNP_EVERY_MS) await this.mapPort();
       await this.check();
@@ -282,10 +296,11 @@ export class Edge {
     }
   }
 
-  via() { return this.direct.ok ? "direct" : this.relay ? "relay" : "direct"; }
+  via() { return this.route === "vps" ? "relay" : this.direct.ok ? "direct" : this.relay ? "relay" : "direct"; }
   // Where the wildcard record should point: {ip, via, verified} or null (no address known yet)
   target() {
     if (!this.base) return null;
+    if (this.route === "vps") return { ip: this.relay, via: "relay", verified: false };
     if (this.direct.ok && this.publicIp) return { ip: this.publicIp, via: "direct", verified: true };
     if (this.relay) return { ip: this.relay, via: "relay", verified: false };
     return this.publicIp ? { ip: this.publicIp, via: "direct", verified: false } : null;
@@ -327,14 +342,14 @@ export class Edge {
   state() {
     const t = this.target();
     return {
-      base: this.base, port: this.port, publicIp: this.publicIp, lan: this.lanIp(), relay: this.relay,
+      base: this.base, port: this.port, publicIp: this.publicIp, lan: this.lanIp(), relay: this.relay, route: this.route,
       cert: this.cur ? { names: this.cur.names, notAfter: this.cur.notAfter, issued: this.cur.issued,
                          staging: !!this.cur.directory && this.cur.directory !== LETSENCRYPT } : null,
       issuing: !!this.issuing, error: this.error,
       direct: { ok: this.direct.ok, checked: this.direct.checked, why: this.direct.why },
       via: t?.via || null, target: t?.ip || null, relayPass: this.relayPass,
       upnp: { ok: this.upnp.ok, note: this.upnp.note, at: this.upnp.at || null, external: this.upnp.external || null },
-      cgnat: this.cgnat(),
+      cgnat: this.route === "vps" ? null : this.cgnat(),
     };
   }
 }

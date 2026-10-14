@@ -98,9 +98,13 @@ test("the agent's control: only your Aegis may hand it a certificate; Caddy gets
 test("setup: a one-time link, a script that locks the user down, registration pins the host key", () => {
   const link = new RelayLink({ dataDir: tmp(), log: () => {} });
   assert.throws(() => link.setup({ host: "not a host" }), /IP address or host name/);
-  const s = link.setup({ host: "192.0.2.10" });
-  assert.equal(link.script("wrong", { suffix: ".tunnel.example.com", base: "https://aegis.example.com" }), null);
-  const sc = link.script(s.token, { suffix: ".tunnel.example.com", base: "https://aegis.example.com" });
+  assert.throws(() => link.setup({ host: "192.0.2.10" }), /tunnel names/);
+  const s = link.setup({ host: "192.0.2.10", suffix: ".tunnel.example.com" });
+  assert.equal(link.script("wrong", { base: "https://aegis.example.com" }), null);
+  const sc = link.script(s.token, { base: "https://aegis.example.com" });
+  assert.ok(sc.includes('"suffix":".tunnel.example.com"'), "the names it was made for");
+  assert.match(sc, /trap .* EXIT/, "a failure says where it stopped");
+  assert.match(sc, /Linked\./, "and success says the link was checked");
   assert.match(sc, /restrict,port-forwarding,permitlisten="127\.0\.0\.1:18452",permitopen="127\.0\.0\.1:18451" ssh-ed25519 /);
   assert.match(sc, /AEGIS_RELAY_AGENT'\n\/\/ Aegis Relay agent/);
   assert.ok(sc.includes(`/__gate/relay/register?t=${s.token}`));

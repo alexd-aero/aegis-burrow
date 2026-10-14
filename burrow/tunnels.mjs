@@ -24,9 +24,13 @@
 // checks the certificate first (certCovers). naming.certs says who holds the
 // certificate for those names:
 //   "self"        this machine: a free Let's Encrypt wildcard (edge.mjs), served
-//                 by Aegis itself; the wildcard is a plain A record to this
-//                 machine, or to naming.relay, the backup, while this machine
-//                 isn't reachable on port 443
+//                 by Aegis itself. naming.route says where visitors arrive:
+//                 "vps"   your VPS (naming.relay, with Aegis Relay's agent, which
+//                         gets a copy of the certificate): the wildcard is a
+//                         plain A record to it, always; nothing opens at home
+//                 "home"  this machine (the router forwards 443 here, which the
+//                         user agreed to do: naming.accept), or naming.relay, the
+//                         backup, while it isn't reachable on port 443
 //   "relay"       naming.relay alone (Caddy with on-demand TLS, on a server of
 //                 yours) fetches a certificate per name, asking
 //                 /__gate/relay-ask first, and passes the requests on to this
@@ -95,8 +99,14 @@ export function cleanNaming(n, { saved = false } = {}) {
     else certs = relay ? "relay" : "cloudflare";
   }
   if (certs === "relay" && !relay) throw new Error("Name the relay server (its IP), or let this machine hold the certificate.");
-  return { mode, prefix, certs, relay: relay || null };
+  // where visitors arrive while this machine holds the certificate (older saves: home, the relay as the backup)
+  const route = certs !== "self" ? null : n?.route === "vps" || n?.route === "home" ? n.route : saved ? "home" : relay ? "vps" : "home";
+  if (route === "vps" && !relay) throw new Error("Link your VPS first (its IP address), then the tunnels can move there.");
+  return { mode, prefix, certs, relay: relay || null, route };
 }
+// Cloudflare's free plan: 100,000 Worker requests a day per account (all its
+// Workers together), reset at 00:00 UTC. Past it the Worker answers with an error.
+export const WORKER_DAILY_LIMIT = 100000;
 const NOT_HTTP = new Set([22, 25, 53, 111, 139, 445, 465, 587, 993, 995, 1194, 3306, 5432, 6379, 27017]);
 
 const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
@@ -226,6 +236,10 @@ export class TunnelManager {
     this.edge = new Edge({ dataDir, log: log || console.log, cfApi: (...a) => this.cfApi(...a), ...(edge || {}) });
     this.edge.onChange = () => this.repointWildcard();
     this.front = new WorkerFront({ file: join(dataDir, "cf", "front.json"), log: log || console.log });
+    // requests the Worker handed here today (UTC), against the free plan's daily limit
+    this.frontDayFile = join(dataDir, "cf", "worker-today.json");
+    this.frontDay = { day: null, n: 0 };
+    try { this.frontDay = { ...this.frontDay, ...JSON.parse(readFileSync(this.frontDayFile, "utf8")) }; } catch { /* none yet */ }
     this.quick = quick;                       // QuickTunnels, used while no domain is linked
     this.forbidden = new Set(forbiddenPorts || []);
     this.log = log || console.log;
@@ -235,7 +249,7 @@ export class TunnelManager {
     this.load();
     this.useDomain(domain);
     if (this.naming.certs === "auto") setTimeout(() => this.resolveAuto(), 5000).unref?.();
-    this.saveTimer = setInterval(() => this.save(), 30000);
+    this.saveTimer = setInterval(() => { this.save(); this.saveFrontDay(); }, 30000);
     this.healthTimer = setInterval(() => this.healthAll(), HEALTH_EVERY_MS);
     setTimeout(() => this.healthAll(), 1500);
     // records still on their way to public DNS when we last stopped; leftovers
@@ -270,7 +284,7 @@ export class TunnelManager {
   get selfCerts() { return this.wildcard && this.naming.certs === "self"; }
   // The edge serves *.<wbase> while this machine holds the certificate.
   syncEdge() {
-    this.edge.use(this.selfCerts ? this.wbase : null, this.naming.relay, this.checkName());
+    this.edge.use(this.selfCerts ? this.wbase : null, this.naming.relay, this.checkName(), this.naming.route);
     // an outside-check record left from when this machine held the certificate (it points at this address): gone
     if (!this.selfCerts && this.domain && !this._checkSwept) { this._checkSwept = true; this.edge.dropCheckRecord({ name: this.checkName() }); }
   }
@@ -674,12 +688,31 @@ export class TunnelManager {
       sock.on("timeout", () => { sock.destroy(); resolve(false); });
     });
   }
+  // One request through the Worker (aegis/server.mjs counts them as they arrive).
+  countFront() {
+    const d = new Date().toISOString().slice(0, 10);
+    if (this.frontDay.day !== d) this.frontDay = { day: d, n: 0 };
+    this.frontDay.n++;
+    this.frontDayDirty = true;
+  }
+  frontToday() {
+    const d = new Date().toISOString().slice(0, 10);
+    const n = this.frontDay.day === d ? this.frontDay.n : 0;
+    const reset = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1);
+    return { day: d, n, limit: WORKER_DAILY_LIMIT, reset };
+  }
+  saveFrontDay() {
+    if (!this.frontDayDirty) return;
+    this.frontDayDirty = false;
+    try { mkdirSync(join(this.dataDir, "cf"), { recursive: true }); writeFileSync(this.frontDayFile, JSON.stringify(this.frontDay)); } catch { /* next time */ }
+  }
   namingInfo() {
     return { ...this.naming, active: this.wildcard, zone: this.parent, label: this.label,
              example: this.domain ? (this.naming.mode === "wildcard" ? `radio.${this.wbase}` : `tunnel-3000-${this.label}.${this.parent}`) : null,
              record: this.wildcard ? this.wildcardName() : null, relay: this.naming.relay,
              edge: this.selfCerts ? this.edge.state() : null,
-             front: { linked: this.front.linked, script: this.front.deployed?.script || null, error: this.front.error } };
+             front: { linked: this.front.linked, script: this.front.deployed?.script || null, error: this.front.error,
+                      today: this.frontMode ? this.frontToday() : null } };
   }
   // The relay's question before it fetches a certificate: is this one of ours?
   // (The backup relay asks too: it serves the names while this machine can't.)
@@ -702,18 +735,32 @@ export class TunnelManager {
         throw e;
       }
       if (naming.certs === "self") {
+        // this machine takes the visitors only once the user has agreed to forward port 443 to it
+        const wasHome = this.wildcard && this.naming.certs === "self" && this.naming.route === "home";
+        if (naming.route === "home" && !wasHome && next?.accept !== true) {
+          const e = new Error("This machine only works with TCP port 443 forwarded to it on your router, which Aegis won't do for you. Confirm that you'll set it up (and what it means), or use your VPS.");
+          e.code = "accept";
+          throw e;
+        }
         // the certificate first: nothing moves unless it came
-        this.edge.use(base, naming.relay, this.checkName());
+        this.edge.use(base, naming.relay, this.checkName(), naming.route);
         try {
           await this.edge.ensureCert({ force: true });
-          await this.edge.refreshIp();
-          await this.edge.check();
-          if (!this.edge.target()) throw new Error("Couldn't find this machine's public address.");
+          if (naming.route === "home") {
+            await this.edge.refreshIp();
+            await this.edge.check();
+            if (!this.edge.target()) throw new Error("Couldn't find this machine's public address.");
+          }
         } catch (e) {
           this.syncEdge();
           const err = new Error(`No certificate for *.${base}: ${e.message}`);
           err.code = "acme";
           throw err;
+        }
+        // the VPS gets linked, checked and handed the certificate before the record moves there
+        if (naming.route === "vps" && this.beforeVps) {
+          try { await this.beforeVps(naming); }
+          catch (e) { this.syncEdge(); const err = new Error(e.message); err.code = "relay"; throw err; }
         }
       }
     }

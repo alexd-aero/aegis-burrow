@@ -50,6 +50,8 @@ export class RelayLink {
     this.state = { key: null, vps: null, installed: null, token: null, remotePort: 18452, controlPort: 18451, httpPort: 18450 };
     try { this.state = { ...this.state, ...JSON.parse(readFileSync(this.file, "utf8")) }; } catch { /* first time */ }
     this.child = null; this.link = { state: "off", since: null, error: null }; this.agent = null;
+    this.checked = null;                // the last check that this machine reaches the agent: {ok, at, error}
+    this.verifying = false;
     this.localCtl = null; this.stopped = true; this.backoff = 5000; this.timer = null;
     this.onUp = null;                   // the link came up (push the certificate)
   }
@@ -68,22 +70,24 @@ export class RelayLink {
   }
 
   // ------------------------------------------------------------ setup
-  setup({ host, port = 22 }) {
+  setup({ host, port = 22, suffix }) {
     host = String(host || "").trim().toLowerCase();
     if (!isIP(host) && !HOST_RE.test(host)) throw new Error("The relay is your server's IP address or host name.");
     port = Number(port) || 22;
     if (!(port > 0 && port < 65536)) throw new Error("That isn't an SSH port.");
     this.ensureSshKey();
     if (!this.state.key || this.state.vps?.host !== host) this.state.key = randomBytes(32).toString("base64url");     // a new server, a new key
-    this.state.token = { t: randomBytes(24).toString("base64url"), exp: Date.now() + TOKEN_MS, host, port };
+    if (!/^\.[a-z0-9.-]+$/.test(String(suffix || ""))) throw new Error("No tunnel names for the relay to carry yet.");
+    this.state.token = { t: randomBytes(24).toString("base64url"), exp: Date.now() + TOKEN_MS, host, port, suffix };
+    this.checked = null;
     this.save();
     return { token: this.state.token.t, expires: this.state.token.exp, host, port };
   }
   tokenOk(t) { const k = this.state.token; return !!k && typeof t === "string" && t.length === k.t.length && t === k.t && Date.now() < k.exp; }
   // the install script for the VPS (the one-time link serves it)
-  script(t, { suffix, base }) {
+  script(t, { base }) {
     if (!this.tokenOk(t)) return null;
-    const pub = this.ensureSshKey(), S = this.state;
+    const pub = this.ensureSshKey(), S = this.state, suffix = S.token.suffix;
     const agent = readFileSync(AGENT_FILE, "utf8");
     const cfg = { key: S.key, suffix, upstreamPort: S.remotePort, controlPort: S.controlPort, httpPort: S.httpPort, certDir: "/etc/aegis-relay/certs" };
     return installScript({ cfg, pub, agent, base, token: t, remotePort: S.remotePort, controlPort: S.controlPort });
@@ -155,6 +159,22 @@ export class RelayLink {
       this.backoff = Math.min(60000, this.backoff * 2);
     });
   }
+  // Is the agent really reachable? Starts the link if it isn't running and waits
+  // for the agent to answer through it. (The caller decides whether it stays up.)
+  async verify(listenPort, ms = 30000) {
+    if (!this.configured()) return (this.checked = { ok: false, at: Date.now(), error: "no relay agent is registered" });
+    this.verifying = true;
+    try {
+      if (this.stopped || !this.child) { this.stop(); await this.start(listenPort); }
+      const until = Date.now() + ms;
+      while (Date.now() < until && this.link.state !== "up") await new Promise((r) => setTimeout(r, 400));
+      const ok = this.link.state === "up";
+      this.checked = { ok, at: Date.now(), error: ok ? null : explain(this.link.error) || "the agent didn't answer through the link" };
+      if (ok) this.log(`relay: checked: this machine reaches the agent on ${this.state.vps.host}`);
+      else this.log(`relay: check failed for ${this.state.vps.host}: ${this.checked.error}`);
+      return this.checked;
+    } finally { this.verifying = false; }
+  }
   stop() {
     this.stopped = true;
     clearTimeout(this.timer);
@@ -201,8 +221,21 @@ export class RelayLink {
     const S = this.state;
     return { configured: this.configured(), vps: S.vps, installed: S.installed, link: this.link,
              agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, stats: this.agent.stats, at: this.agent.at } : null,
-             pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION };
+             pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION,
+             checked: this.checked };
   }
+}
+
+// What an ssh error means, for someone who just ran the installer.
+function explain(err) {
+  const e = String(err || "");
+  if (!e) return null;
+  if (/Permission denied/i.test(e)) return `the server refused this machine's key (${e}): run the install command again`;
+  if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(e)) return "the server's SSH host key changed since it registered: run the install command again if you reinstalled it";
+  if (/Connection refused/i.test(e)) return "nothing answers on its SSH port (is sshd running, on port 22?)";
+  if (/timed out|No route to host|Network is unreachable/i.test(e)) return `its SSH port doesn't answer (${e}): a firewall in front of the server?`;
+  if (/remote port forwarding failed|forwarding failed/i.test(e)) return "the server refused the port forward (sshd's AllowTcpForwarding, or another program holds the port)";
+  return e;
 }
 
 // ------------------------------------------------------------------ the install script
@@ -215,11 +248,16 @@ function installScript({ cfg, pub, agent, base, token, remotePort, controlPort }
 # and nothing else; the agent (/opt/aegis-relay/agent.mjs) as aegis-relay-agent.service;
 # then it tells your Aegis it's done (and this server's SSH host key, which Aegis pins).
 set -euo pipefail
-[ "$(id -u)" = 0 ] || { echo "Run it as root (with sudo)." >&2; exit 1; }
-command -v systemctl >/dev/null || { echo "This needs a server with systemd." >&2; exit 1; }
 say() { printf '  %s\\n' "$*"; }
+die() { trap - EXIT; printf '\\n  \\033[31m✗ %s\\033[0m\\n\\n' "$*" >&2; exit 1; }
+STEP="starting"
+trap 'rc=$?; [ $rc -ne 0 ] && printf "\\n  \\033[31m✗ setup stopped while %s (exit %s). Nothing on your Aegis changed; fix that and paste the command again (make a new one in Settings → Domain if 30 minutes have passed).\\033[0m\\n\\n" "$STEP" "$rc" >&2' EXIT
+[ "$(id -u)" = 0 ] || die "Run it as root (with sudo)."
+command -v systemctl >/dev/null || die "This needs a Linux server with systemd."
+for c in curl ss tar; do command -v $c >/dev/null || die "This needs $c (install it, then paste the command again)."; done
 echo; echo "  Aegis Relay"
 # ---- Node.js 18+ (the agent's only need): the one here, or our own copy
+STEP="getting Node.js"
 NODE=""
 for n in "$(command -v node 2>/dev/null)" /usr/local/bin/node /opt/aegis-relay/node/bin/node; do
   [ -n "$n" ] && [ -x "$n" ] && "$n" -e 'process.exit(+process.versions.node.split(".")[0] >= 18 ? 0 : 1)' 2>/dev/null && { NODE="$n"; break; }
@@ -234,6 +272,7 @@ if [ -z "$NODE" ]; then
 fi
 say "Node.js $("$NODE" -v) at $NODE"
 # ---- where visitors arrive: Caddy already on :443 (it terminates TLS), or the agent itself
+STEP="looking at port 443"
 MODE=tls; SITE=""; REPLACES=""
 if ss -ltnp 2>/dev/null | grep -E '[:.]443 ' | grep -q caddy; then
   MODE=caddy
@@ -244,10 +283,19 @@ if ss -ltnp 2>/dev/null | grep -E '[:.]443 ' | grep -q caddy; then
   for f in /etc/caddy/sites/aegis-tunnels.caddy; do [ -f "$f" ] && grep -q ${q(`*${cfg.suffix}`)} "$f" && REPLACES="$f"; done
   say "Caddy is on :443: it keeps TLS, the agent sits behind it"
 elif ss -ltn 2>/dev/null | grep -qE '[:.]443 '; then
-  echo "Something other than Caddy already listens on :443; stop it, or put Caddy there." >&2; exit 1
+  die "Something other than Caddy already listens on :443 ($(ss -ltnp 2>/dev/null | grep -E '[:.]443 ' | grep -o 'users:(("[^"]*' | head -1 | cut -d'"' -f2)); stop it, or put Caddy there."
 else say "nothing on :443: the agent takes it"; fi
 GID="$(getent group caddy | cut -d: -f3 || true)"
+# ---- the firewall: visitors need 443 in (and 80 for nothing but redirects); this machine's SSH needs 22
+STEP="checking the firewall"
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw status | grep -qE '^(443|443/tcp|80,443/tcp|Nginx Full|WWW Full|Caddy)\\b.*ALLOW' || { say "ufw is on and doesn't allow 443: allowing it"; ufw allow 443/tcp >/dev/null; }
+fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --list-services 2>/dev/null | grep -qw https || firewall-cmd --list-ports 2>/dev/null | grep -qw 443/tcp || { say "firewalld doesn't allow 443: allowing it"; firewall-cmd -q --permanent --add-service=https && firewall-cmd -q --reload; }
+fi
 # ---- the agent
+STEP="installing the agent"
 mkdir -p /opt/aegis-relay /etc/aegis-relay/certs; chmod 750 /etc/aegis-relay /etc/aegis-relay/certs
 [ -n "$GID" ] && chgrp "$GID" /etc/aegis-relay /etc/aegis-relay/certs
 cat > /opt/aegis-relay/agent.mjs <<'AEGIS_RELAY_AGENT'
@@ -261,15 +309,21 @@ umask 077
   require("fs").writeFileSync("/etc/aegis-relay/config.json", JSON.stringify(c, null, 1));' ${q(JSON.stringify(cfg))} "$MODE" "$SITE" "$REPLACES" "$GID"
 umask 022
 # ---- the user only your Aegis can use, and only for its two forwards
+STEP="making the aegis-relay user"
 id aegis-relay >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/aegis-relay --shell /usr/sbin/nologin aegis-relay
 install -d -m 700 -o aegis-relay -g aegis-relay /var/lib/aegis-relay/.ssh
 printf '%s\\n' ${q(`restrict,port-forwarding,permitlisten="127.0.0.1:${remotePort}",permitopen="127.0.0.1:${controlPort}" ${pub}`)} > /var/lib/aegis-relay/.ssh/authorized_keys
 chown aegis-relay:aegis-relay /var/lib/aegis-relay/.ssh/authorized_keys; chmod 600 /var/lib/aegis-relay/.ssh/authorized_keys
 if sshd -T 2>/dev/null | grep -qiE '^allowtcpforwarding (no|local)$'; then
-  echo "sshd forbids remote port forwarding (AllowTcpForwarding); allow it for aegis-relay:" >&2
-  echo "  Match User aegis-relay" >&2; echo "    AllowTcpForwarding yes" >&2; exit 1
+  die "sshd forbids remote port forwarding (AllowTcpForwarding). Add this to /etc/ssh/sshd_config, run systemctl reload ssh, and paste the command again:
+      Match User aegis-relay
+        AllowTcpForwarding yes"
+fi
+if sshd -T 2>/dev/null | grep -qiE '^allowusers ' && ! sshd -T 2>/dev/null | grep -iE '^allowusers ' | grep -qw aegis-relay; then
+  die "sshd only lets some users in (AllowUsers). Add aegis-relay to that line in /etc/ssh/sshd_config, run systemctl reload ssh, and paste the command again."
 fi
 # ---- the service
+STEP="starting the agent"
 cat > /etc/systemd/system/aegis-relay-agent.service <<UNIT
 [Unit]
 Description=Aegis Relay agent: carries your tunnels to your Aegis, signed
@@ -287,13 +341,27 @@ UNIT
 systemctl daemon-reload
 systemctl enable aegis-relay-agent >/dev/null 2>&1
 systemctl restart aegis-relay-agent
-sleep 1; systemctl is-active --quiet aegis-relay-agent || { journalctl -u aegis-relay-agent -n 20 --no-pager >&2; exit 1; }
+sleep 2; systemctl is-active --quiet aegis-relay-agent || { journalctl -u aegis-relay-agent -n 20 --no-pager >&2; die "The agent didn't start (its log is above)."; }
 say "agent running ($MODE)"
-# ---- tell your Aegis (and give it this server's SSH host key to pin)
-HK="$(cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || cat /etc/ssh/ssh_host_ecdsa_key.pub)"
-"$NODE" -e 'console.log(JSON.stringify({ hostKey: process.argv[1], version: process.argv[2], mode: process.argv[3] }))' "$HK" ${q(AGENT_VERSION)} "$MODE" \\
-  | curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- ${q(`${base}/__gate/relay/register?t=${token}`)} >/dev/null
-say "registered with your Aegis: it connects within a minute"
-echo
+# ---- tell your Aegis (and give it this server's SSH host key to pin); it then
+# connects over SSH as aegis-relay and answers with whether that worked
+STEP="registering with your Aegis"
+HK="$(cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || cat /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null || true)"
+[ -n "$HK" ] || die "This server has no ed25519 or ECDSA SSH host key for your Aegis to pin."
+say "registering, and waiting for your Aegis to connect back (up to a minute)…"
+OUT="$("$NODE" -e 'console.log(JSON.stringify({ hostKey: process.argv[1], version: process.argv[2], mode: process.argv[3] }))' "$HK" ${q(AGENT_VERSION)} "$MODE" \\
+  | curl -sS --max-time 90 -w '\\n%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @- ${q(`${base}/__gate/relay/register?t=${token}`)} 2>&1)" || die "Couldn't reach your Aegis at ${base}: $OUT"
+CODE="$(printf '%s' "$OUT" | tail -n1)"; BODY="$(printf '%s' "$OUT" | sed '$d')"
+field() { printf '%s' "$BODY" | "$NODE" -e 'let b="";process.stdin.on("data",d=>b+=d).on("end",()=>{try{const v=JSON.parse(b)[process.argv[1]];console.log(v==null?"":String(v))}catch{console.log("")}})' "$1"; }
+[ "$CODE" = 200 ] || die "Your Aegis said no: $(field error || echo "HTTP $CODE")"
+if [ "$(field linked)" = "true" ]; then
+  trap - EXIT
+  echo; printf '  \\033[32m✓ Linked.\\033[0m Your Aegis reached this server over SSH and the agent answered.\\n'
+  say 'Back in Settings → Domain, "Move every tunnel to the VPS" is ready.'
+  echo
+else
+  STEP="checking the link"
+  die "Registered, but your Aegis couldn't connect back: $(field error). It keeps trying; Settings → Domain shows the same."
+fi
 `;
 }

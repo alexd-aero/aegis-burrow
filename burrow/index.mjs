@@ -64,7 +64,7 @@ export class Burrow {
     this.quick = new QuickTunnels({ bin: () => findCloudflared(settings.get("cloudflared"), home), origin, log: this.log, dataDir });
     this.tunnels = new TunnelManager({ dataDir, domain: settings.get("domain"), quick: this.quick, forbiddenPorts, log: this.log,
                                        naming: settings.get("tunnelNaming"), edge,
-                                       onNaming: ({ mode, prefix, certs, relay }) => settings.set({ tunnelNaming: { mode, prefix, certs, relay } }) });
+                                       onNaming: ({ mode, prefix, certs, relay, route }) => settings.set({ tunnelNaming: { mode, prefix, certs, relay, route } }) });
     if (!this.on) this.quick.stopAll();
     this.cloudflare = new Cloudflare({
       settings, dataDir, home, origin, log: this.log,

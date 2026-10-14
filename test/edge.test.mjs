@@ -117,11 +117,17 @@ test("ACME: account, order, DNS challenge, certificate; the TXT record is cleane
 
 test("naming: older installs move to this machine; a relay alone stays a relay when asked for", () => {
   assert.deepEqual(cleanNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" }, { saved: true }),
-    { mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7" }, "the old relay becomes the backup");
+    { mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "home" }, "the old relay becomes the backup");
   assert.equal(cleanNaming({ mode: "wildcard", prefix: "tunnel" }, { saved: true }).certs, "auto", "Cloudflare is asked once");
   assert.equal(cleanNaming({ mode: "wildcard", prefix: "" }, { saved: true }).certs, "cloudflare");
   assert.equal(cleanNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" }).certs, "relay", "an API call without certs means what it used to");
   assert.throws(() => cleanNaming({ mode: "wildcard", certs: "relay" }), /relay/);
+  // where visitors arrive while this machine holds the certificate
+  assert.equal(cleanNaming({ mode: "wildcard", certs: "self", relay: "203.0.113.7" }).route, "vps", "a VPS named: it's the way in");
+  assert.equal(cleanNaming({ mode: "wildcard", certs: "self" }).route, "home");
+  assert.equal(cleanNaming({ mode: "wildcard", certs: "self", relay: "203.0.113.7", route: "home" }).route, "home", "the VPS as the backup");
+  assert.equal(cleanNaming({ mode: "wildcard", certs: "worker", route: "vps" }).route, null);
+  assert.throws(() => cleanNaming({ mode: "wildcard", certs: "self", route: "vps" }), /VPS/);
 });
 
 // TunnelManager with a fake zone, and an edge whose certificate and checks are stubbed
@@ -155,7 +161,8 @@ test("this machine holds the certificate: the wildcard goes to the backup relay 
   const { tm, zone, e, setReachable } = selfManager();
   try {
     await tm.create({ port: 3000, sub: "radio" });
-    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7" });
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "home" }), (e) => e.code === "accept", "the port forward is agreed to first");
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "home", accept: true });
     assert.equal(info.certs, "self");
     assert.equal(info.edge.base, "tunnel.example.com");
     let w = zone.get("*.tunnel.example.com");
@@ -185,7 +192,7 @@ test("this machine without a backup: the record stays here, reachable or not", a
   const { tm, zone, e } = selfManager();
   try {
     await tm.create({ port: 3000 });
-    await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self" });
+    await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", accept: true });
     const w = zone.get("*.tunnel.example.com");
     assert.deepEqual([w.type, w.content], ["A", "198.51.100.20"]);
     assert.equal(tm.relayAsk("3000.tunnel.example.com"), false, "no relay, no questions");
@@ -194,6 +201,34 @@ test("this machine without a backup: the record stays here, reachable or not", a
     await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "t2", certs: "self" }), /No certificate for \*\.t2\.example\.com: rate limited/);
     assert.equal(tm.hostFor(3000), "3000.tunnel.example.com");
     assert.equal(e.base, "tunnel.example.com", "the edge is back on the old name");
+  } finally { tm.stop(); }
+});
+
+test("your VPS: the record is the VPS's, always; nothing at home is checked; nothing moves until the VPS is ready", async () => {
+  const { tm, zone, e, setReachable } = selfManager();
+  let probed = 0, mapped = 0, ready = false;
+  e.probe = async () => { probed++; return { ok: true }; };
+  e.mapPort = async () => { mapped++; };
+  tm.beforeVps = async (n) => { if (!ready) throw new Error(`Couldn't reach the agent on ${n.relay}: refused. Nothing was moved.`); };
+  try {
+    await tm.create({ port: 3000, sub: "radio" });
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "vps" }), (x) => x.code === "relay" && /Nothing was moved/.test(x.message));
+    assert.equal(zone.get("*.tunnel.example.com"), undefined, "no record yet");
+    assert.equal(tm.hostFor(3000), "radio.example.com", "still on the old way");
+    ready = true;
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "vps" });
+    assert.deepEqual([info.route, info.edge.route, info.edge.via], ["vps", "vps", "relay"]);
+    const w = zone.get("*.tunnel.example.com");
+    assert.deepEqual([w.type, w.content, w.proxied], ["A", "203.0.113.7", false]);
+    setReachable(true);
+    await e.tick(); await e.tick(); await settle();
+    assert.equal(zone.get("*.tunnel.example.com").content, "203.0.113.7", "home reachable or not, the VPS stays");
+    assert.equal(probed + mapped, 0, "home is never probed, the router never asked");
+    assert.equal(zone.get("edge-check-aegis.example.com"), undefined, "no check record pointing home");
+    // home again (agreed to): the VPS becomes the backup
+    await tm.setNaming({ mode: "wildcard", prefix: "tunnel", certs: "self", relay: "203.0.113.7", route: "home", accept: true });
+    await e.check(); await e.check(); await settle();
+    assert.equal(zone.get("*.tunnel.example.com").content, "198.51.100.20");
   } finally { tm.stop(); }
 });
 

@@ -11,48 +11,137 @@ const sec = (id, title, sub, body) => `<section class="card lit panel set" id="$
   <div class="set-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ""}</div>${body}</section>`;
 
 // ------------------------------------------------------------------ domain
-// How tunnels are named: a DNS record each, or one wildcard *.<prefix>.<zone>.
+// How tunnels are named: a DNS record each, or one wildcard *.<prefix>.<zone>,
+// and where visitors arrive for it ("where"): your VPS (Aegis Relay), this
+// machine (a port forward), a Cloudflare Worker, or Cloudflare's proxy.
+const whereOf = (n) => !n?.active ? "vps" : n.certs === "self" ? (n.route === "vps" ? "vps" : "home") : n.certs && n.certs !== "auto" ? n.certs : "vps";
 function namingDraft() {
   const n = S.naming || { mode: "record", prefix: "tunnel" };
-  const certs = n.certs && n.certs !== "auto" ? n.certs : "worker";
-  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel"), relay: S.nmDraft?.relay ?? (n.relay || ""),
-           certs: S.nmDraft?.certs ?? certs };
+  return { mode: S.nmDraft?.mode ?? n.mode, prefix: S.nmDraft?.prefix ?? (n.prefix ?? "tunnel"),
+           relay: S.nmDraft?.relay ?? (n.relay || S.relay?.vps?.host || ""), where: S.nmDraft?.where ?? whereOf(n), accept: !!S.nmDraft?.accept };
 }
+// the draft as the API takes it
+function namingBody(n) {
+  const self = n.where === "vps" || n.where === "home";
+  return { mode: n.mode, prefix: n.prefix, certs: self ? "self" : n.where, route: self ? n.where : undefined,
+           relay: n.where === "vps" || n.where === "home" || n.where === "relay" ? n.relay : "", accept: n.accept };
+}
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const day = (t) => new Date(t).toISOString().slice(0, 10);
+const hm = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const certPill = (e) => e.issuing ? '<span class="pill warn"><i class="spin"></i> asking Let\'s Encrypt…</span>'
+  : e.cert ? `<span class="pill ok"><i class="dot ok"></i>${h(e.cert.names[0] || "*." + e.base)} · Let's Encrypt${e.cert.staging ? " (staging)" : ""} · until ${h(day(e.cert.notAfter))}</span>`
+  : `<span class="pill err"><i class="dot err"></i>no certificate${e.error ? ": " + h(e.error) : ""}</span>`;
 // This machine's certificate and where the wildcard points right now.
 function edgeStatus(e, zone) {
   if (!e) return "";
-  const cert = e.issuing ? '<span class="pill warn"><i class="spin"></i> asking Let\'s Encrypt…</span>'
-    : e.cert ? `<span class="pill ok"><i class="dot ok"></i>${h(e.cert.names[0] || "*." + e.base)} · Let's Encrypt${e.cert.staging ? " (staging)" : ""} · until ${h(day(e.cert.notAfter))}</span>`
-    : `<span class="pill err"><i class="dot err"></i>no certificate${e.error ? ": " + h(e.error) : ""}</span>`;
+  if (e.route === "vps") {
+    const route = e.relayPass ? `<span class="pill ok"><i class="dot ok"></i>through your VPS ${h(e.target)} · on this machine's certificate</span>`
+      : `<span class="pill warn"><i class="dot warn"></i>your VPS ${h(e.target)} · not answering with this machine's certificate yet</span>`;
+    return `<div class="kv-row"><span>Certificate</span>${certPill(e)}</div><div class="kv-row"><span>Route</span>${route}</div>`;
+  }
   const route = e.via === "direct" && e.direct.ok ? `<span class="pill ok"><i class="dot ok"></i>straight to this machine · ${h(e.target)}</span>`
-    : e.via === "relay" && e.relayPass ? `<span class="pill ok"><i class="dot ok"></i>through the relay ${h(e.target)} · encrypted end to end, on this machine's certificate</span>`
+    : e.via === "relay" && e.relayPass ? `<span class="pill ok"><i class="dot ok"></i>through the backup VPS ${h(e.target)} · on this machine's certificate</span>`
     : e.via === "relay" ? `<span class="pill warn"><i class="dot warn"></i>through the backup relay · ${h(e.target)} · its own certificate</span>`
     : e.target ? `<span class="pill warn"><i class="dot warn"></i>this machine · ${h(e.target)} · not reachable yet</span>` : '<span class="pill">finding this machine\'s address…</span>';
-  const fix = e.direct.ok || e.relayPass ? ""
-    : e.cgnat ? `<p class="note-err small"><b>Your internet provider shares one public address among many customers</b> (CGNAT: your router's outside address is <span class="mono">${h(e.cgnat.router)}</span>, the internet sees <span class="mono">${h(e.cgnat.internet || "another")}</span>). Nothing from outside can reach this machine, whatever the router allows. Use <b>Cloudflare Worker</b> above, or a relay server of yours${e.relay ? ` (<span class="mono">${h(e.relay)}</span> serves the names meanwhile)` : ""}.</p>`
+  const fix = e.direct.ok ? ""
+    : e.cgnat ? `<p class="note-err small"><b>Your internet provider shares one public address among many customers</b> (CGNAT: your router's outside address is <span class="mono">${h(e.cgnat.router)}</span>, the internet sees <span class="mono">${h(e.cgnat.internet || "another")}</span>). Nothing from outside can reach this machine, whatever the router allows. Use <b>Your VPS</b> or <b>Cloudflare Worker</b> above${e.relay ? ` (<span class="mono">${h(e.relay)}</span> serves the names meanwhile)` : ""}.</p>`
     : `<p class="faint small">${e.direct.why ? `Checked through ${h(e.publicIp || "the public address")}: ${h(e.direct.why)}. ` : ""}`
     + `Forward TCP port <b>443</b> on your router to <span class="mono">${h(e.lan || "this machine")}:${h(e.port)}</span>`
     + (e.upnp?.note ? ` (Aegis asked over UPnP; ${h(e.upnp.note)})` : "")
     + `. The record moves here by itself within two minutes of it working${e.relay ? `; until then <span class="mono">${h(e.relay)}</span> serves the names` : ""}.`
     + ` Opening a tunnel from your own home network can fail even when it works from outside (many routers don't loop back): check from your phone on mobile data.</p>`;
-  return `<div class="kv-row"><span>Certificate</span>${cert}</div><div class="kv-row"><span>*.${h(e.base || zone)}</span>${route}</div>${fix}`;
+  return `<div class="kv-row"><span>Certificate</span>${certPill(e)}</div><div class="kv-row"><span>Route</span>${route}</div>${fix}`;
 }
-// Aegis Relay (burrow/relaylink.mjs): the agent on the relay server, and the signed link to it
-function relayBox(ip) {
-  const r = S.relay;
-  if (!r) return "";
-  const st = r.link?.state, mine = r.configured && r.vps?.host === ip;
-  const pill = !mine ? '<span class="pill warn"><i class="dot warn"></i>no agent: anything on that server could reach the gate</span>'
-    : st === "up" ? `<span class="pill ok"><i class="dot ok"></i>linked · every request signed · agent ${h(r.agent?.version || "")}${r.agent?.cert ? ` · certificate until ${h(day(r.agent.cert.notAfter))}` : ""}</span>`
-    : st === "connecting" ? '<span class="pill warn"><i class="spin"></i> connecting…</span>'
-    : st === "down" ? `<span class="pill err"><i class="dot err"></i>link down: ${h(r.link.error || "")}</span>`
-    : `<span class="pill"><i class="dot"></i>agent installed · idle (the relay isn't in use)</span>`;
-  const cmd = r.setup && r.setup.host === ip ? `<div class="relay-cmd"><p class="faint small" style="margin:8px 0 6px">On <span class="mono">${h(ip)}</span>, as root (this link works once, for 30 minutes):</p>
-      <div class="row"><input class="input mono" readonly value="${h(r.setup.command)}" style="flex:1"><button type="button" class="btn sm" data-act="relay-copy">Copy</button></div></div>` : "";
-  return `<div class="kv-row"><span>Relay agent</span>${pill}</div>
-    <p class="faint small">The agent on <span class="mono">${h(ip)}</span> signs every request with a key only it and this Aegis hold; the link is a locked-down SSH user that can open two ports and nothing else, and it runs only while the tunnels go through the relay.</p>
-    ${cmd}<div class="row end" style="gap:8px">${mine ? `<button type="button" class="btn ghost sm" data-act="relay-forget">Forget the agent</button>` : ""}<button type="button" class="btn sm${mine ? "" : " primary"}" data-act="relay-setup" data-host="${h(ip)}">${mine ? "Reinstall the agent" : "Set up the relay agent"}</button></div>`;
+
+// ---- Your VPS: one pasted command links it (burrow/relaylink.mjs)
+function vpsLinked(host) { const r = S.relay; return !!(r?.configured && r.vps?.host === host); }
+// the install command shown has been run (the VPS registered after it was made)
+const setupDone = (r) => !!(r?.setup && r.configured && r.vps?.host === r.setup.host && r.installed?.at > r.setup.created);
+function vpsPanel(n) {
+  const r = S.relay || {}, host = n.relay, linked = vpsLinked(host);
+  const setup = r.setup && r.setup.host === host && !setupDone(r) ? r.setup : null;
+  const st = r.link?.state, chk = r.checked;
+  let status = "";
+  if (linked) {
+    status = st === "up" ? `<span class="pill ok"><i class="dot ok"></i>linked · every request signed · agent ${h(r.agent?.version || "")}${r.agent?.cert ? ` · certificate until ${h(day(r.agent.cert.notAfter))}` : ""}</span>`
+      : st === "connecting" || S.vpsChecking ? '<span class="pill warn"><i class="spin"></i> connecting to it…</span>'
+      : chk && !chk.ok ? `<span class="pill err"><i class="dot err"></i>can't reach it</span>`
+      : st === "down" ? `<span class="pill err"><i class="dot err"></i>link down</span>`
+      : chk?.ok ? `<span class="pill ok"><i class="dot ok"></i>linked and checked ${h(hm(chk.at))} · idle until the tunnels move there</span>`
+      : '<span class="pill"><i class="dot"></i>agent installed · not checked yet</span>';
+  }
+  const err = linked && st !== "up" && !S.vpsChecking ? (chk && !chk.ok ? chk.error : st === "down" ? r.link.error : null) : null;
+  const step1 = `<label class="field" style="margin-top:12px"><span>Your VPS <span class="faint">(its public IPv4 address)</span></span>
+      <div class="row vps-row"><input class="input mono" id="nmRelay" value="${h(host)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="203.0.113.7">
+      ${linked && !setup ? "" : `<button type="button" class="btn${setup ? "" : " primary"}" data-act="relay-setup" ${IPV4.test(host) ? "" : "disabled"}>${setup ? "New command" : "Get the install command"}</button>`}</div></label>`;
+  const cmd = setup ? `<div class="vps-cmd">
+      <p class="small"><b>Paste this in your VPS's terminal</b> (as root, or a user with sudo):</p>
+      <div class="row vps-row"><input class="input mono" readonly value="${h(setup.command)}" id="vpsCmd"><button type="button" class="btn" data-act="relay-copy">Copy</button></div>
+      <p class="faint small"><i class="spin"></i> Waiting for ${h(host)} to finish… This page notices by itself. The command works once, until ${h(hm(setup.expires))}.</p>
+    </div>` : "";
+  const state = linked ? `<div class="kv-row"><span>VPS</span>${status}</div>
+      ${err ? `<p class="note-err small">${h(err)}</p>` : ""}
+      <div class="row end" style="gap:8px;margin-top:8px"><button type="button" class="btn ghost sm" data-act="relay-forget">Forget it</button>
+        <button type="button" class="btn ghost sm" data-act="relay-setup">Reinstall</button>
+        <button type="button" class="btn sm" data-act="relay-check" ${S.vpsChecking ? "disabled" : ""}>Check the link</button></div>` : "";
+  return `${step1}${cmd}${state}
+    <details class="adv" style="margin-top:10px"><summary>What the command does, and what the VPS needs</summary>
+      <p class="faint small">Any Linux server with systemd, a public IPv4 address and root: port 443 free (or already served by Caddy, which it shares) and SSH on port 22. The command installs Node.js if needed, a small agent, and a user, <span class="mono">aegis-relay</span>, that only this Aegis's key can use, for two port forwards and nothing else. It opens 443 in ufw or firewalld if they block it, checks sshd allows the forward, and stops with the reason if anything is off. Then this Aegis connects to it over SSH (post-quantum where the server has it) to prove the link works.</p>
+      <p class="faint small">Visitors arrive at the VPS, which holds a copy of this machine's certificate; every request it passes here is signed with a key only the two of them hold, so nothing else on that server can reach this Aegis. Your home address is never in DNS and nothing opens on your router.</p>
+    </details>`;
+}
+// ---- This machine: the user forwards 443 themselves, knowing what it means
+function homePanel(n, cur) {
+  const e = cur.edge, wasHome = cur.active && cur.certs === "self" && cur.route === "home";
+  const backup = vpsLinked(n.relay) || n.relay;
+  return `<div class="note-box warn-box">
+      <p><b>Not recommended.</b> Visitors connect straight to your home. You forward TCP port <b>443</b> on your router to <span class="mono">${h(e?.lan || "this machine")}:${h(e?.port || 18443)}</span> yourself; Aegis never changes your router.</p>
+      <ul class="small">
+        <li>Your home's public IP address goes into public DNS. Scanners that watch new certificates find it within minutes and probe it around the clock.</li>
+        <li>Abuse lists, and some internet providers, can flag your home connection over that traffic.</li>
+        <li>It can't work if your provider shares addresses (CGNAT), and from inside your own network it may fail even when it works outside.</li>
+      </ul>
+      ${wasHome ? "" : `<label class="check"><input type="checkbox" id="nmAccept" ${n.accept ? "checked" : ""}> I'll forward port 443 myself, and I accept the above</label>`}
+    </div>
+    <label class="field" style="margin-top:12px"><span>Backup VPS <span class="faint">(optional: its IP; it takes over while this machine can't be reached)</span></span>
+      <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="none"></label>
+    ${backup && !vpsLinked(n.relay) && n.relay ? `<p class="faint small">Link it under <b>Your VPS</b> first, so the backup carries the names signed and on this machine's certificate.</p>` : ""}`;
+}
+// ---- Cloudflare Worker: today's requests against the free plan's daily limit
+function workerMeter(t) {
+  if (!t) return "";
+  const pct = Math.min(100, (t.n / t.limit) * 100), left = Math.max(0, t.reset - Date.now());
+  const cls = pct >= 90 ? "err" : pct >= 70 ? "warn" : "ok";
+  return `<div class="wk-meter" id="wkMeter">
+      <div class="row" style="justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <span class="small"><span class="livedot"></span>Requests through the Worker today</span>
+        <span class="mono"><b id="wkN">${t.n.toLocaleString()}</b> <span class="faint">/ ${t.limit.toLocaleString()}</span></span></div>
+      <div class="bar ${cls}"><i id="wkBar" style="width:${pct.toFixed(2)}%"></i></div>
+      <p class="faint small" id="wkReset">Resets at 00:00 UTC (in ${Math.floor(left / 3600e3)} h ${Math.floor((left % 3600e3) / 60e3)} min). Counted here as the Worker hands requests over; your other Workers on the same Cloudflare account count toward the same limit.</p>
+    </div>`;
+}
+function startWorkerPoll() {
+  clearInterval(S.wkPoll); S.wkPoll = null;
+  if (!(S.naming?.active && S.naming.certs === "worker")) return;
+  S.wkPoll = setInterval(async () => {
+    if (document.hidden || !$("#wkMeter")) return;
+    try {
+      const j = await api("/__gate/api/tunnels/naming");
+      const t = j.front?.today; if (!t) return;
+      S.naming = j;
+      $("#wkN").textContent = t.n.toLocaleString();
+      const pct = Math.min(100, (t.n / t.limit) * 100), bar = $("#wkBar");
+      bar.style.width = pct.toFixed(2) + "%";
+      bar.parentElement.className = `bar ${pct >= 90 ? "err" : pct >= 70 ? "warn" : "ok"}`;
+    } catch { /* next tick */ }
+  }, 2500);
+}
+// ---- the relay's status when the tunnels went through an older hand-made relay (certs "relay")
+function legacyRelayNote(n) {
+  return `<label class="field" style="margin-top:12px"><span>Relay server (its IP)</span>
+      <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="203.0.113.7"></label>
+    <p class="faint small">An older setup: Caddy with on-demand TLS on a server of yours, set up by hand. <b>Your VPS</b> does the same with one pasted command, signed, on this machine's certificate.</p>`;
 }
 function namingSummary(d) {
   const n = S.naming;
@@ -111,17 +200,32 @@ async function followFrontLogin() {
   S.frontPoll = setTimeout(followFrontLogin, 2000);
 }
 function namingHost(n, zone) { return `radio.${n.prefix ? n.prefix + "." : ""}${zone}`; }
+const ROUTES = [
+  { v: "vps", name: "Your VPS", tag: "Recommended", cls: "ok", sub: "Paste one command on a server of yours. Nothing opens at home." },
+  { v: "home", name: "This machine", tag: "Not recommended", cls: "warn", sub: "You forward port 443 on your router. Your home IP goes public." },
+  { v: "worker", name: "Cloudflare Worker", tag: "Free · 100k requests a day", cls: "", sub: "No server, nothing open at home. Cloudflare's daily limit applies." },
+  { v: "cloudflare", name: "Cloudflare proxy", tag: "Paid certificate", cls: "", sub: "Cloudflare's edge; two-level names need Advanced Certificate Manager." },
+];
 function namingForm(d) {
   if (!S.naming) return "";
-  const n = namingDraft(), cur = S.naming;
-  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || n.relay !== (cur.relay || "") || n.certs !== cur.certs || !cur.active));
+  const n = namingDraft(), cur = S.naming, w = n.where;
+  const relayMatters = w === "vps" || w === "home" || w === "relay";
+  const changed = n.mode !== cur.mode || (n.mode === "wildcard" && (n.prefix !== cur.prefix || w !== whereOf(cur) || !cur.active || (relayMatters && n.relay !== (cur.relay || ""))));
   const wild = `*.${n.prefix ? n.prefix + "." : ""}${d.zone}`;
-  const certHelp = {
-    worker: `Each tunnel name becomes a Custom Domain of one small Cloudflare Worker, which comes with a free certificate for exactly that name, and the Worker hands requests here through this dashboard's Cloudflare tunnel. Nothing is opened at home and your address is never in DNS. A new name takes a few minutes to get its certificate.`,
-    self: `This machine gets a free Let's Encrypt certificate for <span class="mono">${h(wild)}</span> (checked through your Cloudflare DNS, renewed by itself) and serves the tunnels with it; <span class="mono">${h(wild)}</span> points straight here. No relay and no Cloudflare proxy sees the traffic.`,
-    relay: `<span class="mono">${h(wild)}</span> points at the relay. Caddy there fetches a free certificate for each tunnel name the first time it's opened, asking this gate first (<span class="mono">/__gate/relay-ask</span>), and passes requests here over a reverse SSH tunnel. The relay sees the traffic.`,
+  const help = {
+    vps: `<span class="mono">${h(wild)}</span> points at your VPS. This machine keeps a free Let's Encrypt certificate for it (checked through your Cloudflare DNS, renewed by itself) and gives the VPS a copy; the VPS hands every request here over SSH, signed.`,
+    home: `This machine gets a free Let's Encrypt certificate for <span class="mono">${h(wild)}</span> and serves the tunnels with it; <span class="mono">${h(wild)}</span> points straight at your home address.`,
+    worker: `Each tunnel name becomes a Custom Domain of one small Cloudflare Worker, which comes with a free certificate for exactly that name, and the Worker hands requests here through this dashboard's Cloudflare tunnel. Nothing is opened at home and your address is never in DNS. A new name takes a few minutes to get its certificate.
+      <br><b>Daily limit:</b> Cloudflare's free plan allows <b>100,000 Worker requests a day</b> for the whole account (all your Workers together). Past it, visitors get Cloudflare's error page until 00:00 UTC. A page with many images or a live app can use hundreds of requests per visit.`,
+    relay: `<span class="mono">${h(wild)}</span> points at the relay. Caddy there fetches a free certificate for each tunnel name the first time it's opened, asking this gate first, and passes requests here over a reverse SSH tunnel. The relay sees the traffic.`,
     cloudflare: n.prefix ? `Through Cloudflare's proxy, which needs a certificate for <span class="mono">${h(wild)}</span> (Advanced Certificate Manager, paid); Aegis checks before it switches.` : `Through Cloudflare's proxy: its free certificate covers <span class="mono">${h(wild)}</span>. Names you already use on ${h(d.zone)} (mail, www…) keep their own records, which win over the wildcard.`,
-  }[n.certs];
+  }[w];
+  const routes = [...ROUTES, ...(w === "relay" || whereOf(cur) === "relay" ? [{ v: "relay", name: "Relay (older)", tag: "Set up by hand", cls: "", sub: "Caddy with on-demand TLS on a server of yours." }] : [])];
+  const isCur = (v) => cur.active && whereOf(cur) === v;
+  const blocked = w === "vps" && !vpsLinked(n.relay) ? "Link your VPS first: run the install command on it."
+    : w === "home" && !(isCur("home")) && !n.accept ? "Confirm the port forward above first." : "";
+  const saveLabel = n.mode === "wildcard" && w === "worker" && !cur.front?.linked ? "Connect Cloudflare &amp; move every tunnel"
+    : n.mode === "wildcard" && w === "vps" ? "Move every tunnel to the VPS" : n.mode === "wildcard" && w === "home" ? "Move every tunnel to this machine" : "Move every tunnel";
   return `<div class="naming">
       <div class="row flexwrap" style="gap:12px;align-items:center">
         <b class="small">Tunnel addresses</b>
@@ -130,20 +234,19 @@ function namingForm(d) {
       ${n.mode === "wildcard" ? `<label class="field" style="margin-top:12px"><span>Wildcard</span>
           <div class="addr"><span class="mono zone">*.</span><input class="input mono" id="nmPrefix" value="${h(n.prefix)}" maxlength="60" spellcheck="false" autocapitalize="none" placeholder="(none)"><span class="mono zone">.${h(d.zone)}</span></div></label>
         <p class="faint small">Every tunnel is <span class="mono">NAME.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>: its own name, or its port (<span class="mono">${h(namingHost(n, d.zone))}</span>, <span class="mono">3000.${h(n.prefix ? n.prefix + "." : "")}${h(d.zone)}</span>). No DNS record is added per tunnel, so new tunnels answer at once.</p>
-        <div class="row flexwrap" style="gap:12px;align-items:center;margin-top:12px">
-          <b class="small">Certificate</b>
-          <div class="seg" id="nmCerts"><button type="button" data-v="worker" class="${n.certs === "worker" ? "on" : ""}">Cloudflare Worker</button><button type="button" data-v="self" class="${n.certs === "self" ? "on" : ""}">This machine</button><button type="button" data-v="relay" class="${n.certs === "relay" ? "on" : ""}">A relay server</button><button type="button" data-v="cloudflare" class="${n.certs === "cloudflare" ? "on" : ""}">Cloudflare</button></div>
-        </div>
-        <p class="faint small">${certHelp}</p>
-        ${cur.active && cur.certs === "self" && n.certs === "self" ? edgeStatus(cur.edge, d.zone) : ""}
-        ${n.certs === "worker" ? frontForm(cur.front) : ""}
-        ${(n.certs === "self" || n.certs === "relay") && cur.relay && n.relay === cur.relay ? relayBox(cur.relay) : ""}
-        ${n.certs !== "cloudflare" && n.certs !== "worker" ? `<label class="field" style="margin-top:12px"><span>${n.certs === "self" ? 'Backup relay <span class="faint">(optional: its IP)</span>' : "Relay server (its IP)"}</span>
-          <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="${n.certs === "self" ? "none" : "203.0.113.7"}"></label>
-        <p class="faint small">${n.certs === "self" ? "A server of yours running Caddy with on-demand TLS that takes over while this machine isn't reachable on port 443, and hands the names back once it is." : "A server of yours running Caddy with on-demand TLS."}</p>` : ""}`
+        <b class="small" style="display:block;margin-top:14px">Where visitors arrive</b>
+        <div class="routes" id="nmCerts" role="radiogroup">${routes.map((r) => `<button type="button" role="radio" aria-checked="${w === r.v}" data-v="${r.v}" class="route${w === r.v ? " on" : ""}">
+            <span class="route-top"><b>${r.name}</b>${isCur(r.v) ? '<span class="tag cur">in use</span>' : ""}</span>
+            <span class="tag ${r.cls}">${r.tag}</span><small>${r.sub}</small></button>`).join("")}</div>
+        <p class="faint small">${help}</p>
+        ${cur.active && cur.certs === "self" && isCur(w) ? edgeStatus(cur.edge, d.zone) : ""}
+        ${w === "vps" ? vpsPanel(n) : ""}
+        ${w === "home" ? homePanel(n, cur) : ""}
+        ${w === "worker" ? frontForm(cur.front) + (isCur("worker") ? workerMeter(cur.front?.today) : "") : ""}
+        ${w === "relay" ? legacyRelayNote(n) : ""}`
       : `<p class="faint small" style="margin-top:10px">Each tunnel gets a DNS record of its own when it's made (<span class="mono">tunnel-3000-${h(d.mainHost)}</span>), so a brand-new name can take a minute to answer everywhere.</p>`}
       <div class="err-msg" id="nmErr">${h(S.nmErr || "")}</div>
-      ${changed ? `<div class="row end"><button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save">${n.mode === "wildcard" && n.certs === "worker" && !cur.front?.linked ? "Connect Cloudflare &amp; move every tunnel" : "Move every tunnel"}</button></div>` : ""}
+      ${changed ? `<div class="row end" style="gap:8px;align-items:center">${blocked && n.mode === "wildcard" ? `<span class="faint small">${h(blocked)}</span>` : ""}<button type="button" class="btn ghost" data-act="naming-cancel">Cancel</button><button type="button" class="btn primary" data-act="naming-save" ${blocked && n.mode === "wildcard" ? "disabled" : ""}>${saveLabel}</button></div>` : ""}
     </div>`;
 }
 
@@ -562,8 +665,9 @@ function wireForms() {
   $("#nmCerts")?.addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-v]");
     if (!btn) return;
-    S.nmDraft = { ...namingDraft(), certs: btn.dataset.v }; S.nmErr = ""; render();
+    S.nmDraft = { ...namingDraft(), where: btn.dataset.v }; S.nmErr = ""; render();
   });
+  $("#nmAccept")?.addEventListener("change", (e) => { S.nmDraft = { ...namingDraft(), accept: e.target.checked }; S.nmErr = ""; render(); });
   const np = $("#nmPrefix");
   if (np) {
     np.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), prefix: np.value.trim().toLowerCase().replace(/^\*?\.|\.$/g, "") }; });
@@ -572,7 +676,11 @@ function wireForms() {
   }
   const nr = $("#nmRelay");
   if (nr) {
-    nr.addEventListener("input", () => { S.nmDraft = { ...namingDraft(), relay: nr.value.trim() }; });
+    nr.addEventListener("input", () => {
+      S.nmDraft = { ...namingDraft(), relay: nr.value.trim() };
+      const b = document.querySelector('[data-act="relay-setup"]');
+      if (b && !vpsLinked(nr.value.trim())) b.disabled = !IPV4.test(nr.value.trim());
+    });
     nr.addEventListener("change", () => { nr.blur(); render(); });
     nr.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nr.blur(); render(); } });
   }
@@ -672,8 +780,13 @@ async function load() {
     loadLog(S.log);
   } catch (e) { toast(e.message); }
   render();
+  startWorkerPoll();
   clearTimeout(S.poll);
-  const waiting = (S.cf?.login && S.cf.login.waiting) || (S.termix?.job && S.termix.job.state === "running");
+  const vpsWaiting = S.relay?.setup && !setupDone(S.relay) && Date.now() < S.relay.setup.expires;
+  if (setupDone(S.relay)) {
+    toast(S.relay.checked?.ok ? `${S.relay.vps.host} is linked` : `${S.relay.vps.host} registered, but the link check failed`); S.relay.setup = null; render();
+  }
+  const waiting = (S.cf?.login && S.cf.login.waiting) || (S.termix?.job && S.termix.job.state === "running") || vpsWaiting;
   S.poll = setTimeout(load, waiting ? 2000 : 8000);
 }
 
@@ -734,18 +847,42 @@ document.addEventListener("click", async (e) => {
     }
     else if (act === "naming-cancel") { S.nmDraft = null; S.nmErr = ""; render(); }
     else if (act === "relay-setup") {
-      const r = await api("/__gate/api/relay/setup", { method: "POST", body: JSON.stringify({ host: el.dataset.host }) });
-      S.relay = { ...(S.relay || {}), setup: r }; render();
+      const n = namingDraft();
+      if (!IPV4.test(n.relay)) { S.nmErr = "Type your VPS's public IPv4 address first, like 203.0.113.7."; render(); return; }
+      if (vpsLinked(n.relay) && !confirm(`Reinstall the agent on ${n.relay}? The link stays as it is until the new install registers.`)) return;
+      el.disabled = true;
+      try {
+        const r = await api("/__gate/api/relay/setup", { method: "POST", body: JSON.stringify({ host: n.relay, prefix: n.prefix }) });
+        S.relay = { ...(S.relay || {}), setup: { ...r, created: Date.now() } }; S.nmErr = "";
+      } catch (ex) { S.nmErr = ex.message; }
+      render(); clearTimeout(S.poll); S.poll = setTimeout(load, 2500);
     }
-    else if (act === "relay-copy") { await navigator.clipboard.writeText(S.relay?.setup?.command || ""); toast("Copied: run it on the relay server"); }
-    else if (act === "relay-forget") { S.relay = { ...(await api("/__gate/api/relay/forget", { method: "POST", body: "{}" })), setup: null }; toast("The agent is forgotten (uninstall it on the server too)"); render(); }
+    else if (act === "relay-copy") {
+      const v = S.relay?.setup?.command || "";
+      try { await navigator.clipboard.writeText(v); toast("Copied: paste it in your VPS's terminal"); }
+      catch { const i = $("#vpsCmd"); i?.select(); toast("Select-all is on: copy it with Ctrl+C"); }
+    }
+    else if (act === "relay-check") {
+      S.vpsChecking = true; render();
+      try { S.relay = { ...(await api("/__gate/api/relay/check", { method: "POST", body: "{}" })), setup: S.relay?.setup }; toast(S.relay.checked?.ok ? "The VPS answers through the link" : "Couldn't reach the VPS"); }
+      catch (ex) { toast(ex.message); }
+      S.vpsChecking = false; render();
+    }
+    else if (act === "relay-forget") {
+      if (S.naming?.active && S.naming.certs === "self" && S.naming.route === "vps") { toast("The tunnels go through this VPS: move them elsewhere first"); return; }
+      if (!confirm("Forget this VPS? This Aegis stops trusting it. (To remove the agent there too: systemctl disable --now aegis-relay-agent; userdel -r aegis-relay)")) return;
+      S.relay = { ...(await api("/__gate/api/relay/forget", { method: "POST", body: "{}" })), setup: null }; toast("Forgotten"); render();
+    }
     else if (act === "naming-save") {
-      const n = namingDraft(), zone = S.cf.domain.zone;
-      if (n.certs === "cloudflare" || n.certs === "worker") n.relay = "";
-      const where = n.mode === "wildcard" ? `NAME.${n.prefix ? n.prefix + "." : ""}${zone} through one wildcard record` : `tunnel-PORT-${S.cf.domain.mainHost} with a DNS record each`;
-      if (!confirm(`Move every tunnel to ${where}? Their current addresses stop working.`)) return;
+      const d = namingDraft(), n = namingBody(d), zone = S.cf.domain.zone;
+      const names = `NAME.${n.prefix ? n.prefix + "." : ""}${zone}`;
+      const where = n.mode !== "wildcard" ? `tunnel-PORT-${S.cf.domain.mainHost} with a DNS record each`
+        : d.where === "vps" ? `${names}, through your VPS ${d.relay}` : d.where === "home" ? `${names}, straight to this machine` : `${names} through one wildcard record`;
+      const sameNames = S.naming.active && n.mode === "wildcard" && n.prefix === S.naming.prefix;
+      if (!confirm(sameNames ? `Move every tunnel to ${where}? Their addresses stay the same; for a few seconds while DNS updates, some visitors may not get through.` : `Move every tunnel to ${where}? Their current addresses stop working.`)) return;
       if (n.mode === "wildcard" && n.certs === "worker" && !S.naming.front?.linked) { S.nmErr = ""; return frontConnect(n); }
-      el.disabled = true; el.innerHTML = n.mode === "wildcard" && (n.certs === "self" || n.certs === "worker") ? '<i class="spin"></i> Setting up the certificates…' : '<i class="spin"></i> Moving…'; S.busy = true;
+      el.disabled = true; el.innerHTML = n.mode === "wildcard" && d.where === "vps" ? '<i class="spin"></i> Linking the VPS and handing it the certificate…'
+        : n.mode === "wildcard" && (n.certs === "self" || n.certs === "worker") ? '<i class="spin"></i> Setting up the certificates…' : '<i class="spin"></i> Moving…'; S.busy = true;
       try {
         const j = await api("/__gate/api/tunnels/naming", { method: "PUT", body: JSON.stringify(n) });
         S.naming = j; S.nmDraft = null; S.nmErr = "";
