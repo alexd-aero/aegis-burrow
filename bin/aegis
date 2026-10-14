@@ -287,7 +287,7 @@ copy_app() {
   rm -rf "$APP.new"
   mkdir -p "$APP.new"
   cp -a "$SRC_DIR/aegis" "$SRC_DIR/burrow" "$SRC_DIR/public" "$SRC_DIR/bin" "$SRC_DIR/package.json" "$APP.new/"
-  for f in README.md LICENSE logo.svg forge-addon.json forge; do [ -e "$SRC_DIR/$f" ] && cp -a "$SRC_DIR/$f" "$APP.new/"; done
+  for f in README.md LICENSE logo.svg forge-addon.json forge relay; do [ -e "$SRC_DIR/$f" ] && cp -a "$SRC_DIR/$f" "$APP.new/"; done
   rm -rf "$APP.old"; [ -d "$APP" ] && mv "$APP" "$APP.old"
   mv "$APP.new" "$APP"; rm -rf "$APP.old"
 }
