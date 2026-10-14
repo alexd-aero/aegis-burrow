@@ -153,6 +153,60 @@ test("agent 1.1: more zones, each with its own certificate and Caddy site; a sig
   } finally { agent.close(); gate.close(); }
 });
 
+test("agent 1.2: public tunnels are checked on the VPS first; the gate mirrors who may pass, in full and then what changed", async () => {
+  const key = randomBytes(32), dir = tmp();
+  const scans = [];
+  let reached = 0;
+  const gate = createServer((req, res) => {
+    if (req.url === "/__aegis-relay/scan") { scans.push([req.headers["x-aegis-relay-ip"], verify(key, req.headers["x-aegis-relay"], { host: "scan", ip: req.headers["x-aegis-relay-ip"], method: "POST", url: req.url })]); res.writeHead(204); return res.end(); }
+    reached++; res.end("app");
+  });
+  const up = await listen(gate), ctl = await free(), hp = await free();
+  const cfg = { key: key.toString("base64url"), suffix: ".tunnel.example.com", upstreamPort: up, controlPort: ctl, httpPort: hp, mode: "caddy",
+                certDir: join(dir, "certs"), caddySite: join(dir, "caddy", "aegis-relay.caddy"), reload: false };
+  let agent = startAgent(cfg, { log: () => {} });
+  await new Promise((r) => setTimeout(r, 100));
+  // the gate's side of the link, pointed straight at the agent's control port
+  const link = new RelayLink({ dataDir: tmp(), log: () => {} });
+  link.state = { ...link.state, key: key.toString("base64url"), vps: { host: "203.0.113.7", port: 22 }, installed: { at: 1 } };
+  link.localCtl = ctl; link.link = { state: "up" };
+  link.agent = await link.control("GET", "/status");
+  assert.ok(link.can("edge"));
+  const visit = (host, ip, headers = {}) => get(hp, "/", { host, "x-aegis-client": ip, accept: "text/html", ...headers });
+  try {
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.1")).status, 200, "nothing mirrored yet: on to the gate (which checks too)");
+    await link.syncEdge({ on: true, hosts: ["radio.tunnel.example.com"], cleared: ["198.51.100.2"], banned: ["198.51.100.66"] });
+    reached = 0;
+    let r = await visit("radio.tunnel.example.com", "198.51.100.1");
+    assert.equal(r.status, 403); assert.match(r.body, /Checking your connection/); assert.match(r.body, /http-equiv="refresh"/);
+    await visit("radio.tunnel.example.com", "198.51.100.1");
+    await new Promise((res) => setTimeout(res, 100));
+    assert.deepEqual(scans, [["198.51.100.1", true]], "one signed scan request home, not one per visit");
+    assert.equal(reached, 0, "the visitor's requests never reached the gate");
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.2")).status, 200, "cleared: through");
+    assert.equal((await visit("private.tunnel.example.com", "198.51.100.1")).status, 200, "a login tunnel: its login does the job");
+    r = await visit("private.tunnel.example.com", "198.51.100.66");
+    assert.equal(r.status, 403); assert.match(r.body, /Access blocked/);
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.9", { cookie: "__Host-aegis-dev=x" })).status, 200, "a device key goes home to be checked");
+    // the scan came back clean: only that is sent
+    const before = link.edgeSent.epoch;
+    await link.syncEdge({ on: true, hosts: ["radio.tunnel.example.com"], cleared: ["198.51.100.2", "198.51.100.1"], banned: [] });
+    assert.equal(link.edgeSent.epoch, before, "a change, not the whole list");
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.1")).status, 200);
+    assert.equal((await visit("private.tunnel.example.com", "198.51.100.66")).status, 200, "unbanned");
+    assert.deepEqual(await link.syncEdge({ on: true, hosts: ["radio.tunnel.example.com"], cleared: ["198.51.100.2", "198.51.100.1"], banned: [] }), { same: true });
+    // the agent restarted (an update): it says so, and gets everything again
+    agent.close(); await new Promise((res) => setTimeout(res, 50));
+    agent = startAgent(cfg, { log: () => {} }); await new Promise((res) => setTimeout(res, 100));
+    await link.syncEdge({ on: true, hosts: ["radio.tunnel.example.com"], cleared: ["198.51.100.2", "198.51.100.1", "198.51.100.3"], banned: [] });
+    assert.notEqual(link.edgeSent.epoch, before, "in full again");
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.1")).status, 200);
+    assert.equal((await visit("radio.tunnel.example.com", "198.51.100.4")).status, 403);
+    const st = await link.control("GET", "/status");
+    assert.equal(st.edge.cleared, 3); assert.ok(st.stats.edgeChecks >= 1);
+  } finally { agent.close(); gate.close(); }
+});
+
 test("setup: a one-time link, a script that locks the user down, registration pins the host key", () => {
   const link = new RelayLink({ dataDir: tmp(), log: () => {} });
   assert.throws(() => link.setup({ host: "not a host" }), /IP address or host name/);

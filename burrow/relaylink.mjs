@@ -21,6 +21,11 @@
 //   the cert   this machine's Let's Encrypt wildcard is pushed to the agent
 //              (signed the same way) when the link comes up and when it renews;
 //              so is each other domain's (domains.mjs, route "vps"), with its suffix.
+//   the edge   public tunnels are checked on the VPS first (agent 1.2+): which
+//              names are public and which addresses may pass (a scan cleared
+//              them, or they're yours) or not (banned) is mirrored there, in
+//              full once and then what changed; someone new gets a "checking"
+//              page there while the agent asks this machine to scan them
 //   updates    an agent older than this Aegis's (relay/agent.mjs) is sent the
 //              new one over the link (1.1 and later take it by themselves; 1.0
 //              needs the install command once more).
@@ -34,9 +39,9 @@ import { hostname } from "node:os";
 import { isIP } from "node:net";
 import { randomBytes, X509Certificate } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { sign, verify, VERSION as AGENT_VERSION } from "../relay/agent.mjs";
+import { sign, verify, visitorPage, VERSION as AGENT_VERSION } from "../relay/agent.mjs";
 
-export { sign, verify, AGENT_VERSION };
+export { sign, verify, visitorPage, AGENT_VERSION };
 const newer = (a, b) => { const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
 const AGENT_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "relay", "agent.mjs");
 const TOKEN_MS = 30 * 60e3;
@@ -226,6 +231,31 @@ export class RelayLink {
     const r = await this.control("POST", "/zones/remove", { suffix });
     if (this.agent?.zones) this.agent.zones = this.agent.zones.filter((z) => z.suffix !== suffix);
     return r;
+  }
+  // who may pass, to the agent: {on, hosts, cleared, banned}; only what changed when it can
+  async syncEdge(want) {
+    if (this.link.state !== "up" || !this.can("edge")) return null;
+    const S = this.edgeSent, agentEpoch = this.agent?.edge?.epoch;
+    const full = async () => {
+      const epoch = randomBytes(6).toString("base64url");
+      const r = await this.control("POST", "/edge", { full: true, epoch, ...want });
+      this.edgeSent = { epoch, on: want.on, hosts: want.hosts.join(","), cleared: new Set(want.cleared), banned: new Set(want.banned) };
+      this.agent = { ...(this.agent || {}), edge: { ...r } };
+      return r;
+    };
+    if (!S || !agentEpoch || agentEpoch !== S.epoch) return full();
+    const nowC = new Set(want.cleared), nowB = new Set(want.banned);
+    const c = { add: want.cleared.filter((x) => !S.cleared.has(x)), del: [...S.cleared].filter((x) => !nowC.has(x)) };
+    const b = { add: want.banned.filter((x) => !S.banned.has(x)), del: [...S.banned].filter((x) => !nowB.has(x)) };
+    const hosts = want.hosts.join(",");
+    if (!c.add.length && !c.del.length && !b.add.length && !b.del.length && hosts === S.hosts && want.on === S.on) return { same: true };
+    try {
+      const r = await this.control("POST", "/edge", { epoch: S.epoch, on: want.on, ...(hosts !== S.hosts ? { hosts: want.hosts } : {}),
+        add: { cleared: c.add, banned: b.add }, del: { cleared: c.del, banned: b.del } });
+      this.edgeSent = { ...S, on: want.on, hosts, cleared: nowC, banned: nowB };
+      this.agent = { ...(this.agent || {}), edge: { ...r } };
+      return r;
+    } catch (e) { if (/full/.test(e.message)) return full(); throw e; }
   }
   can(feature) { return !!this.agent?.features?.includes(feature); }
   // what the agent is missing: null, "update" (it takes one), or "reinstall" (1.0: the command once more)

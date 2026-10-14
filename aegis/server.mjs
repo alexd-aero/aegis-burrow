@@ -47,7 +47,7 @@ import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
 import { createServer as createNetServer, connect as netConnect, isIP } from "node:net";
-import { RelayLink, AGENT_VERSION } from "../burrow/relaylink.mjs";
+import { RelayLink, AGENT_VERSION, visitorPage, verify as relayVerify } from "../burrow/relaylink.mjs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
@@ -1370,11 +1370,11 @@ function shieldStop(req, path, host) {
   const dev = deviceOf(req);
   if (dev) devices.seen(dev, { ip, ua: req.headers["user-agent"], host });
   if (guardExt) {
-    const H = req.headers;
+    const H = req.headers, port = burrow.matchHost(host);
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port: burrow.matchHost(host), main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
+                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
@@ -1403,7 +1403,14 @@ async function handler(req, res) {
     }
     const stop = shieldStop(req, path, host);
     if (req._guard) res.once("close", () => observeDone(req, res));
-    if (stop) return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close" });
+    if (stop) {
+      // the guard's own page for a person (checking: it reloads by itself; blocked), plain text for anything else
+      if (stop.page && /text\/html/.test(req.headers.accept || "")) {
+        return send(res, stop.status, visitorPage(stop.page, { ip: clientIp(req), retry: stop.retry }), { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", ...(stop.retry ? { "Retry-After": String(stop.retry) } : {}) });
+      }
+      return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close", ...(stop.retry ? { "Retry-After": String(stop.retry) } : {}) });
+    }
     const port = burrow.matchHost(host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,
@@ -1596,6 +1603,13 @@ function relayAdmit(req) {
   return true;
 }
 const relayServer = createHttpServer((req, res) => {
+  // the agent met someone new at a public tunnel: scan them first in line (their request stayed on the VPS)
+  if (req.url === "/__aegis-relay/scan" && req.method === "POST") {
+    const ip = String(req.headers["x-aegis-relay-ip"] || "");
+    const ok = relayLink.configured() && isIP(ip) && relayVerify(relayLink.keyBuf(), req.headers["x-aegis-relay"], { host: "scan", ip, method: "POST", url: req.url });
+    if (ok) { try { guardExt?.scan?.(ip); } catch { /* the addon's business */ } }
+    res.writeHead(ok ? 204 : 403); return res.end();
+  }
   if (relayAdmit(req)) return handler(req, res);
   res.writeHead(403, { "Content-Type": "text/plain" }); res.end("Not signed by your relay.");
 });
@@ -1677,6 +1691,33 @@ burrow.domains.useRelay({
   remove: (suffix) => relayLink.removeZone(suffix),
 });
 burrow.onDomainsChange = () => superviseRelay();
+// Public tunnels, checked on the VPS first (agent 1.2+): which names are public, and
+// who may pass, mirrored from the guard addon (Bulwark) whenever it changes.
+let edgeLast = null, edgeBusy = false, edgeWait = 0;
+function publicHosts() {
+  const out = new Set();
+  for (const t of tunnels.list()) {
+    if (t.access !== "public" || !t.enabled) continue;
+    if (t.host) out.add(t.host.toLowerCase());
+    for (const a of t.also || []) if (!a.hidden) out.add(a.host.toLowerCase());
+  }
+  return [...out].sort();
+}
+setInterval(async () => {
+  if (edgeBusy || Date.now() < edgeWait || relayLink.link.state !== "up" || !relayLink.can("edge")) return;
+  const hosts = publicHosts(), ver = guardExt?.edgeVersion?.() ?? -1;
+  const key = `${ver}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
+  if (key === edgeLast) return;
+  edgeBusy = true;
+  try {
+    const e = guardExt?.edge?.() || null;
+    // without a guard addon nothing is checked there (the built-in shield still works here)
+    const want = e ? { on: !!e.on, hosts, cleared: e.cleared, banned: e.banned } : { on: false, hosts, cleared: [], banned: [] };
+    await relayLink.syncEdge(want);
+    edgeLast = `${ver}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
+  } catch (err) { log("relay: couldn't update who may pass on the VPS:", err.message); edgeLast = null; edgeWait = Date.now() + 30e3; }
+  finally { edgeBusy = false; }
+}, 1000).unref();
 setInterval(superviseRelay, 20000).unref();
 setTimeout(superviseRelay, 8000).unref();
 async function relayRoute(method, path, readJson) {
