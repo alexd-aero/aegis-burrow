@@ -200,6 +200,12 @@ export class WorkerFront {
     if (have && have.service === script) return have;
     return this.api("PUT", `/accounts/${this.accountId}/workers/domains`, { environment: "production", hostname, service: script, zone_id: this.zoneId });
   }
+  // Every Custom Domain any aegis-tunnels-* Worker has in this zone (old names too). Throws if one can't go.
+  async removeAll() {
+    const have = (await this.domains()).filter((d) => d.service?.startsWith("aegis-tunnels-"));
+    for (const d of have) await this.api("DELETE", `/accounts/${this.accountId}/workers/domains/${d.id}`);
+    return have.map((d) => d.hostname);
+  }
   async removeDomain(hostname) {
     const have = (await this.domains()).filter((d) => d.hostname === hostname && d.service?.startsWith("aegis-tunnels-"));
     for (const d of have) await this.api("DELETE", `/accounts/${this.accountId}/workers/domains/${d.id}`);

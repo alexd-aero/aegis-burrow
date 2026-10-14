@@ -237,12 +237,16 @@ export class Edge {
     } catch (e) { return { ok: false, why: `the check through Cloudflare failed (${e.cause?.code || e.message})` }; }
   }
   // Our own certificate back through the public address (needs a router that loops back).
+  // (the certificate is taken when the probe starts: the edge may stop, or
+  // change certificates, while it runs, and a callback must never find null)
   probeLoopback() {
+    const want = this.cur?.fingerprint, base = this.base;
     return new Promise((resolve) => {
-      const sock = tlsConnect({ host: this.publicIp, port: 443, servername: `burrow-check.${this.base}`, rejectUnauthorized: false, timeout: 6000 }, () => {
+      if (!want || !base) return resolve({ ok: false, why: "no certificate yet" });
+      const sock = tlsConnect({ host: this.publicIp, port: 443, servername: `burrow-check.${base}`, rejectUnauthorized: false, timeout: 6000 }, () => {
         const fp = sock.getPeerCertificate()?.fingerprint256;
         sock.destroy();
-        resolve(fp === this.cur.fingerprint ? { ok: true } : { ok: false, why: "something else answers on port 443 there" });
+        resolve(fp === want ? { ok: true } : { ok: false, why: "something else answers on port 443 there" });
       });
       sock.on("error", (e) => resolve({ ok: false, why: e.code === "ECONNREFUSED" ? "port 443 is closed there" : e.code === "ETIMEDOUT" ? "port 443 doesn't answer there" : e.message }));
       sock.on("timeout", () => { sock.destroy(); resolve({ ok: false, why: "port 443 doesn't answer there" }); });
@@ -250,12 +254,13 @@ export class Edge {
   }
   // Through the relay, is it still our certificate? (it passes the bytes through)
   probeRelay() {
+    const want = this.cur?.fingerprint, base = this.base, relay = this.relay;
     return new Promise((resolve) => {
-      if (!this.relay || !this.cur) return resolve(null);
-      const sock = tlsConnect({ host: this.relay, port: 443, servername: `burrow-check.${this.base}`, rejectUnauthorized: false, timeout: 8000 }, () => {
+      if (!relay || !want || !base) return resolve(null);
+      const sock = tlsConnect({ host: relay, port: 443, servername: `burrow-check.${base}`, rejectUnauthorized: false, timeout: 8000 }, () => {
         const fp = sock.getPeerCertificate()?.fingerprint256;
         sock.destroy();
-        resolve(fp === this.cur.fingerprint);
+        resolve(fp === want);
       });
       sock.on("error", () => resolve(false));
       sock.on("timeout", () => { sock.destroy(); resolve(false); });

@@ -358,7 +358,10 @@ export class TunnelManager {
 
   // A name of the user's own for a tunnel: "grafana" -> grafana.<zone>.
   // "" or null goes back to tunnel-PORT-<label>.
-  async checkSub(port, sub) {
+  // A Workers Custom Domain's own DNS record (AAAA 100::, read-only): Cloudflare
+  // makes and removes it with the Custom Domain.
+  static isFrontRecord(r) { return r.type === "AAAA" && r.content === "100::" && !!r.meta?.read_only; }
+  async checkSub(port, sub, { ignoreFront = false } = {}) {
     if (sub == null || sub === "") return null;
     sub = String(sub).trim().toLowerCase().replace(/\.$/, "");
     if (this.parent && sub.endsWith("." + this.parent)) sub = sub.slice(0, -this.parent.length - 1);
@@ -370,7 +373,7 @@ export class TunnelManager {
     if (this.wildcard) {
       // a record of its own would win over the wildcard, so the name would never reach us
       const name = `${sub}.${this.wbase}`;
-      const recs = await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`);
+      const recs = (await this.cfApi("GET", `/dns_records?name=${encodeURIComponent(name)}`)).filter((r) => !(ignoreFront && TunnelManager.isFrontRecord(r)));
       if (recs.length) throw new Error(`${name} already has a ${recs[0].type} record on Cloudflare, which wins over the wildcard. Pick another name, or delete that record first.`);
     } else if (this.domain) {
       // never take over a record that isn't ours (mail, www, a website…)
@@ -548,7 +551,8 @@ export class TunnelManager {
   async unpublish(port, host) {
     if (!this.domain) { this.quick?.stop(port); return "none"; }
     if (this.frontMode) {
-      try { return (await this.front.removeDomain(host || this.hostFor(port))) ? "deleted" : "none"; } catch (e) { return "error: " + e.message; }
+      try { return (await this.front.removeDomain(host || this.hostFor(port))) ? "deleted" : "none"; }
+      catch (e) { this.log("tunnels: couldn't remove", host || this.hostFor(port), "from the Worker:", e.message); return "error: " + e.message; }
     }
     if (this.wildcard) return "none";          // the wildcard stays for the others
     try { return await this.dnsDelete(host || this.hostFor(port)); } catch (e) { return "error: " + e.message; }
@@ -588,6 +592,7 @@ export class TunnelManager {
       const name = t.dns.name;
       if (await this.dnsAnswers(name)) {
         t.dns.ready = true; t.dns.readyAt = now(); this.save();
+        if (this._wild && t.dns.wildcard === this._wild.name) this._wild.ready = true;     // the next tunnel needn't wait
         this.log("tunnels:", name, "answers on public DNS after", Math.round((now() - t0) / 1000) + "s");
         return;
       }
@@ -719,20 +724,38 @@ export class TunnelManager {
         await this.front.deploy(this.label, this.domain.mainHost);
       } catch (e) { const err = new Error(`The Worker isn't ready: ${e.message}`); err.code = "front"; throw err; }
     }
-    if (this.frontMode) {
-      // the Custom Domains of the old names go (they would shadow the new way)
-      for (const port of this.tunnels.keys()) await this.unpublish(port);
-    }
     const before = { ...this.naming };
+    const leavingFront = this.frontMode && !(naming.mode === "wildcard" && naming.certs === "worker");
+    // check every name against the new way first: nothing changes unless all of them can move
+    // (the Worker's own records don't count: they go with its Custom Domains, below)
+    this.naming = naming;
+    try {
+      if (this.wildcard) for (const t of this.tunnels.values()) {
+        if (!t.sub) continue;
+        try { await this.checkSub(t.port, t.sub, { ignoreFront: leavingFront }); } catch (e) { throw new Error(`${t.sub} (tunnel-${t.port}): ${e.message}`); }
+      }
+    } catch (e) { this.naming = before; this.syncEdge(); throw e; }
+    this.naming = before;
+    if (leavingFront) {
+      // the Worker's Custom Domains go, every one (old names too): their records would shadow the new way
+      let gone;
+      try { gone = await this.front.removeAll(); }
+      catch (e) {
+        this.syncEdge();
+        for (const port of this.tunnels.keys()) await this.publish(port);          // put back what did go
+        throw new Error(`Couldn't remove the Worker's names from Cloudflare (${e.message}); nothing was moved.`);
+      }
+      if (gone.length) this.log("tunnels: removed the Worker's names:", gone.join(", "));
+      // Cloudflare drops their records a moment later: wait for that, so the wildcard isn't shadowed
+      for (let i = 0; i < 45; i++) {
+        const left = (await this.cfApi("GET", "/dns_records?type=AAAA&per_page=1000")).filter((r) => TunnelManager.isFrontRecord(r) && gone.includes(r.name));
+        if (!left.length) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
     this.naming = naming;
     this._wild = null;
     this.syncEdge();
-    for (const t of this.tunnels.values()) {
-      if (this.wildcard && t.sub) {
-        // a name that has a record of its own under the new base would shadow it
-        try { await this.checkSub(t.port, t.sub); } catch (e) { this.naming = before; this.syncEdge(); throw new Error(`${t.sub} (tunnel-${t.port}): ${e.message}`); }
-      }
-    }
     for (const port of this.tunnels.keys()) { const t = this.get(port); t.dns = null; await this.publish(port); }
     this.save();
     this.onNaming?.(this.naming);

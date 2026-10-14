@@ -273,3 +273,51 @@ test("wildcard naming through a relay: an A record, no certificate check, relay-
     assert.equal(tm.relayAsk("radio.tunnel.example.com"), false, "no relay, no questions");
   } finally { tm.stop(); }
 });
+
+test("leaving the Worker front: names checked first, every Custom Domain removed (stale ones too), nothing half-done on failure", async () => {
+  const { tm, zone } = wildManager();
+  try {
+    await tm.create({ port: 3000, sub: "chat-demo" });
+    await tm.create({ port: 4000 });
+    tm.naming = { mode: "wildcard", prefix: "tunnel", certs: "worker", relay: null };
+    // Cloudflare's Workers, faked: a Custom Domain comes with a read-only AAAA 100:: record
+    const domains = new Map();
+    const front = { linked: true, removed: [], failNext: false,
+      deploy: async () => ({ script: "aegis-tunnels-aegis" }),
+      domains: async () => [...domains.values()],
+      addDomain: async (hostname) => { domains.set(hostname, { id: "d-" + hostname, hostname, service: "aegis-tunnels-aegis" });
+                                       zone.set(hostname, { id: "z-" + hostname, type: "AAAA", name: hostname, content: "100::", proxied: true, meta: { read_only: true } }); },
+      removeDomain: async () => 0, certReady: async () => true,
+      removeAll: async () => {
+        if (front.failNext) { front.failNext = false; throw new Error("Authentication error"); }
+        const gone = [...domains.keys()]; domains.clear(); front.removed.push(...gone);
+        setTimeout(() => { for (const h of gone) zone.delete(h); }, 50);          // Cloudflare drops the records a moment later
+        return gone;
+      } };
+    tm.front = front;
+    for (const h of ["chat-demo.tunnel.example.com", "4000.tunnel.example.com", "22.tunnel.example.com"]) await front.addDomain(h);   // 22: an old tunnel's
+    // a failure removing them: rejected, still on the Worker, its names put back
+    front.failNext = true;
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" }), /Couldn't remove the Worker's names.*nothing was moved/);
+    assert.equal(tm.naming.certs, "worker");
+    assert.ok(domains.has("chat-demo.tunnel.example.com"), "the names are still the Worker's");
+    // now it works: the Worker's own AAAA records don't block chat-demo, all three go, the wildcard comes
+    const info = await tm.setNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" });
+    assert.equal(info.relay, "203.0.113.7");
+    assert.deepEqual(front.removed.sort(), ["22.tunnel.example.com", "4000.tunnel.example.com", "chat-demo.tunnel.example.com"]);
+    assert.deepEqual([...zone.keys()], ["*.tunnel.example.com"], "only the wildcard is left");
+    assert.equal(zone.get("*.tunnel.example.com").content, "203.0.113.7");
+    assert.equal(tm.matchHost("chat-demo.tunnel.example.com"), 3000);
+  } finally { tm.stop(); }
+});
+
+test("a foreign record still blocks a name, Worker or not", async () => {
+  const { tm } = wildManager({ "mail.tunnel.example.com": [{ type: "A", name: "mail.tunnel.example.com", content: "198.51.100.1" }] });
+  try {
+    await tm.create({ port: 3000, sub: "mail" });
+    tm.naming = { mode: "wildcard", prefix: "tunnel", certs: "worker", relay: null };
+    tm.front = { linked: true, deploy: async () => ({}), domains: async () => [], removeAll: async () => [], removeDomain: async () => 0, addDomain: async () => {}, certReady: async () => true };
+    await assert.rejects(tm.setNaming({ mode: "wildcard", prefix: "tunnel", relay: "203.0.113.7" }), /mail \(tunnel-3000\).*already has a A record/);
+    assert.equal(tm.naming.certs, "worker", "nothing moved");
+  } finally { tm.stop(); }
+});
