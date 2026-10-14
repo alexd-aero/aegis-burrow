@@ -29,11 +29,30 @@ function edgeStatus(e, zone) {
     : e.via === "relay" && e.relayPass ? `<span class="pill ok"><i class="dot ok"></i>through the relay ${h(e.target)} · encrypted end to end, on this machine's certificate</span>`
     : e.via === "relay" ? `<span class="pill warn"><i class="dot warn"></i>through the backup relay · ${h(e.target)} · its own certificate</span>`
     : e.target ? `<span class="pill warn"><i class="dot warn"></i>this machine · ${h(e.target)} · not reachable yet</span>` : '<span class="pill">finding this machine\'s address…</span>';
-  const fix = e.direct.ok || e.relayPass ? "" : `<p class="faint small">${e.direct.why ? `Checked through ${h(e.publicIp || "the public address")}: ${h(e.direct.why)}. ` : ""}`
+  const fix = e.direct.ok || e.relayPass ? ""
+    : e.cgnat ? `<p class="note-err small"><b>Your internet provider shares one public address among many customers</b> (CGNAT: your router's outside address is <span class="mono">${h(e.cgnat.router)}</span>, the internet sees <span class="mono">${h(e.cgnat.internet || "another")}</span>). Nothing from outside can reach this machine, whatever the router allows. Use <b>Cloudflare Worker</b> above, or a relay server of yours${e.relay ? ` (<span class="mono">${h(e.relay)}</span> serves the names meanwhile)` : ""}.</p>`
+    : `<p class="faint small">${e.direct.why ? `Checked through ${h(e.publicIp || "the public address")}: ${h(e.direct.why)}. ` : ""}`
     + `Forward TCP port <b>443</b> on your router to <span class="mono">${h(e.lan || "this machine")}:${h(e.port)}</span>`
     + (e.upnp?.note ? ` (Aegis asked over UPnP; ${h(e.upnp.note)})` : "")
-    + `. The record moves here by itself within two minutes of it working${e.relay ? `; until then <span class="mono">${h(e.relay)}</span> serves the names` : ""}.</p>`;
+    + `. The record moves here by itself within two minutes of it working${e.relay ? `; until then <span class="mono">${h(e.relay)}</span> serves the names` : ""}.`
+    + ` Opening a tunnel from your own home network can fail even when it works from outside (many routers don't loop back): check from your phone on mobile data.</p>`;
   return `<div class="kv-row"><span>Certificate</span>${cert}</div><div class="kv-row"><span>*.${h(e.base || zone)}</span>${route}</div>${fix}`;
+}
+// Aegis Relay (burrow/relaylink.mjs): the agent on the relay server, and the signed link to it
+function relayBox(ip) {
+  const r = S.relay;
+  if (!r) return "";
+  const st = r.link?.state, mine = r.configured && r.vps?.host === ip;
+  const pill = !mine ? '<span class="pill warn"><i class="dot warn"></i>no agent: anything on that server could reach the gate</span>'
+    : st === "up" ? `<span class="pill ok"><i class="dot ok"></i>linked · every request signed · agent ${h(r.agent?.version || "")}${r.agent?.cert ? ` · certificate until ${h(day(r.agent.cert.notAfter))}` : ""}</span>`
+    : st === "connecting" ? '<span class="pill warn"><i class="spin"></i> connecting…</span>'
+    : st === "down" ? `<span class="pill err"><i class="dot err"></i>link down: ${h(r.link.error || "")}</span>`
+    : `<span class="pill"><i class="dot"></i>agent installed · idle (the relay isn't in use)</span>`;
+  const cmd = r.setup && r.setup.host === ip ? `<div class="relay-cmd"><p class="faint small" style="margin:8px 0 6px">On <span class="mono">${h(ip)}</span>, as root (this link works once, for 30 minutes):</p>
+      <div class="row"><input class="input mono" readonly value="${h(r.setup.command)}" style="flex:1"><button type="button" class="btn sm" data-act="relay-copy">Copy</button></div></div>` : "";
+  return `<div class="kv-row"><span>Relay agent</span>${pill}</div>
+    <p class="faint small">The agent on <span class="mono">${h(ip)}</span> signs every request with a key only it and this Aegis hold; the link is a locked-down SSH user that can open two ports and nothing else, and it runs only while the tunnels go through the relay.</p>
+    ${cmd}<div class="row end" style="gap:8px">${mine ? `<button type="button" class="btn ghost sm" data-act="relay-forget">Forget the agent</button>` : ""}<button type="button" class="btn sm${mine ? "" : " primary"}" data-act="relay-setup" data-host="${h(ip)}">${mine ? "Reinstall the agent" : "Set up the relay agent"}</button></div>`;
 }
 function namingSummary(d) {
   const n = S.naming;
@@ -118,6 +137,7 @@ function namingForm(d) {
         <p class="faint small">${certHelp}</p>
         ${cur.active && cur.certs === "self" && n.certs === "self" ? edgeStatus(cur.edge, d.zone) : ""}
         ${n.certs === "worker" ? frontForm(cur.front) : ""}
+        ${(n.certs === "self" || n.certs === "relay") && cur.relay && n.relay === cur.relay ? relayBox(cur.relay) : ""}
         ${n.certs !== "cloudflare" && n.certs !== "worker" ? `<label class="field" style="margin-top:12px"><span>${n.certs === "self" ? 'Backup relay <span class="faint">(optional: its IP)</span>' : "Relay server (its IP)"}</span>
           <input class="input mono" id="nmRelay" value="${h(n.relay)}" maxlength="45" spellcheck="false" autocapitalize="none" placeholder="${n.certs === "self" ? "none" : "203.0.113.7"}"></label>
         <p class="faint small">${n.certs === "self" ? "A server of yours running Caddy with on-demand TLS that takes over while this machine isn't reachable on port 443, and hands the names back once it is." : "A server of yours running Caddy with on-demand TLS."}</p>` : ""}`
@@ -646,6 +666,7 @@ async function load() {
     const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
     S.me = me; S.cf = cf; S.termix = termix;
     S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
+    S.relay = cf.domain ? { ...(await api("/__gate/api/relay").catch(() => null)), setup: S.relay?.setup } : null;
     S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
     loadLog(S.log);
@@ -712,6 +733,12 @@ document.addEventListener("click", async (e) => {
       render();
     }
     else if (act === "naming-cancel") { S.nmDraft = null; S.nmErr = ""; render(); }
+    else if (act === "relay-setup") {
+      const r = await api("/__gate/api/relay/setup", { method: "POST", body: JSON.stringify({ host: el.dataset.host }) });
+      S.relay = { ...(S.relay || {}), setup: r }; render();
+    }
+    else if (act === "relay-copy") { await navigator.clipboard.writeText(S.relay?.setup?.command || ""); toast("Copied: run it on the relay server"); }
+    else if (act === "relay-forget") { S.relay = { ...(await api("/__gate/api/relay/forget", { method: "POST", body: "{}" })), setup: null }; toast("The agent is forgotten (uninstall it on the server too)"); render(); }
     else if (act === "naming-save") {
       const n = namingDraft(), zone = S.cf.domain.zone;
       if (n.certs === "cloudflare" || n.certs === "worker") n.relay = "";

@@ -297,12 +297,16 @@ export class Edge {
     const s = await run("upnpc", ["-s"], 20000);
     if (s.missing) { this.upnp = { ...this.upnp, ok: null, note: "upnpc isn't installed (miniupnpc), so Aegis can't ask the router" }; return; }
     const lan = /Local LAN ip address\s*:\s*([\d.]+)/.exec(s.out)?.[1] || null;
+    // the router's own outside address: private, or not the one the internet sees, means the
+    // provider shares one address among many customers (CGNAT): nothing can come in, ever
+    this.upnp.external = /ExternalIPAddress\s*=\s*([\d.]+)/.exec(s.out)?.[1] || null;
     if (!lan) { this.upnp = { ...this.upnp, ok: false, note: "no UPnP router answered", lan: null }; return; }
     const r = await run("upnpc", ["-e", "aegis tunnels", "-a", lan, String(this.port), "443", "TCP", "86400"], 30000);
     const fail = /failed with code (\d+)\s*\(([^)]*)\)/.exec(r.out);
-    this.upnp = fail ? { at: this.upnp.at, ok: false, lan, note: `the router refused port 443 (${fail[1]} ${fail[2]})` }
-      : /is redirected to/.test(r.out) ? { at: this.upnp.at, ok: true, lan, note: null }
-      : { at: this.upnp.at, ok: false, lan, note: "the router didn't confirm the mapping" };
+    const external = this.upnp.external;
+    this.upnp = fail ? { at: this.upnp.at, ok: false, lan, external, note: `the router refused port 443 (${fail[1]} ${fail[2]})` }
+      : /is redirected to/.test(r.out) ? { at: this.upnp.at, ok: true, lan, external, note: null }
+      : { at: this.upnp.at, ok: false, lan, external, note: "the router didn't confirm the mapping" };
   }
   lanIp() {
     if (this.upnp.lan) return this.upnp.lan;
@@ -312,6 +316,14 @@ export class Edge {
     return null;
   }
 
+  // Behind the provider's NAT? The router's outside address is private / shared
+  // (100.64/10), or the internet sees a different one: no port forward can help.
+  cgnat() {
+    const ext = this.upnp.external;
+    if (!ext) return null;
+    const shared = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ext);
+    return shared || (this.publicIp && ext !== this.publicIp) ? { router: ext, internet: this.publicIp } : null;
+  }
   state() {
     const t = this.target();
     return {
@@ -321,7 +333,8 @@ export class Edge {
       issuing: !!this.issuing, error: this.error,
       direct: { ok: this.direct.ok, checked: this.direct.checked, why: this.direct.why },
       via: t?.via || null, target: t?.ip || null, relayPass: this.relayPass,
-      upnp: { ok: this.upnp.ok, note: this.upnp.note, at: this.upnp.at || null },
+      upnp: { ok: this.upnp.ok, note: this.upnp.note, at: this.upnp.at || null, external: this.upnp.external || null },
+      cgnat: this.cgnat(),
     };
   }
 }

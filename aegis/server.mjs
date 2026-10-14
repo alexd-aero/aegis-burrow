@@ -46,6 +46,7 @@ import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
 import { createServer as createNetServer, connect as netConnect } from "node:net";
+import { RelayLink } from "../burrow/relaylink.mjs";
 import { checkLock } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
@@ -638,6 +639,18 @@ async function handleGate(req, res, path, url, host, isMain) {
   }
   if (path === "/__gate/setup") return send(res, 302, "", { Location: "/" });
 
+  // ---- Aegis Relay: the one-time install script for your VPS, and its "done" (both need the setup link's token)
+  if (path === "/__gate/relay/agent.sh" && req.method === "GET" && isMain) {
+    const sc = tunnels.wildcard ? relayLink.script(url.searchParams.get("t"), { suffix: "." + tunnels.wbase, base: `https://${mainHost() || host}` }) : null;
+    if (!sc) return send(res, 404, "echo 'That setup link has expired or is wrong: make a new one in Aegis → Settings → Domain.' >&2; exit 1\n", { "Content-Type": "text/plain; charset=utf-8" });
+    audit("relay setup script fetched", req, { relay: relayLink.state.token?.host });
+    return send(res, 200, sc, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+  }
+  if (path === "/__gate/relay/register" && req.method === "POST" && isMain) {
+    try { const r = relayLink.register(url.searchParams.get("t"), await readJsonBody(req)); audit("relay registered", req, { relay: relayLink.state.vps?.host }); setTimeout(superviseRelay, 500); return sendJson(res, 200, r); }
+    catch (e) { return sendJson(res, 400, { error: e.message }); }
+  }
+
   if (path === "/__gate/login" && req.method === "GET") {
     if (isAuthed(req)) return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/") });
     // With a domain, tunnel hosts sign in through the dashboard, so one login covers them all.
@@ -856,6 +869,10 @@ async function handleApi(req, res, path, url) {
             req, { tunnel: t.port || t.removed || apiPath.split("/")[2] || null, ...(t.target ? { target: t.target } : {}), ...(t.access ? { access: t.access } : {}) });
     }
     if (br) return br.body !== undefined ? send(res, br.status, br.body, br.headers) : sendJson(res, br.status, br.json);
+    if (path.startsWith("/__gate/api/relay")) {
+      const r = await relayRoute(req.method, path.slice("/__gate/api".length), () => readJsonBody(req));
+      if (r) { if (req.method !== "GET" && r.status < 400) audit(`relay ${path.split("/").pop()}`, req, {}); return sendJson(res, r.status, r.json); }
+    }
     if (path === "/__gate/api/addon" && req.method === "GET") {
       const v = addonView({ tunnels, control: burrow.controlView(), burrow: burrow.status() });
       if (v.forge && !v.addon) v.addon = await forgeHasUs();          // the drop-in may lag the Forge
@@ -1408,7 +1425,76 @@ function edgeListen() {
   });
   srv.listen(EDGE_PORTS[0], EDGE.host);
 }
-tunnels.edge.onCert = edgeListen;
+// ---------- Aegis Relay (burrow/relaylink.mjs) ----------
+// The relay listener: 127.0.0.1:RELAY_LINK_PORT, reached only through the SSH
+// link (VPS 127.0.0.1:18452 -> here). Plain HTTP inside post-quantum SSH; every
+// request must carry the agent's signature, else it never reaches anything.
+// It, and the link, run only while the tunnels really go through the relay.
+const relayLink = new RelayLink({ dataDir: DATA, log });
+const RELAY_LINK_PORT = Number(process.env.AEGIS_RELAY_LINK_PORT || EDGE.relayLinkPort || 4302);
+const relayRefused = new Map();
+function relayAdmit(req) {
+  const host = hostOf(req);
+  for (const k of ["cf-connecting-ip", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-aegis-front-host", "x-aegis-front-ip", "x-aegis-front-key"]) delete req.headers[k];
+  const ip = burrow.matchHost(host) !== null ? relayLink.verifyRequest(req, host) : null;
+  delete req.headers["x-aegis-relay"]; delete req.headers["x-aegis-relay-ip"];
+  if (!ip) {
+    const k = String(req.socket.remotePort), last = relayRefused.get(k) || 0;
+    if (Date.now() - last > 60000) { relayRefused.set(k, Date.now()); log("relay: refused a request without a valid signature for", host || "(no host)"); }
+    if (relayRefused.size > 1000) relayRefused.clear();
+    return false;
+  }
+  req.headers["cf-connecting-ip"] = ip;
+  req.headers["x-forwarded-proto"] = "https";
+  return true;
+}
+const relayServer = createHttpServer((req, res) => {
+  if (relayAdmit(req)) return handler(req, res);
+  res.writeHead(403, { "Content-Type": "text/plain" }); res.end("Not signed by your relay.");
+});
+relayServer.on("upgrade", (req, socket, head) => {
+  if (relayAdmit(req)) server.emit("upgrade", req, socket, head);
+  else socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+});
+relayServer.keepAliveTimeout = 65000;
+relayServer.on("error", (e) => log(`relay: 127.0.0.1:${RELAY_LINK_PORT}:`, e.message));
+const relayWanted = () => {
+  const n = tunnels.naming, v = relayLink.state.vps;
+  if (!relayLink.configured() || !burrow.on || !tunnels.domain || n.mode !== "wildcard" || !v || n.relay !== v.host) return false;
+  return n.certs === "relay" || (n.certs === "self" && tunnels.edge.target()?.via === "relay");
+};
+function superviseRelay() {
+  const want = relayWanted();
+  if (want && !relayServer.listening) relayServer.listen(RELAY_LINK_PORT, "127.0.0.1", () => relayLink.start(RELAY_LINK_PORT));
+  else if (want && !relayLink.running()) relayLink.start(RELAY_LINK_PORT);
+  else if (!want && (relayServer.listening || relayLink.running())) {
+    relayLink.stop();
+    if (relayServer.listening) relayServer.close();
+    log("relay: not in use; the link and the relay listener are off");
+  }
+}
+// the certificate to the agent: when the link comes up, when it renews, and hourly (if it differs)
+relayLink.onUp = () => relayLink.pushCert(tunnels.edge.cur).catch((e) => log("relay: couldn't push the certificate:", e.message));
+setInterval(() => { if (relayLink.link.state === "up") relayLink.control("GET", "/status").then((s) => { relayLink.agent = { ...s, at: Date.now() }; return relayLink.pushCert(tunnels.edge.cur); }).catch(() => {}); }, 3600e3).unref();
+setInterval(superviseRelay, 20000).unref();
+setTimeout(superviseRelay, 8000).unref();
+async function relayRoute(method, path, readJson) {
+  const ok = (json) => ({ status: 200, json });
+  try {
+    if (path === "/relay" && method === "GET") return ok({ ...relayLink.view(), wanted: relayWanted(), naming: { mode: tunnels.naming.mode, certs: tunnels.naming.certs, relay: tunnels.naming.relay } });
+    if (path === "/relay/setup" && method === "POST") {
+      if (!tunnels.wildcard) return { status: 409, json: { error: "A relay carries the one wildcard (Settings → Domain → One wildcard record) first." } };
+      const b = await readJson(), r = relayLink.setup({ host: b.host || tunnels.naming.relay, port: b.port });
+      const base = `https://${mainHost()}`;
+      return ok({ ...r, command: `curl -fsSL '${base}/__gate/relay/agent.sh?t=${r.token}' | sudo bash` });
+    }
+    if (path === "/relay/forget" && method === "POST") { relayLink.forget(); superviseRelay(); return ok(relayLink.view()); }
+    if (path === "/relay/push" && method === "POST") return ok(await relayLink.pushCert({ ...tunnels.edge.cur, force: true }) || {});
+  } catch (e) { return { status: 400, json: { error: e.message } }; }
+  return null;
+}
+const prevOnCert = edgeListen;
+tunnels.edge.onCert = () => { prevOnCert(); if (relayLink.link.state === "up") relayLink.pushCert(tunnels.edge.cur).catch((e) => log("relay: couldn't push the renewed certificate:", e.message)); };
 // this machine stopped holding the certificate: nothing listens for it any more
 tunnels.edge.onStop = () => {
   if (!edgeServer) return;
@@ -1449,6 +1535,8 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   // the serveo link (aegis serveo)
   if (path === "/serveo" && method === "GET") return ok(serveo.state());
   if (path === "/serveo" && method === "POST") { setServeo((await readJson()).on !== false); return ok(serveo.state()); }
+  // Aegis Relay (setup link, status, forget)
+  if (path.startsWith("/relay")) { const r = await relayRoute(method, path, readJson); if (r) return r; }
   // the home screen and `aegis status`
   if (path === "/overview" && method === "GET") return ok(await overview());
   if (path === "/audit" && method === "GET") return ok({ events: auditRead(300) });
@@ -1504,7 +1592,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (xc) return extRoute(xc[1], xc[2] || "/", method, new URLSearchParams(), readJson, "control");
   return null;
 });
-for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { burrow.stop(); serveo.stop(); process.exit(0); });
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { relayLink.stop(); burrow.stop(); serveo.stop(); process.exit(0); });
 
 const LOCAL_URL = `${TLS ? "https" : "http"}://${LISTEN.host === "0.0.0.0" || LISTEN.host === "::" ? "127.0.0.1" : LISTEN.host}:${LISTEN.port}`;
 // data/runtime.json: where it answers right now (bin/aegis prints these)
