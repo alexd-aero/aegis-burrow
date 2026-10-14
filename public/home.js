@@ -2,7 +2,7 @@
 // order, under which name, and any links of your own are yours to set with
 // Settings → Customize the home page (/?customize=1; the gear opens Settings).
 // Saved in data/state.json (home).
-import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate } from "./common.js";
+import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate, notices } from "./common.js";
 
 const opts = $("#opts"), extra = $("#extra");
 const S = { me: null, draft: null, termixJob: false };
@@ -26,6 +26,7 @@ function available(me) {
       ? { id: "app:" + i.id, href: `/__gate/tunnels#/i/${encodeURIComponent(i.id)}`, img: i.logo, title: i.name, text: "Desktops, their links and tunnels, start and stop.", foot: i.version ? `v${i.version}` : "connected" }
       : { id: "app:" + i.id, href: i.dashboard, ext: true, img: i.logo, title: i.name, text: "Open its dashboard.", foot: i.version ? `v${i.version}` : "connected" });
   }
+  for (const a of (me.apps || [])) out.push({ id: "addon:" + a.id, href: a.href, img: a.logo, title: a.name, text: a.text, foot: "behind your Aegis login" });
   for (const l of (me.home?.links || [])) {
     let host = l.url;
     try { host = new URL(l.url, location.href).host; } catch { /* keep */ }
@@ -83,6 +84,7 @@ async function render() {
   $("#tagline").textContent = home.tagline || "Where to?";
   document.body.dataset.bg = home.background || "grid";
   if (!document.querySelector(".upd-banner")) updateBanner(me, opts);
+  notices(me);
   if (!S.freshAsked) { S.freshAsked = true; freshUpdate(me, opts); }
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")

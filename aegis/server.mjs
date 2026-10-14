@@ -106,6 +106,51 @@ function audit(event, req, extra = {}) {
     appendFileSync(f, JSON.stringify(e) + "\n", { mode: 0o600 });
   } catch (err) { log("audit: couldn't write", err.message); }
 }
+// ---------- notices: warnings addons (and Aegis) put on the dashboard ----------
+// data/notices.json, newest first (200 kept). An addon calls ctx.notify({level,
+// title, body, link, key}); the same key while still unread updates that notice
+// (count goes up) instead of adding another. The bell in the top bar lists
+// them; an unread critical one also shows as a banner on every page.
+const NOTICES_FILE = () => join(DATA, "notices.json");
+const NOTICE_LEVELS = new Set(["info", "warn", "critical"]);
+let noticesCache = null;
+const noticeRate = new Map();          // source -> [times in the last hour]
+function noticesLoad() {
+  if (!noticesCache) { try { noticesCache = JSON.parse(readFileSync(NOTICES_FILE(), "utf8")); } catch { noticesCache = []; } }
+  return noticesCache;
+}
+function noticesSave() {
+  try { writeFileSync(NOTICES_FILE() + ".tmp", JSON.stringify(noticesCache.slice(0, 200)), { mode: 0o600 }); renameSync(NOTICES_FILE() + ".tmp", NOTICES_FILE()); }
+  catch (e) { log("notices: couldn't save", e.message); }
+}
+function notify(source, n = {}) {
+  const level = NOTICE_LEVELS.has(n.level) ? n.level : "info";
+  const title = String(n.title || "").trim().slice(0, 160);
+  if (!title) throw new Error("A notice needs a title.");
+  const body = String(n.body || "").slice(0, 1200), key = n.key ? String(n.key).slice(0, 120) : null;
+  const link = typeof n.link === "string" && /^\/__gate\/[\w\-./?=&#%]*$/.test(n.link) ? n.link : null;     // only the dashboard's own pages
+  const list = noticesLoad(), now = Date.now();
+  const same = key && list.find((x) => x.source === source && x.key === key && !x.read);
+  if (same) {
+    Object.assign(same, { t: now, level: level === "critical" || same.level !== "critical" ? level : same.level, title, body, link, count: (same.count || 1) + 1 });
+  } else {
+    const times = (noticeRate.get(source) || []).filter((t) => now - t < 3600e3);
+    if (times.length >= 30) return null;                                      // an addon gone wild: the bell isn't a log
+    times.push(now); noticeRate.set(source, times);
+    list.unshift({ id: randomBytes(6).toString("hex"), t: now, source, level, title, body, link, key, read: false, count: 1 });
+    log(`notice: [${level}] ${source}: ${title}`);
+  }
+  noticesSave();
+  return same?.id || list[0].id;
+}
+function noticesView() {
+  const list = noticesLoad();
+  const unread = list.filter((x) => !x.read);
+  const top = unread.find((x) => x.level === "critical") || null;
+  return { unread: unread.length, worst: unread.some((x) => x.level === "critical") ? "critical" : unread.some((x) => x.level === "warn") ? "warn" : unread.length ? "info" : null,
+           banner: top ? { id: top.id, source: top.source, title: top.title, body: top.body, link: top.link, t: top.t, count: top.count } : null };
+}
+
 function auditRead(n = 200) {
   try {
     const lines = readFileSync(AUDIT_FILE(), "utf8").trim().split("\n").slice(-Math.min(2000, n));
@@ -217,6 +262,18 @@ function extContext(rec) {
     legacyShield: join(DATA, "shield"),
     kick: (ip) => { let n = 0; for (const t of tunnels.list()) n += tunnels.kick(t.port, ip); return n; },
     log: (...a) => log(`${id}:`, ...a),
+    // a warning for the dashboard (the bell; a banner if critical)
+    notify: (n) => notify(id, n),
+    // what the gate remembers: each tunnel's clients and recent requests, and the audit log
+    history: ({ since = 0 } = {}) => ({
+      tunnels: tunnels.list().map((t) => {
+        const rt = tunnels.live.get(t.port);
+        return { port: t.port, host: t.host || t.url?.replace(/^https?:\/\//, "") || null, name: t.name || null,
+                 clients: rt ? [...rt.clients.values()].filter((c) => c.last >= since).map(({ sockets, active, ...c }) => c) : [],
+                 recent: rt ? rt.recent.filter((r) => r.t >= since) : [] };
+      }),
+      audit: auditRead(2000).filter((e) => Date.parse(e.t) >= since),
+    }),
     setting: (key) => { const r = addons.load()[id]; return r?.settings?.[key] ?? r?.manifest.settings.find((s) => s.key === key)?.default ?? ""; },
     domain: () => { const d = settings.get("domain"); return d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join("."), managed: !!d.managed } : null; },
     dns: () => tunnels.dnsRecords(),
@@ -781,6 +838,11 @@ function me(req) {
     serveo: { ...serveo.state(), forward: serveoForward() },
     mounts: { ...(settings.get("mounts") || {}) }, mountable: { termix: !!settings.get("termix"), "selkies-forge": !!listIntegrations().find((i) => i.kind === "selkies-forge" && i.url) },
     update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
+    notices: noticesView(),
+    // addons with an app of their own under the dashboard (Bulwark): a home tile each
+    apps: mounts().filter((m) => extensions.has(m.id)).map((m) => ({ id: m.id, name: m.name, href: m.prefix + "/",
+      logo: `/__gate/api/addons/${encodeURIComponent(m.id)}/image?v=${String(m.commit || "").slice(0, 12)}`,
+      text: String(m.tile?.text || "Open its dashboard.").slice(0, 120) })),
   };
 }
 
@@ -844,6 +906,17 @@ async function handleApi(req, res, path, url) {
   }
   try {
     if (path === "/__gate/api/me") return sendJson(res, 200, me(req));
+    if (path === "/__gate/api/notices" && req.method === "GET") return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
+    if (path === "/__gate/api/notices/read" && req.method === "POST") {
+      const b = await readJsonBody(req), ids = new Set(Array.isArray(b.ids) ? b.ids : []);
+      for (const x of noticesLoad()) if (b.all || ids.has(x.id)) x.read = true;
+      noticesSave();
+      return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
+    }
+    if (path === "/__gate/api/notices/clear" && req.method === "POST") {
+      noticesCache = noticesLoad().filter((x) => !x.read); noticesSave();
+      return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
+    }
     if (path === "/__gate/api/prefs" && req.method === "POST") { savePrefs(await readJsonBody(req)); return sendJson(res, 200, me(req)); }
     if (path === "/__gate/api/pack" && req.method === "GET") {
       if (!pack.found || Date.now() - pack.found.at > 30000) await pack.detect();
@@ -1065,7 +1138,7 @@ function mounts() {
     let m = null;
     try { m = typeof x.mod.mount === "function" ? x.mod.mount() : x.mod.mount; } catch { m = null; }
     if (!m?.prefix || !/^\/__gate\/[a-z0-9][a-z0-9-]{1,30}$/.test(m.prefix) || !up(m.upstream)) continue;
-    out.push({ id, name: m.name || id, prefix: m.prefix, up: up(m.upstream), keepHost: false, headers: m.headers || null });
+    out.push({ id, name: m.name || id, prefix: m.prefix, up: up(m.upstream), keepHost: false, headers: m.headers || null, tile: m.tile || null, commit: x.commit });
   }
   return out;
 }

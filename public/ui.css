@@ -917,3 +917,42 @@ button.pill { cursor: pointer; font: inherit; font-size: 11px; }
 .kv-row.wide > span:first-child { width: auto; flex: 1; min-width: 0; color: inherit; }
 .input.sm { padding: 6px 10px; font-size: 12px; }
 @media (max-width: 720px) { .sh-why { max-width: 180px; } }
+
+/* notices: the bell, its list, and the banner for a critical one */
+.nt { position: relative; display: inline-flex; }
+.nt-bell { position: relative; display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
+.nt-bell:hover, .nt-bell[aria-expanded="true"] { color: var(--text); background: rgba(255,255,255,.05); border-color: var(--line-2); }
+.nt-bell svg { width: 18px; height: 18px; }
+.nt-count { position: absolute; top: 1px; right: 0; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 99px; font: 600 10.5px/17px var(--sans); text-align: center; background: #3a3d42; color: #fff; }
+.nt-bell[data-level="warn"] .nt-count { background: var(--warn); color: #1a1405; }
+.nt-bell[data-level="critical"] .nt-count { background: var(--err); }
+.nt-bell[data-level="critical"] svg { color: var(--err); }
+.nt-pop { position: absolute; right: 0; top: calc(100% + 8px); width: min(380px, calc(100vw - 24px)); max-height: min(70vh, 560px); overflow: auto; z-index: 50;
+          background: #0e0f11; border: 1px solid var(--line-2); border-radius: 14px; box-shadow: 0 18px 50px rgba(0,0,0,.55); }
+.nt-head { position: sticky; top: 0; display: flex; align-items: center; gap: 6px; padding: 12px 12px 10px 16px; background: #0e0f11; border-bottom: 1px solid var(--line); font-size: 14px; }
+.nt-list { list-style: none; margin: 0; padding: 4px 0; }
+.nt-item { display: flex; gap: 11px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+.nt-item:last-child { border-bottom: 0; }
+.nt-item.unread { background: rgba(255,255,255,.025); cursor: pointer; }
+.nt-item:not(.unread) .nt-txt { opacity: .62; }
+.nt-empty { padding: 18px 16px; color: var(--muted); font-size: 13px; }
+.nt-dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--muted); }
+.nt-dot.warn { background: var(--warn); box-shadow: 0 0 9px rgba(242,193,78,.5); }
+.nt-dot.critical { background: var(--err); box-shadow: 0 0 10px rgba(255,90,82,.6); }
+.nt-txt { min-width: 0; flex: 1; font-size: 13px; }
+.nt-top { display: flex; gap: 8px; align-items: baseline; }
+.nt-txt b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.nt-txt p { margin: 3px 0 4px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; white-space: pre-line; }
+.nt-meta { font-size: 11.5px; color: var(--faint); }
+.nt-meta a { color: var(--muted); text-decoration: underline; }
+.nt-x { font-size: 11px; color: var(--faint); }
+.nt-banner { position: relative; z-index: 1; max-width: 1200px; margin: 18px auto 0; padding: 0 20px; }
+.home-in .nt-banner, .wrap .nt-banner { padding: 0; margin: 0 0 18px; }
+#opts ~ .nt-banner, .home-in > .nt-banner { width: 100%; }
+.nt-card { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(255,90,82,.4); background: linear-gradient(180deg, rgba(255,90,82,.09), rgba(255,90,82,.03)); }
+.nt-acts { display: flex; gap: 6px; flex: none; }
+@media (max-width: 560px) { .nt-card { flex-wrap: wrap; } .nt-acts { width: 100%; justify-content: flex-end; } }
+.nt-head .spacer { flex: 1; }
+.hello .nt { margin-left: auto; }
+.hello .nt + .gear { margin-left: 0; }
+@media (max-width: 640px) { .nt-pop { position: fixed; left: 12px; right: 12px; top: 64px; width: auto; max-height: calc(100vh - 80px); } }

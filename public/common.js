@@ -51,7 +51,90 @@ export async function chrome(active) {
   if (burrow && !me.modules?.burrow && active !== "tunnels") burrow.hidden = true;
   updateBanner(me, document.querySelector("main"));
   freshUpdate(me, document.querySelector("main"));
+  notices(me);
   return me;
+}
+
+// ------------------------------------------------------------------ notices
+// Warnings addons put on the dashboard (Bulwark: attacks, bans, waves): a bell
+// in the top bar with the unread count and a list, and a banner for an unread
+// critical one. Checked again every 30 s.
+const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
+const SRC = (s) => s === "aegis" ? "Aegis" : s.charAt(0).toUpperCase() + s.slice(1);
+let nState = null, nTimer = null;
+export function notices(me) {
+  nState = me?.notices || nState;
+  if (!nState) return;
+  let bell = document.querySelector(".nt-bell");
+  if (!bell) {
+    const host = document.querySelector(".top-r") || document.querySelector(".hello");
+    if (!host) return;
+    const wrap = document.createElement("div");
+    wrap.className = "nt";
+    wrap.innerHTML = `<button type="button" class="nt-bell" aria-label="Notices" aria-haspopup="true" aria-expanded="false">${BELL}<b class="nt-count" hidden></b></button><div class="nt-pop" hidden role="dialog" aria-label="Notices"></div>`;
+    const anchor = host.querySelector(".gear") || host.querySelector(".out") || host.querySelector('a[href="/__gate/logout"]');
+    anchor ? anchor.before(wrap) : host.prepend(wrap);
+    bell = wrap.querySelector(".nt-bell");
+    bell.addEventListener("click", (e) => { e.stopPropagation(); togglePop(); });
+    document.addEventListener("click", (e) => { if (!e.target.closest(".nt")) closePop(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePop(); });
+    clearInterval(nTimer);
+    nTimer = setInterval(async () => { if (document.hidden) return; try { const j = await api("/__gate/api/notices"); nState = j; paintBell(); noticeBanner(); if (!document.querySelector(".nt-pop").hidden) paintPop(j.notices); } catch { /* offline */ } }, 30000);
+  }
+  paintBell(); noticeBanner();
+}
+function paintBell() {
+  const c = document.querySelector(".nt-count"), b = document.querySelector(".nt-bell");
+  if (!c) return;
+  c.hidden = !nState.unread; c.textContent = nState.unread > 99 ? "99+" : nState.unread;
+  b.dataset.level = nState.worst || "";
+  b.setAttribute("aria-label", nState.unread ? `Notices: ${nState.unread} unread` : "Notices");
+}
+async function togglePop() {
+  const pop = document.querySelector(".nt-pop"), b = document.querySelector(".nt-bell");
+  if (!pop.hidden) return closePop();
+  pop.hidden = false; b.setAttribute("aria-expanded", "true");
+  pop.innerHTML = '<p class="muted small" style="padding:14px">Loading…</p>';
+  try { const j = await api("/__gate/api/notices"); nState = j; paintPop(j.notices); } catch (e) { pop.innerHTML = `<p class="err-msg" style="padding:14px">${h(e.message)}</p>`; }
+}
+function closePop() { const pop = document.querySelector(".nt-pop"); if (pop && !pop.hidden) { pop.hidden = true; document.querySelector(".nt-bell")?.setAttribute("aria-expanded", "false"); } }
+function paintPop(list) {
+  const pop = document.querySelector(".nt-pop");
+  const items = list.length ? list.map((n) => `<li class="nt-item${n.read ? "" : " unread"}" data-id="${h(n.id)}">
+      <i class="nt-dot ${h(n.level)}"></i>
+      <div class="nt-txt"><div class="nt-top"><b>${h(n.title)}</b>${n.count > 1 ? `<span class="nt-x">×${n.count}</span>` : ""}</div>
+        ${n.body ? `<p>${h(n.body)}</p>` : ""}
+        <div class="nt-meta">${h(SRC(n.source))} · ${h(ago(n.t))}${n.link ? ` · <a href="${h(n.link)}">Open</a>` : ""}</div></div></li>`).join("")
+    : '<li class="nt-empty">Nothing to report. Warnings from Bulwark and other addons show up here.</li>';
+  pop.innerHTML = `<div class="nt-head"><b>Notices</b><span class="spacer"></span>
+      ${nState.unread ? '<button type="button" class="btn ghost sm" data-nt="read">Mark all read</button>' : ""}
+      ${list.some((n) => n.read) ? '<button type="button" class="btn ghost sm" data-nt="clear">Clear read</button>' : ""}</div>
+    <ul class="nt-list">${items}</ul>`;
+  pop.onclick = async (e) => {
+    e.stopPropagation();
+    const b = e.target.closest("[data-nt]");
+    if (b) { const j = await api(`/__gate/api/notices/${b.dataset.nt}`, { method: "POST", body: JSON.stringify({ all: true }) }); nState = j; paintBell(); noticeBanner(); paintPop(j.notices); return; }
+    const li = e.target.closest(".nt-item.unread");
+    if (li) { const j = await api("/__gate/api/notices/read", { method: "POST", body: JSON.stringify({ ids: [li.dataset.id] }) }); nState = j; paintBell(); noticeBanner(); if (!e.target.closest("a")) paintPop(j.notices); }
+  };
+}
+function noticeBanner() {
+  const b = nState?.banner, cur = document.querySelector(".nt-banner");
+  if (!b) { cur?.remove(); return; }
+  if (cur?.dataset.id === b.id) return;
+  cur?.remove();
+  const main = document.querySelector("#opts") || document.querySelector("main");
+  if (!main) return;
+  const el = document.createElement("section");
+  el.className = "nt-banner"; el.dataset.id = b.id; el.setAttribute("role", "alert");
+  el.innerHTML = `<div class="nt-card"><i class="nt-dot critical"></i><div class="nt-txt"><b>${h(b.title)}</b>${b.count > 1 ? ` <span class="nt-x">×${b.count}</span>` : ""}
+      ${b.body ? `<p>${h(b.body)}</p>` : ""}<div class="nt-meta">${h(SRC(b.source))} · ${h(ago(b.t))}</div></div>
+      <div class="nt-acts">${b.link ? `<a class="btn sm" href="${h(b.link)}">Open</a>` : ""}<button type="button" class="btn ghost sm" data-nt-dismiss>Dismiss</button></div></div>`;
+  main.before(el);
+  el.querySelector("[data-nt-dismiss]").addEventListener("click", async () => {
+    const j = await api("/__gate/api/notices/read", { method: "POST", body: JSON.stringify({ ids: [b.id] }) }); nState = j; paintBell(); el.remove(); noticeBanner();
+  });
+  el.querySelector("a.btn")?.addEventListener("click", () => { api("/__gate/api/notices/read", { method: "POST", body: JSON.stringify({ ids: [b.id] }) }).catch(() => {}); });
 }
 
 // ------------------------------------------------------------------ updates
