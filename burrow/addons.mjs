@@ -190,6 +190,44 @@ function coerce(st, v) {
   return v;
 }
 
+// "update_card": how the host dresses this addon's update card (Weft). Read from
+// the NEW version's manifest when an update is found, so each release can say
+// what it brings. Every key is optional:
+//   theme       green (default) | blue | red | orange | amber | purple | pink | teal | gray
+//   accent      "#rrggbb": a colour of the addon's own (wins over theme)
+//   style       glow (default) | solid | outline | minimal
+//   urgency     normal | recommended | important | security | critical
+//               (security/critical: red, a shield, a "install it soon" line)
+//   badge       the chip beside the title (≤14 characters; "" for none; default NEW)
+//   icon        download | shield | bolt | spark | heart | star | wrench | rocket | lock | bug
+//   title       ≤80 characters, with {name}, {version}, {from}
+//   tagline     ≤140 characters: one line under the title
+//   highlights  up to 5 lines (≤100 characters each): what's new
+//   button      ≤24 characters, with {version}
+//   notes       an http(s) link to the release notes
+export const CARD_THEMES = ["green", "blue", "red", "orange", "amber", "purple", "pink", "teal", "gray"];
+export const CARD_STYLES = ["glow", "solid", "outline", "minimal"];
+export const CARD_URGENCY = ["normal", "recommended", "important", "security", "critical"];
+export const CARD_ICONS = ["download", "shield", "bolt", "spark", "heart", "star", "wrench", "rocket", "lock", "bug"];
+export function cleanUpdateCard(c) {
+  if (c == null) return null;
+  if (typeof c !== "object" || Array.isArray(c)) fail('"update_card" must be an object');
+  const out = {};
+  const pick = (k, list) => { if (c[k] == null) return; if (!list.includes(c[k])) fail(`update_card.${k} must be one of ${list.join(", ")}`); out[k] = c[k]; };
+  const str = (k, max) => { if (c[k] == null) return; if (typeof c[k] !== "string") fail(`update_card.${k} must be text`); if (c[k].trim().length > max) fail(`update_card.${k} is longer than ${max} characters`); out[k] = c[k].trim(); };
+  pick("theme", CARD_THEMES); pick("style", CARD_STYLES); pick("urgency", CARD_URGENCY); pick("icon", CARD_ICONS);
+  if (c.accent != null) { if (!/^#[0-9a-fA-F]{6}$/.test(String(c.accent))) fail('update_card.accent must look like "#ff5a52"'); out.accent = String(c.accent).toLowerCase(); }
+  str("badge", 14); str("title", 80); str("tagline", 140); str("button", 24);
+  if (c.highlights != null) {
+    if (!Array.isArray(c.highlights) || c.highlights.length > 5 || !c.highlights.every((x) => typeof x === "string" && x.trim() && x.trim().length <= 100)) fail("update_card.highlights must be up to 5 lines of at most 100 characters");
+    out.highlights = c.highlights.map((x) => x.trim());
+  }
+  if (c.notes != null) out.notes = url(c.notes, "update_card.notes");
+  const unknown = Object.keys(c).filter((k) => !["theme", "accent", "style", "urgency", "badge", "icon", "title", "tagline", "highlights", "button", "notes"].includes(k));
+  if (unknown.length) fail(`update_card: unknown key "${unknown[0]}"`);
+  return Object.keys(out).length ? out : null;
+}
+
 export function loadManifest(root) {
   const path = join(root, MANIFEST);
   let size;
@@ -212,6 +250,7 @@ export function loadManifest(root) {
   m.license = text(d, "license", 40);
   m.homepage = d.homepage ? url(d.homepage, '"homepage"') : "";
   m.logo = d.logo ? image(root, d.logo, '"logo"') : "";
+  m.update_card = cleanUpdateCard(d.update_card);
 
   const scripts = d.scripts;
   if (!scripts || typeof scripts !== "object" || !scripts.install) fail('forge-addon.json needs "scripts": {"install": "..."}');
@@ -701,12 +740,12 @@ export class Addons {
       const tmp = mkdtempSync(join(this.dir, ".chk-"));
       try {
         const digest = await fetchSource(src, join(tmp, "x"));
-        let version = "";
-        try { version = loadManifest(join(tmp, "x", rec.subdir || "")).version; } catch { /* */ }
+        let version = "", card = null;
+        try { const nm = loadManifest(join(tmp, "x", rec.subdir || "")); version = nm.version; card = nm.update_card; } catch { /* */ }
         out.up_to_date = digest === rec.commit;
-        out.remote = { commit: digest, short: digest.slice(7, 14), version, subject: "a new archive" };
+        out.remote = { commit: digest, short: digest.slice(7, 14), version, subject: "a new archive", card };
         out.note = out.up_to_date ? "Checked by downloading the archive again." : "The archive at that link has changed.";
-        this.patch(id, { remote: { checked: out.checked, up_to_date: out.up_to_date, commit: digest, version, subject: "a new archive" } });
+        this.patch(id, { remote: { checked: out.checked, up_to_date: out.up_to_date, commit: digest, version, subject: "a new archive", card } });
         return out;
       } finally { rmSync(tmp, { recursive: true, force: true }); }
     }
@@ -730,9 +769,13 @@ export class Addons {
       out.commits = commits.slice(0, 20);
       out.remote = commits[0] || { commit: remote, short: remote.slice(0, 7) };
       const mj = await git(["show", `${remote}:${(sub ? sub + "/" : "") + MANIFEST}`], { cwd: repo, timeout: 60 });
-      try { out.remote.version = mj.code === 0 ? String(JSON.parse(mj.out).version || "").slice(0, 30) : ""; } catch { out.remote.version = ""; }
+      let nm = null;
+      try { nm = mj.code === 0 ? JSON.parse(mj.out) : null; } catch { /* not JSON there */ }
+      out.remote.version = String(nm?.version || "").slice(0, 30);
+      // the new version's own update card (a bad one is left out, never in the way of the update)
+      try { out.remote.card = cleanUpdateCard(nm?.update_card); } catch { out.remote.card = null; }
     } else out.remote = { commit: remote, short: remote.slice(0, 7) };
-    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null, count: same ? 0 : (out.commits || []).length } });
+    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null, count: same ? 0 : (out.commits || []).length, card: out.remote.card || null } });
     return out;
   }
 
@@ -756,6 +799,7 @@ export class Addons {
     return Object.values(this.load()).filter((r) => r.installed && r.remote?.up_to_date === false).map((r) => ({
       id: r.id, name: r.manifest.name, version: r.installed_version || r.manifest.version, latest: r.remote.version || null,
       commit: r.remote.commit || null, from: r.commit || null, subject: r.remote.subject || null, count: r.remote.count || 0, checked: r.remote.checked,
+      card: r.remote.card || r.manifest.update_card || null,
       logo: r.manifest.logo ? `/__gate/api/addons/${r.id}/image?v=${(r.commit || String(r.updated || 0)).slice(0, 12)}` : null,
     }));
   }

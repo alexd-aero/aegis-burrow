@@ -1,12 +1,13 @@
 // First run, after the login exists: Burrow is built in (and can go), and
 // the full pack (Selkies Forge, Termix with its own login, Burrow) is offered,
 // each part optional, or not at all. Selkies Forge is never ticked for you:
-// it is a big install, and only goes on when someone asks for it. A domain
+// it is a big install, and only goes on when someone asks for it. Bulwark is
+// recommended (ticked): it guards every request from the first minute. A domain
 // (Cloudflare, with the subdomain you pick) can be linked here too.
 import { $, h, api, post, toast } from "./common.js";
 
 const app = $("#app");
-const S = { pick: { forge: false, termix: true, burrow: true }, status: null, poll: null,
+const S = { pick: { forge: false, termix: true, burrow: true, bulwark: true }, status: null, poll: null,
             cf: null, cfPoll: null, label: null, linking: false };
 
 const ICON = {
@@ -19,6 +20,8 @@ const PARTS = [
   { id: "forge", logo: "/__gate/logos/forge.svg", name: "Selkies Forge", text: "Linux desktops in your browser: 150+ to pick from, started in Docker, opened from here." },
   { id: "termix", logo: "/__gate/logos/termix.svg", name: "Termix", text: "SSH terminals, a file manager and saved hosts in the browser. One Docker container, only reachable through this gate." },
   { id: "burrow", logo: "/__gate/logos/burrow.svg", name: "Burrow", text: "Publish any port on its own HTTPS address, behind this login, with live traffic. Comes with Aegis.", builtin: true },
+  { id: "bulwark", logo: "/__gate/logos/bulwark.svg", name: "Bulwark", recommended: true,
+    text: "Guards every request from the first minute: blocks scanners and attackers, bans repeat offenders, and shows each attack live. Nothing to set up." },
 ];
 
 function head(sub) {
@@ -30,12 +33,12 @@ function picker() {
   const st = S.status || {};
   const card = (p) => {
     const found = p.id === "termix" && !st.termix && st.found && st.found.termix;
-    const have = p.id === "forge" ? st.forge : p.id === "termix" ? st.termix : false;
+    const have = p.id === "forge" ? st.forge : p.id === "termix" ? st.termix : p.id === "bulwark" ? st.bulwark : false;
     const on = S.pick[p.id];
     return `<button type="button" class="card pk${on ? " on" : ""}" data-pick="${p.id}" aria-pressed="${on}">
       <span class="pk-tick" aria-hidden="true">${ICON.check}</span>
       <img class="pk-logo" src="${p.logo}" alt="" width="52" height="52">
-      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${have ? (p.id === "forge" && st.found?.forge?.port ? ` <span class="pill ok">running on port ${st.found.forge.port}</span>` : ' <span class="pill ok">installed</span>') : ""}${found ? ` <span class="pill ok">found on port ${found.port}</span>` : ""}</b>
+      <b>${h(p.name)}${p.builtin ? ' <span class="pill">built in</span>' : ""}${p.recommended && !have ? ' <span class="pill rec">recommended</span>' : ""}${have ? (p.id === "forge" && st.found?.forge?.port ? ` <span class="pill ok">running on port ${st.found.forge.port}</span>` : ' <span class="pill ok">installed</span>') : ""}${found ? ` <span class="pill ok">found on port ${found.port}</span>` : ""}</b>
       <span>${found ? "Already running here: it will be linked, not installed again. Use your own Termix account."
         : p.id === "burrow" && st.found?.oldBurrow ? `An older standalone Burrow${st.found.oldBurrow.version ? " " + h(st.found.oldBurrow.version) : ""} is also here (${h(st.found.oldBurrow.home)}). This one replaces it; its tunnels aren't moved over. Remove it when you're ready: ${h(st.found.oldBurrow.cli)} uninstall`
         : h(p.text)}</span>
@@ -64,7 +67,7 @@ function picker() {
       <button class="btn ghost" id="pkSkip">I don't want to install this pack</button>
     </div>`;
   const go = $("#pkGo");
-  const none = !S.pick.forge && !(S.pick.termix && !st.termix) ;
+  const none = !S.pick.forge && !(S.pick.termix && !st.termix) && !(S.pick.bulwark && !st.bulwark);
   go.textContent = none ? "Continue" : "Install the pack";
 }
 
@@ -163,7 +166,7 @@ document.addEventListener("click", async (e) => {
   if (!go) return;
   const err = $("#pkErr"); err.textContent = "";
   const st = S.status || {};
-  const choice = { burrow: S.pick.burrow, forge: S.pick.forge && !st.forge, termix: null };
+  const choice = { burrow: S.pick.burrow, forge: S.pick.forge && !st.forge, termix: null, bulwark: S.pick.bulwark };
   if (S.pick.termix && !st.termix && st.found && st.found.termix) choice.termix = { link: true };
   else if (S.pick.termix && !st.termix) {
     const username = $("#txUser").value.trim(), password = $("#txPass").value;

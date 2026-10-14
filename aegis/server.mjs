@@ -190,7 +190,7 @@ const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
                  "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "ui.css", "login.css",
-                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg"]) {
+                 "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/bulwark.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
 // Every link to our scripts and styles carries the version: a proxy in front
@@ -350,30 +350,45 @@ async function extRoute(id, path, method, query, json, via) {
 setTimeout(syncExtensions, 1500);
 setInterval(syncExtensions, 60000);
 
-// Addons that come with Aegis × Burrow: each is installed once, by itself, a
-// little after the first start (or the update that brought it). One you
-// uninstall stays uninstalled: state.json's defaultAddons remembers it was done.
+// Addons that come with Aegis × Burrow: each is installed once, a little after
+// the first start (or the update that brought it). One you uninstall stays
+// uninstalled: state.json's defaultAddons remembers it was done. Bulwark is
+// asked about first (ask: the welcome page recommends it, ticked): a new
+// install gets it only once the pack is decided and it wasn't turned down;
+// an install from before that question existed (no answer on record) gets it.
 const DEFAULT_ADDONS = [{ id: PAGES, source: "https://github.com/alexd-aero/burrow-pages" },
-                        { id: "bulwark", source: "https://github.com/alexd-aero/bulwark" }];
+                        { id: "bulwark", source: "https://github.com/alexd-aero/bulwark", ask: true }];
+const markDefault = (id) => settings.set({ defaultAddons: { ...(settings.get("defaultAddons") || {}), [id]: Date.now() } });
+async function installDefault(id, say = () => {}) {
+  const d = DEFAULT_ADDONS.find((x) => x.id === id);
+  if (!addons.load()[id]) { say("fetching it…"); await addons.add(d.source); }
+  if (!addons.load()[id].installed) {
+    const { id: job } = addons.install(id, {});
+    let seen = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const j = addons.job(job);
+      for (const l of (j.lines || []).slice(seen)) if (l.line?.trim()) say(String(l.line).slice(0, 200));
+      seen = (j.lines || []).length;
+      if (j.state === "running") continue;
+      if (j.state !== "done") throw new Error(j.error || j.state);
+      break;
+    }
+  }
+  markDefault(id);
+  log("addons:", id, "is installed (it comes with Aegis × Burrow)");
+}
 async function defaultAddons() {
   if (process.env.AEGIS_NO_DEFAULT_ADDONS) return;
   for (const d of DEFAULT_ADDONS) {
     if ((settings.get("defaultAddons") || {})[d.id]) continue;
-    try {
-      if (!addons.load()[d.id]) await addons.add(d.source);
-      if (!addons.load()[d.id].installed) {
-        const { id } = addons.install(d.id, {});
-        for (;;) {
-          await new Promise((r) => setTimeout(r, 1000));
-          const j = addons.job(id);
-          if (j.state === "running") continue;
-          if (j.state !== "done") throw new Error(j.error || j.state);
-          break;
-        }
-      }
-      settings.set({ defaultAddons: { ...(settings.get("defaultAddons") || {}), [d.id]: Date.now() } });
-      log("addons:", d.id, "is installed (it comes with Aegis × Burrow)");
-    } catch (e) { log("addons: couldn't install", d.id, "by default:", e.message, "- trying again later"); }
+    if (d.ask) {
+      const p = settings.get("pack") || {};
+      if (!p.decided) continue;                                   // the welcome page asks first
+      if (p.bulwark === false) { markDefault(d.id); log("addons:", d.id, "was turned down on the welcome page"); continue; }
+    }
+    try { await installDefault(d.id); }
+    catch (e) { log("addons: couldn't install", d.id, "by default:", e.message, "- trying again later"); }
   }
 }
 setTimeout(defaultAddons, 30000);
@@ -390,7 +405,7 @@ const bridgeTick = () => adoptForge({ addons, log }).catch((e) => log("bridge:",
 setTimeout(bridgeTick, 20000);
 setInterval(bridgeTick, 120000);
 const termix = new Termix({ settings, log });
-const pack = new Pack({ settings, termix, log, tunnels });
+const pack = new Pack({ settings, termix, log, tunnels, addon: { has: (id) => !!addons.load()[id]?.installed, install: (id, say) => installDefault(id, say) } });
 // Updates from GitHub, by hand or by itself (Settings → Updates)
 const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo.stop(); process.exit(0); } });
 
@@ -399,6 +414,17 @@ const serveoForward = () => settings.get("serveoForward") !== false;
 const mainHost = () => settings.get("domain")?.mainHost?.toLowerCase() || null;
 // the dashboard answers here: the main domain's name, local names, the serveo link, and another domain's dashboard name
 const isDashHost = (host) => host === mainHost() || isLocalName(host) || host === serveo.host() || burrow.domains.isDashboard(host);
+// Your dashboards on the web: the main one and one per other domain that has a
+// dashboard name. Signed in on any of them, the switcher in the top bar opens
+// the others signed in too (a ticket hop, like a login tunnel's).
+function dashboards(current) {
+  const out = [], main = mainHost();
+  if (main) out.push({ host: main, zone: main.split(".").slice(1).join("."), main: true });
+  for (const d of burrow.domains.list()) if (d.label) out.push({ host: burrow.domains.dashboardOf(d), zone: d.zone.name, main: false });
+  const seen = new Set();
+  return out.filter((x) => !seen.has(x.host) && seen.add(x.host)).map((x) => ({ ...x, current: x.host === current }));
+}
+const isWebDash = (host) => !!host && (host === mainHost() || burrow.domains.isDashboard(host));
 
 // ---------- helpers ----------
 
@@ -861,6 +887,7 @@ function me(req) {
     app: "aegis-burrow", version: VERSION, title: settings.get("title"), user: s?.u || null,
     mode: tunnels.mode, pattern: tunnels.pattern(),
     domain: d ? { mainHost: d.mainHost, managed: !!d.managed } : null,
+    dashboards: dashboards(hostOf(req)),
     termix: !!settings.get("termix"),
     integrations: listIntegrations().map((i) => viewOf(i)),
     tunnels: tunnels.tunnels.size,

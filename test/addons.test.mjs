@@ -46,6 +46,22 @@ test("the manifest: same rules as the forge", () => {
   rmSync(d, { recursive: true });
 });
 
+test("update_card: the addon dresses its update card; bad keys are named", () => {
+  const d = addon(tmp());
+  assert.equal(A.loadManifest(d).update_card, null, "none: the host's own card");
+  addon(d, { update_card: { theme: "red", urgency: "security", badge: "SECURITY", icon: "shield", title: "{name} {version}: a security fix",
+                            tagline: "Closes a hole in the payload check.", highlights: ["Blocks a new phishing kit", "Faster lists"], button: "Update now", notes: "https://example.com/notes", style: "solid", accent: "#FF5A52" } });
+  const c = A.loadManifest(d).update_card;
+  assert.equal(c.theme, "red"); assert.equal(c.accent, "#ff5a52"); assert.deepEqual(c.highlights, ["Blocks a new phishing kit", "Faster lists"]);
+  for (const bad of [{ theme: "rainbow" }, { accent: "red" }, { style: "neon" }, { urgency: "meh" }, { icon: "cat" }, { badge: "A VERY LONG BADGE TEXT" },
+                     { highlights: ["1", "2", "3", "4", "5", "6"] }, { highlights: ["x".repeat(101)] }, { notes: "ftp://x" }, { colour: "red" }, "red"]) {
+    addon(d, { update_card: bad });
+    assert.throws(() => A.loadManifest(d), A.AddonError, JSON.stringify(bad));
+  }
+  assert.equal(A.cleanUpdateCard({}), null, "an empty card is no card");
+  rmSync(d, { recursive: true });
+});
+
 test("add, install, status, action, uninstall, remove (a local folder, no network)", async () => {
   const dir = tmp();
   const src = addon(tmp(), { id: "life", settings: [{ key: "WORD", label: "Word", default: "hi" }],

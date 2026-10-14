@@ -2,7 +2,7 @@
 // order, under which name, and any links of your own are yours to set with
 // Settings → Customize the home page (/?customize=1; the gear opens Settings).
 // Saved in data/state.json (home).
-import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate, notices } from "./common.js";
+import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate, notices, dashSwitch, AU, addonUpdCard, addonUpdClick } from "./common.js";
 
 const opts = $("#opts"), extra = $("#extra");
 const S = { me: null, draft: null, termixJob: false };
@@ -76,6 +76,26 @@ function termixOffer(st) {
   </section>`;
 }
 
+// Addons with an update (Bulwark, Burrow Pages…): the same cards as on the Burrow
+// page, right here, each dressed the way the addon asked (its update_card).
+function addonUpdates(me) {
+  if (!Object.keys(AU.job).length) AU.list = me.addonUpdates || [];
+  let el = document.querySelector(".home-upds");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "home-upds";
+    opts.before(el);
+    el.addEventListener("click", (e) => { const b = e.target.closest("[data-act]"); if (b) addonUpdClick(b, paintUpds, async () => { try { S.me = await api("/__gate/api/me"); } catch { /* restarting */ } }); });
+  }
+  paintUpds();
+}
+function paintUpds() {
+  const el = document.querySelector(".home-upds");
+  if (!el) return;
+  const ids = [...new Set([...AU.list.map((u) => u.id), ...Object.keys(AU.job), ...Object.keys(AU.done)])];
+  el.innerHTML = ids.map((id) => addonUpdCard(id, { whatsNew: "/__gate/tunnels#/addons" })).join("");
+}
+
 async function render() {
   let me;
   try { me = S.me = await api("/__gate/api/me"); } catch (e) { opts.innerHTML = `<p class="muted">${h(e.message)}</p>`; return; }
@@ -84,7 +104,9 @@ async function render() {
   $("#tagline").textContent = home.tagline || "Where to?";
   document.body.dataset.bg = home.background || "grid";
   if (!document.querySelector(".upd-banner")) updateBanner(me, opts);
+  addonUpdates(me);
   notices(me);
+  if (!document.querySelector(".ds")) dashSwitch(me);
   if (!S.freshAsked) { S.freshAsked = true; freshUpdate(me, opts); }
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")

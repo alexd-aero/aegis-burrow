@@ -52,7 +52,37 @@ export async function chrome(active) {
   updateBanner(me, document.querySelector("main"));
   freshUpdate(me, document.querySelector("main"));
   notices(me);
+  dashSwitch(me);
   return me;
+}
+
+// ------------------------------------------------------------- your dashboards
+// With other domains that have a dashboard name, a switcher next to the bell:
+// every dashboard of yours, and a click opens it signed in (this dashboard
+// hands it a ticket), from whichever one you are on.
+export function dashSwitch(me) {
+  const list = me?.dashboards || [];
+  document.querySelector(".ds")?.remove();
+  if (list.length < 2) return;
+  const host = document.querySelector(".top-r") || document.querySelector(".hello");
+  if (!host) return;
+  const here = list.find((d) => d.current);
+  const next = location.pathname + location.search + location.hash;
+  const wrap = document.createElement("div");
+  wrap.className = "ds";
+  wrap.innerHTML = `<button type="button" class="ds-btn" aria-haspopup="true" aria-expanded="false" title="Your dashboards">${ICONS.globe}<span class="ds-cur">${h(here ? here.zone : "Dashboards")}</span><b class="ds-n">${list.length}</b></button>
+    <div class="ds-pop" hidden role="dialog" aria-label="Your dashboards"><div class="nt-head"><b>Your dashboards</b><span class="spacer"></span><span class="muted small">one sign-in for all</span></div>
+    <ul class="ds-list">${list.map((d) => `<li>${d.current
+      ? `<div class="ds-row on" aria-current="page"><span class="ds-ic">${ICONS.globe}</span><span class="ds-two"><b>${h(d.host)}</b><span>${d.main ? "Main dashboard" : h(d.zone)} · you're here</span></span></div>`
+      : `<a class="ds-row" href="/__gate/sso?to=${encodeURIComponent(d.host)}&amp;next=${encodeURIComponent(next)}"><span class="ds-ic">${ICONS.globe}</span><span class="ds-two"><b>${h(d.host)}</b><span>${d.main ? "Main dashboard" : h(d.zone)}</span></span>${ICONS.arrow}</a>`}</li>`).join("")}</ul>
+    <p class="ds-foot muted small">Tunnels on every domain are on the Burrow page of any of them.</p></div>`;
+  const anchor = host.querySelector(".nt") || host.querySelector(".gear") || host.querySelector(".out") || host.querySelector('a[href="/__gate/logout"]');
+  anchor ? anchor.before(wrap) : host.prepend(wrap);
+  const btn = wrap.querySelector(".ds-btn"), pop = wrap.querySelector(".ds-pop");
+  const close = () => { pop.hidden = true; btn.setAttribute("aria-expanded", "false"); };
+  btn.addEventListener("click", (e) => { e.stopPropagation(); const open = pop.hidden; pop.hidden = !open; btn.setAttribute("aria-expanded", String(open)); });
+  document.addEventListener("click", (e) => { if (!e.target.closest(".ds")) close(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
 }
 
 // ------------------------------------------------------------------ notices
@@ -168,6 +198,118 @@ export const UPD = {
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M7 7l10 10M17 7 7 17"/></svg>',
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
 };
+// ------------------------------------------------------------------ addon updates
+// One card for an addon with an update, drawn the same on the home page and on
+// the Burrow page (AU holds what both know: the updates, a running update, one
+// just done). The addon dresses its own card through its manifest (the Weft
+// field "update_card", read from the new version): a theme or a colour of its
+// own, a style, a badge, an icon, a title, a tagline, highlights, the button's
+// words, how urgent it is, and a link to its release notes.
+export const AU = { list: [], job: {}, done: {} };
+const AU_ICONS = {
+  download: null, // UPD.down
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.4 7.5 9.5 4.4-1.1 7.5-4.9 7.5-9.5V6L12 3Z"/><path d="m8.8 12.2 2.3 2.3 4.3-4.6"/></svg>',
+  bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M13 2.5 4.5 13.5h6.5l-1 8 8.5-11h-6.5l1-8Z"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3c.6 4.6 2.4 6.4 7 7-4.6.6-6.4 2.4-7 7-.6-4.6-2.4-6.4-7-7 4.6-.6 6.4-2.4 7-7Z"/><path d="M19 15.5c.25 1.6.9 2.25 2.5 2.5-1.6.25-2.25.9-2.5 2.5-.25-1.6-.9-2.25-2.5-2.5 1.6-.25 2.25-.9 2.5-2.5Z"/></svg>',
+  heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7a4.3 4.3 0 0 1 7.5 2.8C19.5 15.4 12 20 12 20Z"/></svg>',
+  star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.8L12 3.5Z"/></svg>',
+  wrench: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3.5 17.3a1.8 1.8 0 0 0 2.6 2.6l5.8-5.8a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6Z"/></svg>',
+  rocket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4.5c3-1.6 5.4-1.3 5.5-1 .3.1.6 2.5-1 5.5L13 14.5 9.5 11 14 4.5Z"/><path d="M9.5 11 6 11.5 4 14l3.5.5M13 14.5l-.5 3.5L10 20l-.5-3.5"/><path d="M6 18c-1 .5-1.8 1.4-2 2.5 1.1-.2 2-1 2.5-2"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>',
+  bug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><rect x="7" y="7.5" width="10" height="12.5" rx="5"/><path d="M12 11v9M7 13H3.5M20.5 13H17M7.5 17.5 4.5 19.5M16.5 17.5l3 2M8.5 8 6.5 5.5M15.5 8l2-2.5"/></svg>',
+};
+const AU_THEMES = new Set(["green", "blue", "red", "orange", "amber", "purple", "pink", "teal", "gray"]);
+const AU_STYLES = new Set(["glow", "solid", "outline", "minimal"]);
+const AU_URGENT = {
+  security: { theme: "red", badge: "SECURITY", icon: "shield", line: "A security update: install it soon." },
+  critical: { theme: "red", badge: "CRITICAL", icon: "shield", line: "A critical fix: install it now." },
+  important: { theme: "orange", badge: "IMPORTANT", icon: "bolt", line: "" },
+  recommended: { badge: "RECOMMENDED", line: "" },
+  normal: {},
+};
+export const auLaterKey = (u) => `burrow-addon-later-${u.id}-${u.commit || u.latest}`;
+const auLaterGet = (u) => { try { return localStorage.getItem(auLaterKey(u)) === "1"; } catch { return false; } };
+export const auLaterSet = (u) => { try { localStorage.setItem(auLaterKey(u), "1"); } catch { /* private window */ } };
+// a colour of the addon's own: the card's five shades from one hex
+function accentStyle(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "";
+  const n = parseInt(m[1], 16), c = [n >> 16, (n >> 8) & 255, n & 255];
+  const mix = (t, k) => "#" + c.map((x) => Math.round(x + (t - x) * k).toString(16).padStart(2, "0")).join("");
+  const lum = (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255;
+  return `--upd:#${m[1]};--upd-hi:${mix(255, 0.4)};--upd-deep:${mix(0, 0.3)};--upd-ink:${lum > 0.55 ? mix(0, 0.88) : "#ffffff"};--upd-rgb:${c.join(",")}`;
+}
+// the card's look: urgency first, then what the addon asked for
+function auLook(card) {
+  const c = card || {}, u = AU_URGENT[c.urgency] || {};
+  return { theme: AU_THEMES.has(c.theme) ? c.theme : u.theme || "green", style: AU_STYLES.has(c.style) ? c.style : "glow",
+           badge: c.badge != null ? String(c.badge) : u.badge || "NEW", icon: AU_ICONS[c.icon] || AU_ICONS[u.icon] || UPD.down,
+           accent: c.accent || "", line: u.line || "", urgency: c.urgency || "normal" };
+}
+const fill = (t, u, to) => String(t).replaceAll("{name}", u.name).replaceAll("{version}", to || u.latest || "").replaceAll("{from}", u.version || "");
+// whatsNew: "check" (the Burrow page asks Burrow), or a link (the home page)
+export function addonUpdCard(id, { whatsNew = "check" } = {}) {
+  const job = AU.job[id], done = AU.done[id], u = AU.list.find((x) => x.id === id) || job?.u;
+  const logo = (x) => x?.logo ? `<img class="uc-logo" src="${h(x.logo)}" alt="">` : "";
+  const short = (c) => String(c || "").slice(0, 7);
+  const card = (u || done)?.card || null, look = auLook(card);
+  let html;
+  if (done) {
+    html = updHero("ok", UPD.check, `${logo(done)}${h(done.name)} is up to date`,
+      `Updated to <span class="uc-pill">v${h(done.to)}</span> just now${done.to !== done.from ? `, from v${h(done.from)}` : ""}. Everything it had set up was kept.`) +
+      `<div class="uc-foot"><span class="spacer"></span><button class="uc-btn" data-act="upd-done" data-id="${h(id)}">Done</button></div>`;
+  } else if (job?.state === "error") {
+    html = updHero("bad", UPD.x, `${logo(u)}${h(u.name)} didn't update`, h(job.error || "The update stopped.") + " What it had before is still in place.") +
+      `<div class="uc-foot"><span class="spacer"></span><button class="uc-btn" data-act="upd-done" data-id="${h(id)}">Close</button>
+        <button class="uc-go" data-act="upd-go" data-id="${h(id)}">${UPD.down}<span>Try again</span></button></div>`;
+  } else if (u && (job || !auLaterGet(u))) {
+    const to = u.latest && u.latest !== u.version ? u.latest : null, run = !!job;
+    const title = card?.title ? h(fill(card.title, u, to)) : `${h(u.name)} update`;
+    const badge = look.badge ? ` <span class="new-chip">${h(look.badge.slice(0, 14))}</span>` : "";
+    const base = `${to ? `<span class="uc-pill">v${h(to)}</span> is ready to install` : `Commit <span class="mono">${h(short(u.commit))}</span> is ready to install`}${!card?.tagline && u.subject ? ` · ${h(u.subject)}` : ""}.`;
+    const sub = `${card?.tagline ? `<span class="uc-line">${h(card.tagline)}</span>` : ""}${look.line ? `<b class="uc-urgent">${h(look.line)}</b> ` : ""}${base} Its settings and everything it set up are kept.`
+      + (card?.highlights?.length ? `<ul class="uc-hl">${card.highlights.slice(0, 5).map((x) => `<li>${h(x)}</li>`).join("")}</ul>` : "");
+    html = updHero("new", look.icon, `${logo(u)}${title}${badge}`, sub,
+      to ? verJump(u.version, to) : `<div class="uc-ver"><span class="mono">${h(short(u.from))}</span>${UPD.arrow}<b class="mono">${h(short(u.commit))}</b></div>`) +
+      `<div class="uc-foot"><span class="uc-when">${run ? h(job.phase || "Updating…") : `Checked ${h(ago(u.checked))}${u.count ? ` · ${u.count} new commit${u.count === 1 ? "" : "s"}` : ""}`}</span><span class="spacer"></span>
+        ${run ? "" : `${card?.notes ? `<a class="uc-btn" href="${h(card.notes)}" target="_blank" rel="noopener">Release notes</a>` : whatsNew === "check" ? `<button class="uc-btn" data-act="ad-check" data-id="${h(id)}">What's new</button>` : `<a class="uc-btn" href="${h(whatsNew)}">What's new</a>`}<button class="uc-btn" data-act="upd-later" data-id="${h(id)}">Later</button>`}
+        <button class="uc-go" data-act="upd-go" data-id="${h(id)}" ${run ? "disabled" : ""}>${run ? '<span class="uc-spin sm"></span><span>Updating…</span>' : `${UPD.down}<span>${h(card?.button ? fill(card.button, u, to) : `Update${to ? ` to v${to}` : ""}`)}</span>`}</button></div>`;
+  } else return "";
+  const theme = done ? "green" : look.theme, style = done ? "glow" : look.style;
+  return `<section class="addon-upd" data-theme="${theme}" data-style="${style}" data-urgency="${done ? "normal" : look.urgency}"${!done && look.accent ? ` style="${accentStyle(look.accent)}"` : ""} aria-label="${h((u || done).name)} update">${html}</section>`;
+}
+// install it; render() after each step; after(id) once the new copy runs
+export async function updateAddon(id, render, after) {
+  const u = AU.list.find((x) => x.id === id) || AU.job[id]?.u;
+  if (!u || AU.job[id]?.state === "running") return;
+  AU.job[id] = { u, state: "running", phase: "Starting…" };
+  render();
+  let job;
+  try { job = (await api(`/__gate/api/addons/${id}/update`, { method: "POST", body: "{}" })).job; }
+  catch (e) { AU.job[id] = { u, state: "error", error: e.message }; render(); return; }
+  let v = job;
+  for (let miss = 0; v.state === "running" && miss < 30;) {
+    await new Promise((ok) => setTimeout(ok, 800));
+    try { v = await api(`/__gate/api/addons/jobs/${job.id}?since=1e9`); miss = 0; } catch { miss++; continue; }
+    AU.job[id] = { u, state: v.state, phase: v.phase, error: v.error };
+    render();
+  }
+  if (v.state !== "done") { AU.job[id] = { u, state: "error", error: v.error || "Lost track of the update." }; render(); return; }
+  delete AU.job[id];
+  AU.done[id] = { name: u.name, logo: u.logo, from: u.version, to: v.result?.version || u.latest || u.version, card: u.card };
+  AU.list = AU.list.filter((x) => x.id !== id);
+  await after?.(id);
+  render();
+}
+// the card's buttons (data-act upd-go / upd-later / upd-done); true when handled
+export function addonUpdClick(el, render, after) {
+  const act = el?.dataset.act, id = el?.dataset.id;
+  if (act === "upd-go") { updateAddon(id, render, after); return true; }
+  if (act === "upd-later") { const u = AU.list.find((x) => x.id === id); if (u) auLaterSet(u); render(); return true; }
+  if (act === "upd-done") { delete AU.done[id]; delete AU.job[id]; render(); return true; }
+  return false;
+}
+
 export function updHero(kind, icon, title, sub, extra = "") {
   return `<div class="uc-hero ${kind}"><div class="uc-orb">${icon}</div>
     <div class="uc-txt"><div class="uc-title">${title}</div><div class="uc-sub">${sub}</div></div>${extra}</div>`;

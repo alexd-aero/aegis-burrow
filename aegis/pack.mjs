@@ -4,6 +4,9 @@
 //   Termix         SSH terminals in the browser (Docker), with an account
 //                  whose username and password you choose on the same page
 //   Selkies Forge  Linux desktops in the browser (its own installer, unattended)
+//   Bulwark        attacks, bans and every request (an addon); recommended, so
+//                  ticked for you: a "no" (or skipping the pack) is remembered
+//                  and it is never installed behind your back
 //
 // Each can be left out, or the whole pack skipped ("I don't want this pack").
 // Everything here can also be done later from Settings. The choice is
@@ -35,7 +38,9 @@ export function forgeInstalled() {
 }
 
 export class Pack {
-  constructor({ settings, termix, log, tunnels }) {
+  // addon: {has(id), install(id, say) -> Promise}: Burrow's addons (Bulwark comes that way)
+  constructor({ settings, termix, log, tunnels, addon }) {
+    this.addon = addon;
     this.tunnels = tunnels;
     this.found = null;
     this.settings = settings;
@@ -60,17 +65,18 @@ export class Pack {
       burrow: (this.settings.get("modules") || {}).burrow !== false,
       termix: !!this.settings.get("termix"),
       forge: forgeInstalled() || !!this.found?.forge,
+      bulwark: !!this.addon?.has("bulwark"),
       found: this.found,
       job: this.job ? { ...this.job, steps: this.job.steps.map((s) => ({ ...s, lines: s.lines.slice(-6) })) } : null,
     };
   }
 
   skip() {
-    this.settings.set({ pack: { decided: true, skipped: true, at: Date.now() } });
+    this.settings.set({ pack: { decided: true, skipped: true, at: Date.now(), bulwark: false } });
     this.log("pack: skipped");
   }
 
-  // choice = { burrow: bool, forge: bool, termix: null | { username, password } }
+  // choice = { burrow: bool, forge: bool, termix: null | { username, password }, bulwark: bool (default yes) }
   run(choice) {
     if (this.job?.state === "running") throw new Error("The pack is already being set up.");
     const steps = [];
@@ -89,10 +95,12 @@ export class Pack {
       termix = { username, password };
       steps.push({ id: "termix", label: "Termix", state: "waiting", lines: [] });
     }
+    const bulwark = choice.bulwark !== false && !!this.addon;
+    if (bulwark) steps.push({ id: "bulwark", label: "Bulwark", state: "waiting", lines: [] });
     if (choice.forge) steps.push({ id: "forge", label: "Selkies Forge", state: "waiting", lines: [] });
     const job = { state: "running", started: Date.now(), steps };
     this.job = job;
-    this.settings.set({ pack: { decided: true, skipped: false, at: Date.now(), chose: steps.map((s) => s.id) } });
+    this.settings.set({ pack: { decided: true, skipped: false, at: Date.now(), chose: steps.map((s) => s.id), bulwark } });
     const step = (id) => steps.find((s) => s.id === id);
     const say = (s, line) => { s.lines.push(String(line).replace(ANSI, "").slice(0, 300)); if (s.lines.length > 200) s.lines.shift(); };
 
@@ -129,6 +137,17 @@ export class Pack {
           say(t, r.existed ? `the account "${termix.username}" already exists; kept it.` : `account "${termix.username}" created. It is Termix's admin.`);
           t.state = "done";
         } catch (e) { t.state = "error"; t.error = e.message; say(t, e.message); }
+      }
+
+      if (bulwark) {
+        const w = step("bulwark");
+        w.state = "running";
+        try {
+          if (this.addon.has("bulwark")) say(w, "Bulwark is already installed.");
+          else { say(w, "installing Bulwark…"); await this.addon.install("bulwark", (l) => say(w, l)); }
+          say(w, "Bulwark guards every request now: its dashboard is on the home page.");
+          w.state = "done";
+        } catch (e) { w.state = "error"; w.error = e.message; say(w, e.message); }
       }
 
       if (choice.forge) {

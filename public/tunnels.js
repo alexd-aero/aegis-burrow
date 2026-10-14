@@ -1,11 +1,11 @@
 // Tunnel manager UI. No inline handlers (strict CSP): everything is wired
 // through data-act attributes and one delegated listener.
-import { chrome, updHero, verJump, UPD } from "./common.js";
+import { chrome, AU, addonUpdCard, addonUpdClick } from "./common.js";
 import { distroLogo, distroLabel } from "./distros.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
-const S = { intel: {}, intelOpen: null, shield: null, shCheck: null, scanning: false, upd: [], updJob: {}, updDone: {}, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
+const S = { intel: {}, intelOpen: null, shield: null, shCheck: null, scanning: false, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
             mode: "domain", pattern: "", integrations: [], integ: null, integData: null, forgeSummary: {}, addon: null,
             addons: null, scan: null, scanning: false, bridge: null, bridgeBusy: false };
 
@@ -197,7 +197,7 @@ function subtabs() {
   const forgeHere = forgeReal || S.view === "forge";
   return `${downCards()}<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
-    <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${S.upd?.length ? '<span class="newchip">update</span>' : ""}</button>
+    <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${AU.list.length ? '<span class="newchip">update</span>' : ""}</button>
     ${bulwark() ? "" : `<button data-act="tab" data-v="shield" class="${S.view === "shield" ? "on" : ""}">${ICON.shield}Shield${S.shield?.stats?.bans ? `<span class="count">${S.shield.stats.bans}</span>` : ""}</button>`}
     ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
   </nav>`;
@@ -307,59 +307,12 @@ function pagesCard(sites) {
 // An addon with a section on this page (Burrow Pages) gets the same update card
 // as Aegis × Burrow itself, right above that section: no trip to Addons. Burrow
 // checks addons from a link every few hours, and again when this page opens.
-const later = (k) => { try { return localStorage.getItem(k) === "1"; } catch { return false; } };
-const laterSet = (k) => { try { localStorage.setItem(k, "1"); } catch { /* private window */ } };
-const laterKey = (u) => `burrow-addon-later-${u.id}-${u.commit || u.latest}`;
 function loadUpdates(fresh) {
   S.updAt = Date.now();
-  return api(`/__gate/api/addons/updates${fresh ? "?fresh=1" : ""}`).then((r) => { S.upd = r.updates; render(); }).catch(() => {});
-}
-function addonUpdCard(id) {
-  const job = S.updJob[id], done = S.updDone[id], u = (S.upd || []).find((x) => x.id === id) || job?.u;
-  const logo = (x) => x.logo ? `<img class="uc-logo" src="${h(x.logo)}" alt="">` : "";
-  let html;
-  if (done) {
-    html = updHero("ok", UPD.check, `${logo(done)}${h(done.name)} is up to date`,
-      `Updated to <span class="uc-pill">v${h(done.to)}</span> just now${done.to !== done.from ? `, from v${h(done.from)}` : ""}. Everything it had set up was kept.`) +
-      `<div class="uc-foot"><span class="spacer"></span><button class="uc-btn" data-act="upd-done" data-id="${h(id)}">Done</button></div>`;
-  } else if (job?.state === "error") {
-    html = updHero("bad", UPD.x, `${logo(u)}${h(u.name)} didn't update`, h(job.error || "The update stopped.") + " What it had before is still in place.") +
-      `<div class="uc-foot"><span class="spacer"></span><button class="uc-btn" data-act="upd-done" data-id="${h(id)}">Close</button>
-        <button class="uc-go" data-act="upd-go" data-id="${h(id)}">${UPD.down}<span>Try again</span></button></div>`;
-  } else if (u && (job || !later(laterKey(u)))) {
-    const to = u.latest && u.latest !== u.version ? u.latest : null, run = !!job;
-    html = updHero("new", UPD.down, `${logo(u)}${h(u.name)} update <span class="new-chip">NEW</span>`,
-      `${to ? `<span class="uc-pill">v${h(to)}</span> is ready to install` : `Commit <span class="mono">${h(short(u.commit))}</span> is ready to install`}${u.subject ? ` · ${h(u.subject)}` : ""}. Its settings and everything it set up are kept.`,
-      to ? verJump(u.version, to) : `<div class="uc-ver"><span class="mono">${h(short(u.from))}</span>${UPD.arrow}<b class="mono">${h(short(u.commit))}</b></div>`) +
-      `<div class="uc-foot"><span class="uc-when">${run ? h(job.phase || "Updating…") : `Checked ${h(ago(u.checked))}${u.count ? ` · ${u.count} new commit${u.count === 1 ? "" : "s"}` : ""}`}</span><span class="spacer"></span>
-        ${run ? "" : `<button class="uc-btn" data-act="ad-check" data-id="${h(id)}">What's new</button><button class="uc-btn" data-act="upd-later" data-id="${h(id)}">Later</button>`}
-        <button class="uc-go" data-act="upd-go" data-id="${h(id)}" ${run ? "disabled" : ""}>${run ? '<span class="uc-spin sm"></span><span>Updating…</span>' : `${UPD.down}<span>Update${to ? ` to v${h(to)}` : ""}</span>`}</button></div>`;
-  } else return "";
-  return `<section class="addon-upd" aria-label="${h((u || done).name)} update">${html}</section>`;
-}
-async function updateAddon(id) {
-  const u = (S.upd || []).find((x) => x.id === id) || S.updJob[id]?.u;
-  if (!u || S.updJob[id]?.state === "running") return;
-  S.updJob[id] = { u, state: "running", phase: "Starting…" };
-  render();
-  let job;
-  try { job = (await api(`/__gate/api/addons/${id}/update`, { method: "POST", body: "{}" })).job; }
-  catch (e) { S.updJob[id] = { u, state: "error", error: e.message }; render(); return; }
-  let v = job;
-  for (let miss = 0; v.state === "running" && miss < 30;) {
-    await new Promise((ok) => setTimeout(ok, 800));
-    try { v = await api(`/__gate/api/addons/jobs/${job.id}?since=1e9`); miss = 0; } catch { miss++; continue; }
-    S.updJob[id] = { u, state: v.state, phase: v.phase, error: v.error };
-    render();
-  }
-  if (v.state !== "done") { S.updJob[id] = { u, state: "error", error: v.error || "Lost track of the update." }; render(); return; }
-  delete S.updJob[id];
-  S.updDone[id] = { name: u.name, logo: u.logo, from: u.version, to: v.result?.version || u.latest || u.version };
-  await afterAddonUpdate(id);
+  return api(`/__gate/api/addons/updates${fresh ? "?fresh=1" : ""}`).then((r) => { AU.list = r.updates; render(); }).catch(() => {});
 }
 // The new copy runs once Burrow reloads it: pick up its panel, then the rest.
 async function afterAddonUpdate(id) {
-  S.upd = (S.upd || []).filter((x) => x.id !== id);
   S.scan = null; S.addons = null;
   const was = (S.me?.extensions || []).find((x) => x.id === id)?.ui;
   for (let i = 0; i < 10; i++) {
@@ -1425,9 +1378,7 @@ document.addEventListener("click", async (e) => {
     else if (act === "ad-add") addAddon(el.dataset.src, el);
     else if (act === "ad-install") installForm(el.dataset.id);
     else if (act === "ad-update") jobRun(el.dataset.id, "update", {});
-    else if (act === "upd-go") updateAddon(el.dataset.id);
-    else if (act === "upd-later") { const u = S.upd.find((x) => x.id === el.dataset.id); if (u) laterSet(laterKey(u)); render(); }
-    else if (act === "upd-done") { delete S.updDone[el.dataset.id]; delete S.updJob[el.dataset.id]; render(); }
+    else if (addonUpdClick(el, render, afterAddonUpdate)) { /* the update card */ }
     else if (act === "ad-check") checkUpdates(el.dataset.id);
     else if (act === "down-start" || act === "down-leave") {
       const always = document.querySelector(`[data-down-always="${CSS.escape(el.dataset.id)}"]`)?.checked;
@@ -1540,5 +1491,5 @@ document.addEventListener("error", (e) => {
   if (img.tagName === "IMG" && img.dataset.fallback) img.parentElement.textContent = img.dataset.fallback;
 }, true);
 
-chrome("tunnels").then((me) => { S.me = me; S.upd = me?.addonUpdates || []; S.updAt = Date.now(); loadPanels(); render(); loadUpdates(true); });
+chrome("tunnels").then((me) => { S.me = me; AU.list = me?.addonUpdates || []; S.updAt = Date.now(); loadPanels(); render(); loadUpdates(true); });
 fromHash();
