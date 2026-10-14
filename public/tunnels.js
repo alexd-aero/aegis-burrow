@@ -969,6 +969,7 @@ function shieldBadge(sh) {
   if (!sh) return "";
   if (sh.banned) return ` <span class="pill err" title="${h(sh.banned.reason)}">banned</span>`;
   const strong = sh.lists.filter((l) => l.strength === "strong"), weak = sh.lists.filter((l) => l.strength === "weak");
+  if (sh.own) return ` <span class="pill warn" title="this machine's own public address: Mysterium and proxyware traffic leaves through it too">this machine</span>`;
   if (sh.trusted || sh.allowed) return ` <span class="pill ok" title="${sh.allowed ? "on your allow list" : "signed in to Aegis from here"}">yours</span>`;
   if (strong.length) return ` <span class="pill err" title="${h(strong.map((l) => l.name).join(", "))}">blocklisted</span>`;
   if (sh.probes) return ` <span class="pill warn" title="asked for paths that look for holes">${sh.probes} probe${sh.probes === 1 ? "" : "s"}</span>`;
@@ -996,15 +997,16 @@ function renderShield() {
       <div class="card stat"><b>${fmtN(st.bans)}</b><span>banned now</span><div class="sub">${fmtN(st.banned)} bans since ${new Date(st.since).toLocaleDateString()}</div></div>
       <div class="card stat"><b>${fmtN(st.blocked)}</b><span>requests turned away</span><div class="sub">from banned addresses</div></div>
       <div class="card stat"><b>${fmtN(st.dropped)}</b><span>payloads dropped</span><div class="sub">never reached an app</div></div>
-      <div class="card stat"><b>${fmtN(entries)}</b><span>addresses on ${loaded.length} lists</span><div class="sub">${fmtN(st.checked)} looked up${v.queue ? ` · ${v.queue} waiting` : ""}</div></div>
+      <div class="card stat"><b>${v.latency ? `${fmtN(v.latency.p95)}<span class="faint"> ms</span>` : "–"}</b><span>to categorize a new address <span class="faint">(p95)</span></span><div class="sub">${v.latency ? `median ${fmtN(v.latency.p50)} ms · ` : ""}${fmtN(st.checked)} looked up · ${fmtN(entries)} on ${loaded.length} lists</div></div>
     </div>
 
     <div class="d-two">
       <section class="card panel"><h3>Rules</h3>
         ${shSwitch("auto", v.settings.auto, "Ban automatically", "On a strong blocklist (FireHOL, blocklist.de, CINS, Emerging Threats, IPsum 3+), known attackers, two payloads, or a probe from an address with any mark against it.")}
         ${shSwitch("drop", v.settings.drop, "Drop payloads", "/.env, /.git, ../../etc/passwd, phpunit, ${jndi:…} get a 404 here and never reach the app.")}
-        ${shSwitch("lookups", v.settings.lookups, "Look up every new address", "GreyNoise, Spamhaus, DroneBL and StopForumSpam, in the background. A shared school or carrier address on Spamhaus alone isn't banned.")}
+        ${shSwitch("lookups", v.settings.lookups, "Look up every new address", "Let through at once and looked up behind (Spamhaus, DroneBL, StopForumSpam, GreyNoise for probes); banned only if it turns out malicious. Known services like search engines and scrapers are left alone, and a shared school or carrier address on Spamhaus alone isn't banned.")}
         <p class="faint small" style="margin:12px 0 0">Never banned: this network, addresses you signed in from (30 days), requests with your session, and your allow list. Signing in lifts a ban on your address.</p>
+        ${v.own?.length ? `<p class="faint small" style="margin:8px 0 0">This machine's own public address (<span class="mono">${v.own.map(h).join(", ")}</span>) is neither trusted nor banned: Mysterium and proxyware send other people's traffic out through it. Your session still lets you through from there.</p>` : ""}
       </section>
       <section class="card panel"><h3>Check an address</h3>
         <div class="row" style="gap:8px"><input class="input mono" id="shIp" placeholder="45.148.10.120" autocomplete="off" spellcheck="false" style="flex:1">

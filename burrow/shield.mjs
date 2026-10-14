@@ -10,9 +10,16 @@
 //               (404, never reach the app) and scored. Two of those, or one
 //               probe from an address with any other mark against it (a weaker
 //               list, a scanner, Tor, spam reports), and it is banned.
-//   lookups     every new address is also asked about in the background
-//               (ipintel.mjs: GreyNoise, Spamhaus, DroneBL, StopForumSpam);
-//               known-malicious ones are banned when the answer comes.
+//   lookups     every new address is let straight through and asked about in
+//               the background (ipintel.mjs: Spamhaus, DroneBL, StopForumSpam,
+//               and GreyNoise when it probed). Known-malicious ones are banned
+//               when the answer comes. Known business services (GreyNoise
+//               "benign": search engines, scrapers, research scanners) are left
+//               alone: their payloads are still dropped, but they aren't banned.
+//
+// This machine's own public address is never trusted by address and never
+// banned automatically: Mysterium and the proxyware apps send other people's
+// traffic out through it, so it can't stand for you. A session still does.
 //
 // A ban covers every tunnel and the dashboard, and closes what the address had
 // open. You are never banned: private addresses, addresses that signed in to
@@ -193,6 +200,8 @@ export class Shield {
     this.scores = new Map();       // ip -> {score, probes, paths[], first, last}
     this.verdicts = new Map();     // ip -> {at, level, why[], bad}
     this.queued = new Map();       // ip -> when it was last sent to the lookups
+    this.own = new Set();          // this machine's public addresses (ownIps)
+    this.lat = [];                 // the last lookups' times, ms
     this.queue = [];
     this.running = 0;
     this.quiet = new Map();        // "ip|act" -> last event time (repeat blocks don't flood the log)
@@ -212,7 +221,9 @@ export class Shield {
   start() {
     for (const f of FEEDS) this.loadFeed(f);
     const tick = () => this.refreshDue().catch((e) => this.log("shield: feeds:", e.message));
-    this.timers.push(setTimeout(tick, 3000), setInterval(tick, 15 * 60e3), setInterval(() => this.save(), 30000));
+    const own = () => this.refreshOwn().catch(() => {});
+    this.timers.push(setTimeout(tick, 3000), setInterval(tick, 15 * 60e3), setInterval(() => this.save(), 30000),
+                     setTimeout(own, 1000), setInterval(own, HOUR));
     for (const t of this.timers) t.unref?.();
     return this;
   }
@@ -270,6 +281,21 @@ export class Shield {
     }
   }
 
+  // this machine's public IPv4 and IPv6 addresses, as the internet sees them
+  async refreshOwn() {
+    const found = new Set();
+    for (const url of ["https://api.ipify.org", "https://api6.ipify.org"]) {
+      try {
+        const r = await this.fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(8000) });
+        const ip = normIp(await r.text());
+        if (r.ok && isIP(ip)) found.add(ip);
+      } catch { /* no IPv6, or offline */ }
+    }
+    if (found.size) this.own = found;
+    return [...this.own];
+  }
+  isOwn(ip) { return this.own.has(ip); }
+
   // Every list that names this address: [{id, name, strength, extra?}]. Synchronous, microseconds.
   lookup(ip) {
     ip = normIp(ip);
@@ -296,14 +322,15 @@ export class Shield {
     const b = this.state.bans[ip];
     if (b) { delete this.state.bans[ip]; this.event(ip, "lifted", "it signed in to Aegis", {}); }
   }
-  isTrusted(ip) { const t = this.state.trusted[ip]; return !!t && Date.now() - t < 30 * DAY; }
+  isTrusted(ip) { const t = this.state.trusted[ip]; return !!t && Date.now() - t < 30 * DAY && !this.own.has(ip); }
 
   // ---------------------------------------------------------------- the check
   // info: {method, path, host, country, ua, trusted: () => bool (a valid session)}
-  // -> null (let it through) or {status, body, why}
+  // -> null (let it through) or {status, body, why}. Never waits: lookups run behind.
   gate(rawIp, info = {}) {
     const ip = normIp(rawIp);
     if (!isIP(ip) || isPrivate(ip) || this.state.allow[ip]) return null;
+    if (this.own.has(ip)) return this.gateOwn(ip, info);
     let tr = null;
     const trusted = () => {
       if (tr === null) tr = this.isTrusted(ip) || !!info.trusted?.();
@@ -339,7 +366,7 @@ export class Shield {
       this.scores.set(ip, sc);
       if (this.scores.size > 20000) this.scores.delete(this.scores.keys().next().value);
       const marks = this.marks(ip, lists);
-      if (marks.length || sc.score >= 6) {
+      if (!this.verdicts.get(ip)?.benign && (marks.length || sc.score >= 6)) {
         const why = marks.length ? `${probe === 3 ? "sent payloads" : "probed"} (${info.path}) and ${marks.join(", ")}`
                                  : `sent ${sc.probes} payloads (${sc.paths.slice(0, 2).join(", ")})`;
         return this.ban(ip, why, { source: "payload", ttl: 30 * DAY, info });
@@ -349,9 +376,23 @@ export class Shield {
       this.event(ip, "probe", `asked for ${String(info.path).slice(0, 80)}`, info, 60e3);
       return null;
     }
-    // first sight: yours (a session) is never looked up, so never banned for what a shared address did
+    // first sight: let through, looked up behind. Yours (a session) is never
+    // looked up, so never banned for what a shared address did.
     if (this.due(ip, false) && !trusted()) this.enqueue(ip, {});
     return null;
+  }
+  // This machine's own public address: other people's traffic leaves through it
+  // (Mysterium, the proxyware apps), so it is neither trusted nor banned by
+  // address. Payloads are still dropped, unless the request carries your session.
+  gateOwn(ip, info) {
+    if (!this.settings.drop || classify(info.path) !== 3 || info.trusted?.()) return null;
+    this.state.stats.dropped++; this.dirty = true;
+    this.event(ip, "dropped", "a payload from this machine's own public address (Mysterium or proxyware traffic?): never banned", info, 10e3);
+    return { status: 404, body: "Not found", why: "payload" };
+  }
+  took(ms) {
+    this.lat.push(ms);
+    if (this.lat.length > 200) this.lat.shift();
   }
   drop(ip, info) {
     this.state.stats.dropped++; this.dirty = true;
@@ -430,7 +471,8 @@ export class Shield {
     while (this.running < 4 && this.queue.length) {
       const { ip, probe } = this.queue.shift();
       this.running++;
-      this.remote(ip, { probe }).then((r) => this.judge(ip, r)).catch(() => {})
+      const t0 = Date.now();
+      this.remote(ip, { probe }).then((r) => { this.took(Date.now() - t0); this.judge(ip, r); }).catch(() => {})
         .finally(() => { this.running--; this.pump(); });
     }
   }
@@ -443,9 +485,10 @@ export class Shield {
     this.state.stats.checked++; this.dirty = true;
     const level = r.verdict.level;
     const bad = level === "malicious" || level === "suspicious";
-    this.verdicts.set(ip, { at: Date.now(), level, why: r.verdict.why, bad });
+    const benign = !!r.sources?.greynoise?.result?.benign;      // a known business service: innocent
+    this.verdicts.set(ip, { at: Date.now(), level, why: r.verdict.why, bad: bad && !benign, benign });
     if (this.verdicts.size > 20000) this.verdicts.delete(this.verdicts.keys().next().value);
-    if (!this.settings.auto || this.state.allow[ip] || this.state.bans[ip] || this.isTrusted(ip)) return;
+    if (!this.settings.auto || this.state.allow[ip] || this.state.bans[ip] || this.isTrusted(ip) || this.own.has(ip) || benign) return;
     const sc = this.scores.get(ip);
     const src = r.sources || {};
     const hard = [];
@@ -465,7 +508,7 @@ export class Shield {
     if (!isIP(ip) || isPrivate(ip)) return null;
     const b = this.state.bans[ip], sc = this.scores.get(ip), v = this.verdicts.get(ip);
     return { banned: b && (!b.until || b.until > Date.now()) ? { reason: b.reason, at: b.at, until: b.until, source: b.source } : null,
-             allowed: !!this.state.allow[ip], trusted: this.isTrusted(ip),
+             allowed: !!this.state.allow[ip], trusted: this.isTrusted(ip), own: this.own.has(ip),
              lists: this.lookup(ip).map(({ id, name, strength }) => ({ id, name, strength })),
              probes: sc?.probes || 0, verdict: v ? v.level : null };
   }
@@ -474,15 +517,20 @@ export class Shield {
     const bans = Object.entries(this.state.bans).filter(([, b]) => !b.until || b.until > now)
       .map(([ip, b]) => ({ ip, ...b })).sort((a, b) => b.last - a.last);
     return {
-      settings: this.settings, stats: { ...this.state.stats, bans: bans.length },
+      settings: this.settings, stats: { ...this.state.stats, bans: bans.length }, latency: this.latency(), own: [...this.own],
       feeds: FEEDS.map((f) => ({ id: f.id, name: f.name, about: f.about, strength: f.strength, url: f.url, every: f.every,
                                  ...(this.state.feeds[f.id] || {}), loadedNow: this.lists.has(f.id) })),
       bans: bans.slice(0, 500), allow: Object.entries(this.state.allow).map(([ip, a]) => ({ ip, ...a })),
-      trusted: Object.entries(this.state.trusted).map(([ip, at]) => ({ ip, at })).sort((a, b) => b.at - a.at).slice(0, 50),
+      trusted: Object.entries(this.state.trusted).filter(([ip]) => !this.own.has(ip)).map(([ip, at]) => ({ ip, at })).sort((a, b) => b.at - a.at).slice(0, 50),
       probing: [...this.scores.entries()].filter(([ip]) => !this.state.bans[ip]).map(([ip, s]) => ({ ip, ...s }))
         .sort((a, b) => b.last - a.last).slice(0, 50),
       events: this.state.events.slice(0, 200), queue: this.queue.length,
     };
+  }
+  // how long categorizing a new address takes: {n, p50, p95, max} in ms
+  latency() {
+    const v = [...this.lat].sort((a, b) => a - b), at = (q) => v[Math.min(v.length - 1, Math.floor(q * v.length))];
+    return v.length ? { n: v.length, p50: at(0.5), p95: at(0.95), max: v[v.length - 1] } : null;
   }
   setSettings(patch) {
     for (const k of ["auto", "drop", "lookups"]) if (typeof patch[k] === "boolean") this.settings[k] = patch[k];

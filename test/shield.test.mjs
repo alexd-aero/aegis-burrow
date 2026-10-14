@@ -156,3 +156,39 @@ test("a school or carrier NAT on Spamhaus XBL isn't banned for it; with a probe 
   assert.equal(s.state.bans["152.26.89.50"], undefined, "XBL alone: not banned");
   assert.match(s.state.bans["203.0.113.7"]?.reason || "", /probed \(\/admin\.php\) and spamhaus/);
 });
+
+test("never waits: a new address goes straight through and is looked up behind", async () => {
+  let release;
+  const s = shield({}, { remote: () => new Promise((r) => { release = () => r({ verdict: { level: "malicious", why: ["GreyNoise: malicious"] } }); }) });
+  assert.equal(s.gate("45.148.10.120", { path: "/" }), null, "answered at once, not a promise");
+  assert.equal(s.gate("45.148.10.120", { path: "/x" }), null, "still through while the lookup runs");
+  release(); await new Promise((r) => setTimeout(r, 10));
+  assert.equal(s.gate("45.148.10.120", { path: "/" }).status, 403, "blocked once it is known to be malicious");
+  assert.ok(s.latency().n >= 1);
+});
+
+test("known business services (GreyNoise benign) are left alone; payloads still dropped", async () => {
+  const leakix = { verdict: { level: "malicious", why: ["mass scanner (LeakIX)", "spamhaus: infected / exploited"] },
+                   sources: { greynoise: { result: { seen: true, scanner: true, benign: true, name: "LeakIX" } },
+                              dnsbl: { result: { spamhaus: { listed: true, why: ["infected / exploited"] }, dronebl: { listed: false } } } } };
+  const s = shield({ ipsum: "138.68.86.32\t1\n" }, { remote: async () => leakix });
+  assert.equal(s.gate("138.68.86.32", { path: "/" }), null);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(s.gate("138.68.86.32", { path: "/.env" }).status, 404, "its payload doesn't reach the app");
+  assert.equal(s.gate("138.68.86.32", { path: "/.git/config" }).status, 404);
+  assert.equal(s.gate("138.68.86.32", { path: "/wp-login.php" }), null);
+  assert.equal(s.state.bans["138.68.86.32"], undefined, "but it isn't banned");
+});
+
+test("this machine's own public address: never trusted by address, never banned, payloads dropped", () => {
+  const s = shield({ firehol1: "136.54.0.0/16\n" });
+  s.own = new Set(["136.54.7.30"]);
+  s.trust("136.54.7.30");
+  assert.equal(s.isTrusted("136.54.7.30"), false, "Mysterium/proxyware traffic leaves through it");
+  assert.equal(s.gate("136.54.7.30", { path: "/" }), null, "on a strong list, still not banned");
+  assert.equal(s.gate("136.54.7.30", { path: "/.env" }).status, 404);
+  assert.equal(s.gate("136.54.7.30", { path: "/.env", trusted: () => true }), null, "your session gets through");
+  s.judge("136.54.7.30", { verdict: { level: "malicious", why: ["x"] } });
+  assert.deepEqual(s.state.bans, {});
+  assert.equal(s.peek("136.54.7.30").own, true);
+});
