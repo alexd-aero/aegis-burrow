@@ -1,7 +1,8 @@
 // More domains (burrow/domains.mjs): another zone's dashboard name and tunnel names, beside the main domain.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domains } from "../burrow/domains.mjs";
@@ -11,40 +12,54 @@ const pem = (zoneID) => `-----BEGIN ARGO TUNNEL TOKEN-----\n${Buffer.from(JSON.s
 
 const managers = [];
 after(() => { for (const tm of managers) tm.stop(); });
-function setup(records = []) {
+function setup(records = [], { relay, reaches = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "aegis-dom-"));
-  const state = { domain: { mainHost: "aegis.example.com", tunnelId: "t-main", cert: "/nonexistent" } };
+  writeFileSync(join(dir, "main.pem"), pem("z1"));
+  const state = { domain: { mainHost: "aegis.example.com", tunnelId: "t-main", cert: join(dir, "main.pem") } };
   const settings = { get: (k) => state[k], set: (p) => Object.assign(state, p) };
   const recs = [...records], calls = [];
   // Cloudflare, faked: one zone's records
   const cfApi = async (token, method, path, body) => {
     calls.push(`${method} ${path.replace(/^\/zones\/[^/]+/, "")}`);
     if (/^\/zones\/[^/]+$/.test(path)) return { name: { z2: "other.net", z1: "example.com" }[path.split("/")[2]] };
+    // which zones a token can see: tok-z1 (the main domain's) sees example.com, plus `reaches`
+    const zn = /^\/zones\?name=(.+)$/.exec(path);
+    if (zn) { const name = decodeURIComponent(zn[1]); return (reaches[token] || []).includes(name) ? [{ id: "z2", name, account: { id: "acc" } }] : []; }
     const id = /dns_records\/([^/?]+)/.exec(path)?.[1];
     if (method === "GET") { const n = /name=([^&]+)/.exec(path); return n ? recs.filter((r) => r.name === decodeURIComponent(n[1])) : recs; }
     if (method === "POST") { const r = { id: "r" + calls.length, ...body }; recs.push(r); return r; }
     if (method === "PUT") { const i = recs.findIndex((r) => r.id === id); recs[i] = { id, ...body }; return recs[i]; }
     if (method === "DELETE") { recs.splice(recs.findIndex((r) => r.id === id), 1); return {}; }
   };
-  const run = async (bin, args) => ({ code: 0, out: args.includes("create") ? "Created tunnel x with id 11111111-2222-3333-4444-555555555555" : "", err: "" });
+  const ran = [];
+  const run = async (bin, args) => { ran.push(args.find((a) => ["create", "delete", "cleanup"].includes(a)) || args[0]); return { code: 0, out: args.includes("create") ? "Created tunnel x with id 11111111-2222-3333-4444-555555555555" : "", err: "" }; };
+  // Let's Encrypt, faked: a real (self-signed) certificate for the names, after the TXT record went up
+  const acme = { directoryUrl: "test", issued: [], async issue(names, dns) {
+    const id = await dns.set(`_acme-challenge.${names[0].slice(2)}`, "v"); await dns.remove(id);
+    execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "90", "-subj", "/CN=x",
+      "-addext", `subjectAltName=${names.map((n) => "DNS:" + n).join(",")}`, "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem")], { stdio: "ignore" });
+    this.issued.push(names[0]);
+    return { key: readFileSync(join(dir, "k.pem"), "utf8"), cert: readFileSync(join(dir, "c.pem"), "utf8"), notAfter: Date.now() + 90 * 864e5 };
+  } };
   const tm = new TunnelManager({ dataDir: mkdtempSync(join(tmpdir(), "aegis-dom-tun-")), domain: state.domain, quick: null, forbiddenPorts: [4310], log: () => {} });
   const D = new Domains({ settings, dataDir: dir, origin: () => ({ url: "https://127.0.0.1:4301", insecure: true }), log: () => {},
-    bin: () => "/bin/true", mainZone: () => "example.com", onChange: (l) => tm.useExtras(l), cfApi, run, autostart: false });
+    bin: () => "/bin/true", mainZone: () => "example.com", mainCert: () => state.domain.cert, onChange: (l) => tm.useExtras(l), cfApi, run, acme, txtVisible: async () => true, autostart: false });
+  if (relay) D.useRelay(relay);
   tm.useExtras(D.list(), (z) => D.takenOn(z));
   tm.cfApi = async (method, path, body) => (method === "GET" ? [] : { id: "m1", ...body });
   tm.dnsAnswers = async () => true;
   managers.push(tm);
   // what `cloudflared tunnel login` would leave behind
   const authorize = async (zone = "z2") => { const f = join(dir, "got.pem"); writeFileSync(f, pem(zone)); await D.takeCert(f); };
-  return { D, tm, recs, calls, state, authorize };
+  return { D, tm, recs, calls, state, authorize, ran, acme };
 }
 
 test("another domain: its own authorization, the dashboard there, a wildcard for tunnels", async () => {
   const { D, tm, recs, authorize } = setup([{ id: "mx", name: "other.net", type: "MX", content: "mail.other.net" }, { id: "w", name: "www.other.net", type: "A", content: "203.0.113.4" }]);
-  await assert.rejects(D.add({ label: "aegis" }), /Authorize Cloudflare/);
+  await assert.rejects(D.add({ label: "aegis" }), /which domain first/);
   await assert.rejects(authorize("z1"), /already the main domain/);
   await authorize();
-  assert.deepEqual(D.view().pending, { zone: "other.net" });
+  assert.deepEqual(D.view().pending, { zone: "other.net", via: "login" });
   const v = await D.add({ label: "home", tunnels: "all" });
   assert.equal(v.domains[0].dashboard, "home.other.net");
   assert.equal(v.pending, null);
@@ -102,11 +117,75 @@ test("never takes over someone else's record; a failed add gives the authorizati
   await authorize();
   await assert.rejects(D.add({ label: "aegis", tunnels: "all" }), /\*\.other\.net already has a A record \(198\.51\.100\.9\)/);
   assert.deepEqual(D.list(), []);
-  assert.deepEqual(D.view().pending, { zone: "other.net" }, "authorize once, try again");
+  assert.deepEqual(D.view().pending, { zone: "other.net", via: "login" }, "authorize once, try again");
   assert.ok(existsSync(D.pendingPath()));
   assert.ok(!calls.some((c) => c.startsWith("POST")) || recs.every((r) => r.id === "x" || r.name === "aegis.other.net"));
   await assert.rejects(D.add({ label: "9000" }), /only digits/);
   const v = await D.add({ label: "aegis", tunnels: "none" });
   assert.equal(v.domains[0].dashboard, "aegis.other.net");
   assert.equal(recs.find((r) => r.id === "x").content, "198.51.100.9", "theirs is untouched");
+});
+
+test("a domain the credentials Aegis already holds can reach needs no sign-in; else a login or a token", async () => {
+  const { D, state, ran } = setup([], { reaches: { "tok-z1": ["other.net"], "good-token-0123456789abcdefghijklmnop": ["third.org"] } });
+  await assert.rejects(D.check("example.com"), /already the main domain/);
+  await assert.rejects(D.check("not a domain"), /Type the domain/);
+  let v = await D.check("https://Other.NET/");
+  assert.deepEqual(v.pending, { zone: "other.net", via: "the main domain's" }, "the main domain's token reaches it");
+  assert.equal(v.need, null);
+  D.forget();
+  v = await D.check("third.org");
+  assert.equal(v.pending, null);
+  assert.deepEqual(v.need, { zone: "third.org" }, "nothing reaches it: ask");
+  await assert.rejects(D.useToken("third.org", "short"), /doesn't look like/);
+  await assert.rejects(D.useToken("third.org", "wrong-token-0123456789abcdefghijklmnop"), /can't edit third\.org/);
+  v = await D.useToken("third.org", "good-token-0123456789abcdefghijklmnop");
+  assert.deepEqual(v.pending, { zone: "third.org", via: "your API token" });
+  assert.equal(state.cfTokens.length, 1, "kept for the next domain");
+  assert.equal(D.tokens().at(-1).why, "your API token");
+  // VPS route, no dashboard: no Cloudflare tunnel at all, so a DNS-only token is enough
+  await assert.rejects(D.add({ label: "", tunnels: "all", route: "vps" }), /Link your VPS first/);
+  assert.equal(ran.filter((x) => x === "create").length, 0);
+});
+
+test("through your VPS: a wildcard certificate goes on the agent before the record points at it; back to Cloudflare undoes it", async () => {
+  const order = [], pushed = [], removed = [];
+  const relay = { configured: () => true, host: () => "203.0.113.7", ip: async () => "203.0.113.7", outdated: () => null, version: () => "1.1.0",
+                  ready: async () => ({ ok: true }), push: async (cur, suffix) => { order.push("push"); pushed.push([suffix, cur.names]); }, remove: async (s) => { removed.push(s); } };
+  const { D, tm, recs, ran, acme, authorize } = setup([{ id: "mx", name: "other.net", type: "MX", content: "mail.other.net" }], { relay });
+  const realApi = D.api.bind(D);
+  D.api = (d, m, p, b) => { if (m === "POST" && b?.type !== "TXT") order.push(`record ${b.name}`); return realApi(d, m, p, b); };
+  await authorize();
+  const v = await D.add({ label: "", tunnels: "all" });
+  assert.equal(v.domains[0].route, "vps", "your VPS by default once it's linked");
+  assert.deepEqual(acme.issued, ["*.other.net"]);
+  assert.deepEqual(pushed, [[".other.net", ["*.other.net"]]]);
+  assert.deepEqual(order, ["push", "record *.other.net"], "the certificate is on the VPS first");
+  assert.deepEqual(recs.filter((r) => r.name === "*.other.net").map((r) => [r.type, r.content, r.proxied]), [["A", "203.0.113.7", false]]);
+  assert.equal(ran.filter((x) => x === "create").length, 0, "no dashboard there: no Cloudflare tunnel");
+  assert.ok(D.wantsRelay());
+  assert.ok(v.domains[0].cert.notAfter > Date.now());
+  assert.equal(recs.some((r) => r.type === "TXT"), false, "the check record is gone again");
+  await tm.create({ port: 3000 });
+  assert.equal(tm.matchHost("3000.other.net"), 3000);
+
+  // renewals and a link that comes back: the same certificate isn't asked for again
+  await D.pushAll();
+  assert.deepEqual(acme.issued, ["*.other.net"]);
+  assert.equal(pushed.length, 2);
+
+  // to Cloudflare: a tunnel now, a proxied CNAME instead of the A record, the VPS lets go of the zone
+  await D.update("other.net", { route: "cloudflare", label: "home" });
+  assert.equal(ran.filter((x) => x === "create").length, 1);
+  assert.deepEqual(recs.filter((r) => r.name.endsWith("other.net") && r.type !== "MX").map((r) => [r.name, r.type, r.proxied]).sort(),
+    [["*.other.net", "CNAME", true], ["home.other.net", "CNAME", true]]);
+  assert.deepEqual(removed, [".other.net"]);
+  assert.equal(D.wantsRelay(), false);
+
+  // the VPS can't be reached: nothing moves
+  relay.ready = async () => ({ ok: false, error: "its SSH port doesn't answer" });
+  await assert.rejects(D.update("other.net", { route: "vps" }), /isn't reachable: its SSH port doesn't answer\. Nothing was moved/);
+  assert.equal(recs.find((r) => r.name === "*.other.net").type, "CNAME");
+  await D.remove("other.net");
+  assert.deepEqual(recs.map((r) => r.id), ["mx"]);
 });

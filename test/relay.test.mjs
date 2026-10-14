@@ -95,6 +95,64 @@ test("the agent's control: only your Aegis may hand it a certificate; Caddy gets
   } finally { agent.close(); }
 });
 
+test("agent 1.1: more zones, each with its own certificate and Caddy site; a signed update takes its place", async () => {
+  const key = randomBytes(32), dir = tmp();
+  let seen = null;
+  const gate = createServer((req, res) => { seen = req.headers.host; res.end("ok"); });
+  const up = await listen(gate), ctl = await free(), hp = await free();
+  const agentFile = join(dir, "agent.mjs");
+  writeFileSync(agentFile, "// old agent\n");
+  const cfg = { key: key.toString("base64url"), suffix: ".tunnel.example.com", upstreamPort: up, controlPort: ctl, httpPort: hp,
+                mode: "caddy", certDir: join(dir, "certs"), caddySite: join(dir, "caddy", "aegis-relay.caddy"), reload: false, agentFile, exitOnUpdate: false };
+  let agent = startAgent(cfg, { log: () => {} });
+  await new Promise((r) => setTimeout(r, 100));
+  const signed = (method, url) => ({ "x-aegis-relay": sign(key, { host: "agent", ip: "-", method, url }), "content-type": "application/json" });
+  const mk = (san, extra = {}) => {
+    execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "2", "-subj", "/CN=x",
+                             "-addext", `subjectAltName=${san}`, "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem")], { stdio: "ignore" });
+    return JSON.stringify({ cert: readFileSync(join(dir, "c.pem"), "utf8"), key: readFileSync(join(dir, "k.pem"), "utf8"), ...extra });
+  };
+  const visit = (host) => get(hp, "/", { host, "x-aegis-client": "203.0.113.9" });
+  try {
+    assert.equal((await visit("a.other.net")).status, 421, "not a zone yet");
+    let r = await get(ctl, "/cert", signed("POST", "/cert"), "POST", mk("DNS:*.tunnel.example.com", { suffix: ".other.net" }));
+    assert.equal(r.status, 400, "a zone's certificate must be for that zone");
+    assert.equal((await get(ctl, "/cert", signed("POST", "/cert"), "POST", mk("DNS:*.tunnel.example.com"))).status, 200);
+    r = await get(ctl, "/cert", signed("POST", "/cert"), "POST", mk("DNS:*.other.net", { suffix: ".other.net" }));
+    assert.equal(r.status, 200, r.body);
+    assert.ok(existsSync(join(dir, "certs", "z.other.net.crt")));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "zones.json"), "utf8")), [".other.net"]);
+    const site = readFileSync(join(dir, "caddy", "aegis-relay.caddy"), "utf8");
+    assert.match(site, /^\*\.tunnel\.example\.com \{/m); assert.match(site, /^\*\.other\.net \{\n\ttls .*z\.other\.net\.crt/m);
+    r = await visit("a.other.net"); assert.equal(r.status, 200); assert.equal(seen, "a.other.net");
+    assert.equal((await visit("a.b.other.net")).status, 421, "one level only");
+    const st = JSON.parse((await get(ctl, "/status", signed("GET", "/status"))).body);
+    assert.deepEqual(st.zones.map((z) => [z.suffix, z.cert.names]), [[".tunnel.example.com", "DNS:*.tunnel.example.com"], [".other.net", "DNS:*.other.net"]]);
+    assert.ok(st.features.includes("zones") && st.features.includes("update"));
+
+    // a restart keeps the zones
+    agent.close(); await new Promise((r) => setTimeout(r, 50));
+    agent = startAgent(cfg, { log: () => {} }); await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await visit("b.other.net")).status, 200);
+    r = await get(ctl, "/zones/remove", signed("POST", "/zones/remove"), "POST", JSON.stringify({ suffix: ".tunnel.example.com" }));
+    assert.equal(r.status, 400, "the first zone stays");
+    r = await get(ctl, "/zones/remove", signed("POST", "/zones/remove"), "POST", JSON.stringify({ suffix: ".other.net" }));
+    assert.equal(r.status, 200);
+    assert.equal((await visit("b.other.net")).status, 421);
+    assert.doesNotMatch(readFileSync(join(dir, "caddy", "aegis-relay.caddy"), "utf8"), /other\.net/);
+
+    // updates: only signed, only an agent that parses
+    assert.equal((await get(ctl, "/update", {}, "POST", JSON.stringify({ code: "x" }))).status, 401);
+    r = await get(ctl, "/update", signed("POST", "/update"), "POST", JSON.stringify({ code: "export function startAgent( {", version: "9" }));
+    assert.equal(r.status, 400); assert.match(r.body, /doesn't parse/);
+    assert.equal(readFileSync(agentFile, "utf8"), "// old agent\n");
+    r = await get(ctl, "/update", signed("POST", "/update"), "POST", JSON.stringify({ code: "export function startAgent() {}\n", version: "9.9.9" }));
+    assert.equal(r.status, 200, r.body);
+    assert.equal(readFileSync(agentFile, "utf8"), "export function startAgent() {}\n");
+    assert.equal(readFileSync(agentFile + ".prev", "utf8"), "// old agent\n");
+  } finally { agent.close(); gate.close(); }
+});
+
 test("setup: a one-time link, a script that locks the user down, registration pins the host key", () => {
   const link = new RelayLink({ dataDir: tmp(), log: () => {} });
   assert.throws(() => link.setup({ host: "not a host" }), /IP address or host name/);

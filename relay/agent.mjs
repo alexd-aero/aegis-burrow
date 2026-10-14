@@ -11,9 +11,13 @@
 // (HMAC-SHA256 over a timestamp, a one-time nonce, the host, the visitor's
 // address, the method and the path). Nothing else on this server can feed
 // requests to your Aegis, and nothing can claim to be another visitor.
-// The certificate (*.<your tunnel zone>, Let's Encrypt, renewed by your Aegis)
-// comes over the same tunnel, signed the same way. Only names under that zone
-// are served; everything else gets 421.
+// The certificates (*.<your tunnel zone>, Let's Encrypt, renewed by your Aegis)
+// come over the same tunnel, signed the same way: the first zone's from the
+// install, and one per domain your Aegis adds later (POST /cert with its suffix;
+// the list is kept in zones.json next to the config). Only names one level under
+// those zones are served; everything else gets 421. Your Aegis can also send a
+// newer agent (POST /update, signed): it is checked with `node --check`, takes
+// this file's place, and systemd starts it again.
 //
 // One file, no dependencies, Node 18+. Config: /etc/aegis-relay/config.json.
 // Installed by the one-line command your Aegis shows (Settings → Domain).
@@ -22,11 +26,13 @@ import { createServer as httpServer, request as httpRequest } from "node:http";
 import { createServer as httpsServer } from "node:https";
 import { createSecureContext } from "node:tls";
 import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, chownSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, chownSync, statSync, rmSync } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 
-export const VERSION = "1.0.1";
+export const VERSION = "1.1.0";
+export const FEATURES = ["zones", "update"];
+const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
 
 // ------------------------------------------------------------------ the signature (same as Aegis's relaylink.mjs)
@@ -52,10 +58,23 @@ export function verify(key, header, { host, ip, method, url }, now = Date.now())
 // ------------------------------------------------------------------ the agent
 export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOString(), ...a) } = {}) {
   const key = Buffer.from(cfg.key, "base64url");
-  const suffix = String(cfg.suffix).toLowerCase();                    // ".tunnel.example.com"
+  const suffix = String(cfg.suffix).toLowerCase();                    // ".tunnel.example.com": the first zone, from the install
   const stats = { requests: 0, ws: 0, refused: 0, upstreamErrors: 0, since: Date.now(), lastOk: 0 };
   const certFile = join(cfg.certDir, "tunnel.crt"), keyFile = join(cfg.certDir, "tunnel.key");
-  const ours = (host) => { host = String(host || "").toLowerCase().replace(/:\d+$/, ""); return host.endsWith(suffix) && host.length > suffix.length && !host.slice(0, -suffix.length).includes(".") ? host : null; };
+  // every zone: the first one, and the ones your Aegis added since (zones.json)
+  const zonesFile = cfg.zonesFile || join(dirname(cfg.certDir), "zones.json");
+  let extra = [];
+  try { extra = JSON.parse(readFileSync(zonesFile, "utf8")).filter((z) => SUFFIX_RE.test(z) && z !== suffix); } catch { /* none yet */ }
+  const zones = () => [suffix, ...extra];
+  const filesOf = (z) => z === suffix ? { crt: certFile, key: keyFile } : { crt: join(cfg.certDir, `z${z}.crt`), key: join(cfg.certDir, `z${z}.key`) };
+  const saveZones = () => { mkdirSync(dirname(zonesFile), { recursive: true }); writeFileSync(zonesFile + ".tmp", JSON.stringify(extra)); renameSync(zonesFile + ".tmp", zonesFile); };
+  const zoneOf = (host) => {
+    host = String(host || "").toLowerCase().replace(/:\d+$/, "");
+    let best = null;
+    for (const z of zones()) if (host.endsWith(z) && host.length > z.length && !host.slice(0, -z.length).includes(".") && (!best || z.length > best.length)) best = z;
+    return best;
+  };
+  const ours = (host) => (zoneOf(host) ? String(host).toLowerCase().replace(/:\d+$/, "") : null);
 
   // the visitor's address: Caddy in front says it in x-aegis-client (only believed from this machine)
   const visitor = (req) => {
@@ -109,23 +128,31 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   }
 
   // the visitors' side: behind Caddy (plain HTTP on loopback), or TLS on :443 itself
-  let ctx = null;
-  const loadCtx = () => { try { ctx = existsSync(certFile) ? createSecureContext({ cert: readFileSync(certFile), key: readFileSync(keyFile), minVersion: "TLSv1.2" }) : null; } catch (e) { log("certificate:", e.message); ctx = null; } };
+  const ctxs = new Map();               // zone -> TLS context
+  const loadCtx = () => {
+    ctxs.clear();
+    for (const z of zones()) {
+      const f = filesOf(z);
+      try { if (existsSync(f.crt)) ctxs.set(z, createSecureContext({ cert: readFileSync(f.crt), key: readFileSync(f.key), minVersion: "TLSv1.2" })); } catch (e) { log(`certificate for *${z}:`, e.message); }
+    }
+  };
   loadCtx();
   const front = cfg.mode === "tls"
-    ? httpsServer({ SNICallback: (name, cb) => (ours(name) && ctx ? cb(null, ctx) : cb(new Error("not ours"))), minVersion: "TLSv1.2" }, onRequest)
+    ? httpsServer({ SNICallback: (name, cb) => { const c = ctxs.get(zoneOf(name)); c ? cb(null, c) : cb(new Error("not ours")); }, minVersion: "TLSv1.2" }, onRequest)
     : httpServer(onRequest);
   front.on("upgrade", onUpgrade);
   front.on("tlsClientError", () => {});
   front.keepAliveTimeout = 65000;
   front.listen(cfg.mode === "tls" ? cfg.tlsPort || 443 : cfg.httpPort, cfg.mode === "tls" ? "0.0.0.0" : "127.0.0.1",
-               () => log(`aegis relay agent ${VERSION}: ${cfg.mode === "tls" ? "TLS on :" + (cfg.tlsPort || 443) : "behind Caddy on 127.0.0.1:" + cfg.httpPort} -> 127.0.0.1:${cfg.upstreamPort}, names *${suffix}`));
+               () => log(`aegis relay agent ${VERSION}: ${cfg.mode === "tls" ? "TLS on :" + (cfg.tlsPort || 443) : "behind Caddy on 127.0.0.1:" + cfg.httpPort} -> 127.0.0.1:${cfg.upstreamPort}, names ${zones().map((z) => "*" + z).join(" ")}`));
 
   // the certificate, as Caddy wants it (files + a site), or for the agent's own TLS
+  // one site block per zone that has its certificate
   function caddySite() {
-    return `# Aegis Relay: *${suffix} -> the Aegis at home, through the relay agent (written by it; don't edit)
-*${suffix} {
-	tls ${certFile} ${keyFile} {
+    const have = zones().filter((z) => z === suffix || existsSync(filesOf(z).crt));
+    return `# Aegis Relay: ${have.map((z) => "*" + z).join(", ")} -> the Aegis at home, through the relay agent (written by it; don't edit)
+` + have.map((z) => `*${z} {
+	tls ${filesOf(z).crt} ${filesOf(z).key} {
 		curves x25519mlkem768 x25519 secp256r1
 	}
 	header -Server
@@ -133,7 +160,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
 		header_up X-Aegis-Client {remote_host}
 	}
 }
-`;
+`).join("\n");
   }
   // Caddy: our site file, imported by the Caddyfile (a glob over its folder, or a line of
   // its own; an older hand-made site's import line becomes ours), checked with
@@ -168,45 +195,83 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     }
     execFile("systemctl", ["reload", "caddy"], (e) => log(e ? `caddy reload failed: ${e.message}` : "caddy reloaded with the new certificate"));
   }
-  function installCert(cert, privKey) {
+  function installCert(cert, privKey, z = suffix) {
     const x = new X509Certificate(cert);
     mkdirSync(cfg.certDir, { recursive: true });
+    const f = filesOf(z), added = z !== suffix && !extra.includes(z);
+    const old = [f.crt, f.key].map((p) => (existsSync(p) ? readFileSync(p) : null));
     const write = (file, data, mode) => { writeFileSync(file + ".tmp", data, { mode }); renameSync(file + ".tmp", file); chmodSync(file, mode); };
-    write(certFile, cert, 0o644);
-    write(keyFile, privKey, 0o640);
-    if (cfg.caddyGroup !== undefined) { try { chownSync(keyFile, 0, cfg.caddyGroup); } catch { /* not root: tests */ } }
-    if (cfg.mode === "caddy") caddyInstall();
-    else loadCtx();
+    write(f.crt, cert, 0o644);
+    write(f.key, privKey, 0o640);
+    if (cfg.caddyGroup !== undefined) { try { chownSync(f.key, 0, cfg.caddyGroup); } catch { /* not root: tests */ } }
+    if (added) { extra.push(z); saveZones(); }
+    try { if (cfg.mode === "caddy") caddyInstall(); }
+    catch (e) {           // Caddy said no: this zone's files as they were
+      [f.crt, f.key].forEach((p, i) => { try { old[i] ? writeFileSync(p, old[i]) : rmSync(p, { force: true }); } catch { /* best effort */ } });
+      if (added) { extra = extra.filter((x) => x !== z); saveZones(); }
+      throw e;
+    }
+    loadCtx();
     log(`certificate for ${x.subjectAltName} until ${x.validTo}`);
     return { fingerprint: x.fingerprint256, notAfter: Date.parse(x.validTo) };
   }
+  function removeZone(z) {
+    if (z === suffix) throw new Error("that's the first zone; reinstall to change it");
+    if (!extra.includes(z)) return false;
+    extra = extra.filter((x) => x !== z); saveZones();
+    const f = filesOf(z);
+    rmSync(f.crt, { force: true }); rmSync(f.key, { force: true });
+    if (cfg.mode === "caddy") caddyInstall();
+    loadCtx();
+    log(`no longer serving *${z}`);
+    return true;
+  }
+  const certInfo = (z) => { try { const x = new X509Certificate(readFileSync(filesOf(z).crt)); return { fingerprint: x.fingerprint256, notAfter: Date.parse(x.validTo), names: x.subjectAltName }; } catch { return null; } };
 
   // the control side: only through the tunnel, only signed by your Aegis
   const control = httpServer((req, res) => {
     const reply = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
     if (!verify(key, req.headers["x-aegis-relay"], { host: "agent", ip: "-", method: req.method, url: req.url })) return reply(401, { error: "not signed by your Aegis" });
     if (req.method === "GET" && req.url === "/status") {
-      let cert = null;
-      try { const x = new X509Certificate(readFileSync(certFile)); cert = { fingerprint: x.fingerprint256, notAfter: Date.parse(x.validTo), names: x.subjectAltName }; } catch { /* none yet */ }
-      return reply(200, { version: VERSION, mode: cfg.mode, suffix, cert, stats });
+      return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, cert: certInfo(suffix),
+                          zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), stats });
     }
+    const body = (max, fn) => {
+      let b = "";
+      req.on("data", (d) => { b += d; if (b.length > max) req.destroy(); });
+      req.on("end", () => { try { fn(JSON.parse(b || "{}")); } catch (e) { reply(400, { error: e.message }); } });
+    };
     if (req.method === "POST" && req.url === "/cert") {
-      let body = "";
-      req.on("data", (d) => { body += d; if (body.length > 64 * 1024) req.destroy(); });
-      req.on("end", () => {
-        try {
-          const { cert, key: k } = JSON.parse(body);
-          const x = new X509Certificate(cert);
-          if (!x.subjectAltName.split(", ").some((n) => n === `DNS:*${suffix}`)) return reply(400, { error: `that certificate isn't for *${suffix}` });
-          return reply(200, { ok: true, ...installCert(cert, k) });
-        } catch (e) { return reply(400, { error: e.message }); }
+      return body(64 * 1024, ({ cert, key: k, suffix: z = suffix }) => {
+        z = String(z).toLowerCase();
+        if (!SUFFIX_RE.test(z)) return reply(400, { error: "that isn't a zone" });
+        const x = new X509Certificate(cert);
+        if (!x.subjectAltName.split(", ").some((n) => n === `DNS:*${z}`)) return reply(400, { error: `that certificate isn't for *${z}` });
+        reply(200, { ok: true, suffix: z, ...installCert(cert, k, z) });
       });
-      return;
+    }
+    if (req.method === "POST" && req.url === "/zones/remove") {
+      return body(4096, ({ suffix: z }) => reply(200, { ok: true, removed: removeZone(String(z || "").toLowerCase()) }));
+    }
+    // a newer agent from your Aegis: checked, then it takes this file's place, and systemd starts it
+    if (req.method === "POST" && req.url === "/update") {
+      return body(2 * 1024 * 1024, ({ code, version }) => {
+        if (typeof code !== "string" || !code.includes("startAgent")) return reply(400, { error: "that isn't an agent" });
+        const self = cfg.agentFile || new URL(import.meta.url).pathname, next = self.replace(/\.m?js$/, "") + ".next.mjs";
+        writeFileSync(next, code, { mode: 0o644 });
+        try { execFileSync(process.execPath, ["--check", next], { stdio: "pipe", timeout: 30000 }); }
+        catch (e) { rmSync(next, { force: true }); const lines = String(e.stderr || e.message).split("\n"); return reply(400, { error: "it doesn't parse: " + (lines.find((l) => /Error/.test(l)) || lines[0]) }); }
+        if (existsSync(self)) writeFileSync(self + ".prev", readFileSync(self));
+        renameSync(next, self);
+        log(`updated to ${String(version || "?").slice(0, 20)}; restarting`);
+        reply(200, { ok: true, from: VERSION, to: version || null });
+        if (cfg.exitOnUpdate !== false) setTimeout(() => process.exit(0), 300);
+      });
     }
     reply(404, { error: "not found" });
   });
   control.listen(cfg.controlPort, "127.0.0.1");
-  return { front, control, stats, installCert, close: () => { front.close(); control.close(); } };
+  return { front, control, stats, installCert, removeZone, zones, close: () => { front.close(); control.close(); } };
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

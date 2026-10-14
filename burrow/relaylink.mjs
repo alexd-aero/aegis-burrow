@@ -19,7 +19,11 @@
 //              hold. The relay listener refuses anything else: nothing else on
 //              the VPS can feed requests here or claim another visitor's address.
 //   the cert   this machine's Let's Encrypt wildcard is pushed to the agent
-//              (signed the same way) when the link comes up and when it renews.
+//              (signed the same way) when the link comes up and when it renews;
+//              so is each other domain's (domains.mjs, route "vps"), with its suffix.
+//   updates    an agent older than this Aegis's (relay/agent.mjs) is sent the
+//              new one over the link (1.1 and later take it by themselves; 1.0
+//              needs the install command once more).
 
 import { spawn, execFileSync } from "node:child_process";
 import { createServer as netServer } from "node:net";
@@ -33,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { sign, verify, VERSION as AGENT_VERSION } from "../relay/agent.mjs";
 
 export { sign, verify, AGENT_VERSION };
+const newer = (a, b) => { const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
 const AGENT_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "relay", "agent.mjs");
 const TOKEN_MS = 30 * 60e3;
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
@@ -197,15 +202,47 @@ export class RelayLink {
       r.end(data);
     });
   }
-  // this machine's certificate to the agent, unless it already has that one
-  async pushCert(cur) {
+  // a certificate to the agent, unless it already has that one: the tunnels'
+  // wildcard (no suffix), or another domain's (suffix ".example.org")
+  async pushCert(cur, suffix) {
     if (!cur?.cert || !cur?.key || this.link.state !== "up") return null;
     const fp = new X509Certificate(cur.cert).fingerprint256;
-    if (this.agent?.cert?.fingerprint === fp) return { same: true };
-    const r = await this.control("POST", "/cert", { cert: cur.cert, key: cur.key });
-    this.agent = { ...(this.agent || {}), cert: { fingerprint: r.fingerprint, notAfter: r.notAfter } };
-    this.log(`relay: the certificate is on ${this.state.vps.host} (until ${new Date(r.notAfter).toISOString().slice(0, 10)})`);
+    const has = suffix ? this.agent?.zones?.find((z) => z.suffix === suffix)?.cert : this.agent?.cert;
+    if (has?.fingerprint === fp && !cur.force) return { same: true };
+    if (suffix && !this.can("zones")) throw new Error(`the agent on ${this.state.vps.host} is ${this.agent?.version || "too old"}: it needs ${AGENT_VERSION} for more domains`);
+    const r = await this.control("POST", "/cert", { cert: cur.cert, key: cur.key, ...(suffix ? { suffix } : {}) });
+    const info = { fingerprint: r.fingerprint, notAfter: r.notAfter };
+    if (suffix) {
+      const zones = (this.agent?.zones || []).filter((z) => z.suffix !== suffix);
+      this.agent = { ...(this.agent || {}), zones: [...zones, { suffix, cert: info }] };
+    } else this.agent = { ...(this.agent || {}), cert: info };
+    this.log(`relay: the certificate for *${suffix || this.agent?.suffix || ""} is on ${this.state.vps.host} (until ${new Date(r.notAfter).toISOString().slice(0, 10)})`);
     return r;
+  }
+  async removeZone(suffix) {
+    if (this.link.state !== "up" || !this.can("zones")) return null;
+    const r = await this.control("POST", "/zones/remove", { suffix });
+    if (this.agent?.zones) this.agent.zones = this.agent.zones.filter((z) => z.suffix !== suffix);
+    return r;
+  }
+  can(feature) { return !!this.agent?.features?.includes(feature); }
+  // what the agent is missing: null, "update" (it takes one), or "reinstall" (1.0: the command once more)
+  outdated() {
+    if (!this.agent?.version || !newer(AGENT_VERSION, this.agent.version)) return null;
+    return this.can("update") ? "update" : "reinstall";
+  }
+  // send this Aegis's agent; it restarts, and the link sees it come back
+  async updateAgent() {
+    if (this.link.state !== "up" || this.outdated() !== "update") return null;
+    const from = this.agent.version;
+    const r = await this.control("POST", "/update", { code: readFileSync(AGENT_FILE, "utf8"), version: AGENT_VERSION });
+    this.log(`relay: updating the agent on ${this.state.vps.host} from ${from} to ${AGENT_VERSION}`);
+    for (let i = 0; i < 30; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      const s = await this.control("GET", "/status").catch(() => null);
+      if (s?.version === AGENT_VERSION) { this.agent = { ...s, at: Date.now() }; this.log(`relay: the agent on ${this.state.vps.host} is ${AGENT_VERSION}`); return r; }
+    }
+    throw new Error(`the agent on ${this.state.vps.host} didn't come back as ${AGENT_VERSION}`);
   }
 
   // ------------------------------------------------------------ a request through the relay
@@ -220,7 +257,8 @@ export class RelayLink {
   view() {
     const S = this.state;
     return { configured: this.configured(), vps: S.vps, installed: S.installed, link: this.link,
-             agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, stats: this.agent.stats, at: this.agent.at } : null,
+             agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, zones: this.agent.zones || null, features: this.agent.features || [],
+                                   stats: this.agent.stats, at: this.agent.at, outdated: this.outdated() } : null,
              pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION,
              checked: this.checked };
   }

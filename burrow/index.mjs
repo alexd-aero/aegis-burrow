@@ -78,7 +78,8 @@ export class Burrow {
     this.domains = new Domains({
       settings, dataDir, origin, log: this.log, bin: () => this.cloudflare.bin(),
       mainZone: () => { const d = settings.get("domain"); return d ? (d.zone?.name || d.mainHost.split(".").slice(1).join(".")).toLowerCase() : null; },
-      onChange: (list) => this.tunnels.useExtras(list),
+      mainCert: () => settings.get("domain")?.cert || null,
+      onChange: (list) => { this.tunnels.useExtras(list); this.onDomainsChange?.(); },
     });
     this.tunnels.useExtras(this.domains.list(), (zone) => this.domains.takenOn(zone));
     // who may reach the gate at all (shield.mjs); Aegis asks it about every request

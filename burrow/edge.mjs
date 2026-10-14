@@ -54,7 +54,7 @@ const run = (cmd, args, timeout = 30000) => new Promise((resolve) =>
   execFile(cmd, args, { timeout }, (e, out, err) => resolve({ ok: !e, out: String(out || "") + String(err || ""), missing: e?.code === "ENOENT" })));
 
 // Do Cloudflare's and Google's public resolvers both return this TXT value?
-async function txtVisible(name, value) {
+export async function txtVisible(name, value) {
   const ask = (url) => fetch(url + `?name=${encodeURIComponent(name)}&type=TXT`, { headers: { Accept: "application/dns-json" }, signal: AbortSignal.timeout(5000) })
     .then((r) => r.json()).then((j) => (j.Answer || []).some((a) => String(a.data).replace(/"/g, "") === value)).catch(() => false);
   const [a, b] = await Promise.all([ask("https://cloudflare-dns.com/dns-query"), ask("https://dns.google/resolve")]);

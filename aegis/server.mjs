@@ -42,11 +42,13 @@ import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
          createCipheriv, createDecipheriv, createHash } from "node:crypto";
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
+import { Devices, DEVICE_TTL_S } from "./devices.mjs";
 import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
-import { createServer as createNetServer, connect as netConnect } from "node:net";
-import { RelayLink } from "../burrow/relaylink.mjs";
+import { createServer as createNetServer, connect as netConnect, isIP } from "node:net";
+import { RelayLink, AGENT_VERSION } from "../burrow/relaylink.mjs";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
@@ -64,6 +66,7 @@ const TLS = settings.get("tls");
 const COOKIE = settings.get("cookie") || "__Host-aegis";          // also the AEAD label of the token
 const PLAIN_COOKIE = "aegis";                                      // the same token on plain HTTP
 const GO = "aegis-go";                                             // one-shot: "the next / is Termix"
+const DEVICE = "aegis-dev";                                         // the device key (aegis/devices.mjs; AEAD label too)
 const UNLOCK = "aegis-unlock";                                     // a tunnel's own password was entered (AEAD label too)
 // Configurable under Settings → Sign-in (data/state.json).
 const sessionTtl = () => Math.max(1, Math.min(365, Number(settings.get("sessionDays")) || 30)) * 864e5;
@@ -78,6 +81,8 @@ const lockout = () => {
 };
 
 function log(...args) { console.log(new Date().toISOString(), ...args); }
+// your devices (aegis/devices.mjs): which browser a request comes from, for sure (its device key)
+const devices = new Devices({ file: join(DATA, "devices.json"), log });
 
 // ---------- the audit log ----------
 // Who did what, kept apart from the noise: every sign-in (and failed one), sign-out,
@@ -290,6 +295,8 @@ function extContext(rec) {
     setting: (key) => { const r = addons.load()[id]; return r?.settings?.[key] ?? r?.manifest.settings.find((s) => s.key === key)?.default ?? ""; },
     domain: () => { const d = settings.get("domain"); return d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join("."), managed: !!d.managed } : null; },
     dns: () => tunnels.dnsRecords(),
+    // your devices (aegis/devices.mjs): each with its addresses, and the addresses they used lately
+    devices: () => ({ list: devices.list(null), addresses: devices.addresses() }),
     tunnels: {
       list: () => tunnels.list(),
       create: (spec) => tunnels.create({ ...spec, app: id }),
@@ -444,7 +451,7 @@ function parseCookies(header) {
 
 function stripGateCookie(header) {
   if (!header) return header;
-  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK].map((n) => n + "=");
+  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK, DEVICE, "__Host-" + DEVICE].map((n) => n + "=");
   const kept = header.split(";").map((p) => p.trim()).filter((p) => p && !ours.some((n) => p.startsWith(n)));
   return kept.length ? kept.join("; ") : undefined;
 }
@@ -508,6 +515,18 @@ const sessionCookie = (req, sid) =>
   `${cookieName(req)}=${sealSession(settings.auth().username, hostOf(req), sid)}; ${cookieAttrs(req, sessionTtl() / 1000)}`;
 const clearSessionCookie = (req) => `${cookieName(req)}=; ${cookieAttrs(req, 0)}`;
 
+// ---------- your devices: the device key (aegis/devices.mjs) ----------
+const deviceName_ = (req) => (isSecure(req) ? "__Host-" + DEVICE : DEVICE);
+const deviceCookie = (req, id) => `${deviceName_(req)}=${seal({ d: id, e: settings.auth()?.epoch || null }, DEVICE)}; ${cookieAttrs(req, DEVICE_TTL_S)}`;
+function deviceOf(req) {
+  if (req._dev !== undefined) return req._dev;
+  const raw = parseCookies(req.headers.cookie)[deviceName_(req)];
+  const s = raw ? unseal(raw, DEVICE) : null;
+  return (req._dev = s && (s.e || null) === (settings.auth()?.epoch || null) && devices.has(s.d) ? s.d : null);
+}
+// a sign-in: this browser's device key (the one it had, or a new one)
+const enrollDevice = (req) => deviceCookie(req, devices.enroll(deviceOf(req), { ip: clientIp(req), ua: req.headers["user-agent"], host: hostOf(req) }));
+
 function renewalCookie(req) {
   const s = sessionOf(req);
   if (!s || s.exp - Date.now() > sessionTtl() - SESSION_RENEW_MS) return null;
@@ -553,7 +572,7 @@ async function unlockRoute(t, req, res, url, host) {
 // ---------- single sign-on tickets (dashboard -> tunnel host) ----------
 
 const usedTickets = new Map(); // n -> expiry
-const sealTicket = (host, sid) => seal({ h: host, sid, exp: Date.now() + TICKET_TTL_MS, n: b64u(randomBytes(12)) }, "tgate-sso");
+const sealTicket = (host, sid, dev = null) => seal({ h: host, sid, dev, exp: Date.now() + TICKET_TTL_MS, n: b64u(randomBytes(12)) }, "tgate-sso");
 function openTicket(token, host) {
   const t = unseal(token, "tgate-sso");
   const now = Date.now();
@@ -755,7 +774,7 @@ async function handleGate(req, res, path, url, host, isMain) {
     fails.delete(ip); log("auth ok", ip, host); audit("sign-in", req, { user: String(creds.username || "") });
     burrow.shield.trust(ip);
     try { guardExt?.signedIn?.(ip); } catch { /* the addon's business */ }
-    return sendJson(res, 200, { ok: true, next: safeNext(creds.next, "/") }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
+    return sendJson(res, 200, { ok: true, next: safeNext(creds.next, "/") }, { "Set-Cookie": [sessionCookie(req, b64u(randomBytes(12))), enrollDevice(req)] });
   }
   if (path === "/__gate/logout") {
     const s = sessionOf(req);
@@ -769,7 +788,10 @@ async function handleGate(req, res, path, url, host, isMain) {
       log("sso ticket refused", clientIp(req), host); audit("sign-in link refused", req);
       return messagePage(res, 403, "Sign-in expired", 'That sign-in link expired. <a href="/">Try again</a>.');
     }
-    return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/"), "Set-Cookie": sessionCookie(req, t.sid) });
+    // the same device key on this host too, so the gate knows the device here even once the session ends
+    const dev = t.dev && devices.has(t.dev) ? t.dev : null;
+    if (dev) devices.seen(dev, { ip: clientIp(req), ua: req.headers["user-agent"], host }, true);
+    return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/"), "Set-Cookie": [sessionCookie(req, t.sid), ...(dev ? [deviceCookie(req, dev)] : [])] });
   }
   if (!isMain) return send(res, 404, "Not found");
 
@@ -1016,6 +1038,10 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/domains/login" && req.method === "POST") return sendJson(res, 200, await D.startLogin());
     if (path === "/__gate/api/domains/cancel" && req.method === "POST") return sendJson(res, 200, D.cancelLogin());
     if (path === "/__gate/api/domains/forget" && req.method === "POST") return sendJson(res, 200, D.forget());
+    if (path === "/__gate/api/domains/check" && req.method === "POST") return sendJson(res, 200, await D.check((await readJsonBody(req)).zone));
+    if (path === "/__gate/api/domains/token" && req.method === "POST") {
+      const b = await readJsonBody(req); const r = await D.useToken(b.zone, b.token); audit("Cloudflare token added", req, { zone: r.pending?.zone }); return sendJson(res, 200, r);
+    }
     if (path === "/__gate/api/domains" && req.method === "POST") {
       const r = await D.add(await readJsonBody(req)); audit("domain added", req, { zone: r.domains.at(-1)?.zone }); return sendJson(res, 200, r);
     }
@@ -1050,10 +1076,20 @@ async function handleApi(req, res, path, url) {
       if (!/^[A-Za-z0-9._@-]{2,64}$/.test(username)) return sendJson(res, 400, { error: "Username: 2-64 letters, digits, . _ @ -" });
       if (String(f.password || "").length < 10) return sendJson(res, 400, { error: "Use at least 10 characters." });
       setPassword(username, f.password);
-      log("password changed from", ip, "- every other session is signed out"); audit("password changed", req, { user: username });
-      return sendJson(res, 200, { ok: true }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
+      log("password changed from", ip, "- every other session is signed out, every device key forgotten"); audit("password changed", req, { user: username });
+      devices.forgetAll(); req._dev = null;
+      return sendJson(res, 200, { ok: true }, { "Set-Cookie": [sessionCookie(req, b64u(randomBytes(12))), enrollDevice(req)] });
     }
     if (path === "/__gate/api/audit" && req.method === "GET") return sendJson(res, 200, { events: auditRead(Number(url.searchParams.get("n")) || 300) });
+    // your devices
+    if (path === "/__gate/api/devices" && req.method === "GET") return sendJson(res, 200, { devices: devices.list(deviceOf(req)) });
+    const dvm = /^\/__gate\/api\/devices\/([A-Za-z0-9_-]{8,40})$/.exec(path);
+    if (dvm && req.method === "PATCH") { devices.rename(dvm[1], (await readJsonBody(req)).name); return sendJson(res, 200, { devices: devices.list(deviceOf(req)) }); }
+    if (dvm && req.method === "DELETE") {
+      if (!devices.forget(dvm[1])) return sendJson(res, 404, { error: "No such device." });
+      audit("device forgotten", req, { device: dvm[1].slice(0, 6) });
+      return sendJson(res, 200, { devices: devices.list(deviceOf(req)) });
+    }
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
@@ -1330,16 +1366,19 @@ function shieldStop(req, path, host) {
   const isMain = isDashHost(host);
   if (isMain && SIGN_IN_PATHS.has(path)) return null;
   const ip = clientIp(req);
+  // one of your devices (its device key): yours for sure, whatever the address
+  const dev = deviceOf(req);
+  if (dev) devices.seen(dev, { ip, ua: req.headers["user-agent"], host });
   if (guardExt) {
     const H = req.headers;
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port: burrow.matchHost(host), main: isMain, trusted: () => isAuthed(req) };
+                   port: burrow.matchHost(host), main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
-  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), trusted: () => isAuthed(req) });
+  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), trusted: () => !!dev || isAuthed(req) });
 }
 // the guard addon's log line, once the response is done (never in the request's way)
 function observeDone(req, res, extra = {}) {
@@ -1396,8 +1435,9 @@ async function handler(req, res) {
         ? send(res, 302, "", { Location: "/__gate/login" + (path === "/" ? "" : "?next=" + encodeURIComponent(safeNext(req.url, "/"))) })
         : sendJson(res, 401, { error: "login required" });
     }
-    const renew = req.method === "GET" && isPageLoad(req) ? renewalCookie(req) : null;
-    const withRenew = renew ? { "Set-Cookie": renew } : {};
+    // a page load: the session renewed when due, and a device key for a signed-in browser that has none yet
+    const renew = req.method === "GET" && isPageLoad(req) ? [renewalCookie(req), deviceOf(req) ? null : enrollDevice(req)].filter(Boolean) : [];
+    const withRenew = renew.length ? { "Set-Cookie": renew } : {};
     // what a mounted app's page asks for at an absolute path
     const byRef = path !== "/" ? mountByReferer(req) : null;
     if (byRef) return proxyMount(byRef, req, res, req.url);
@@ -1408,9 +1448,9 @@ async function handler(req, res) {
     if (path === "/" && req.method === "GET" && isPageLoad(req)) {
       if (parseCookies(req.headers.cookie)[goName(req)] !== "termix") return page(res, "home.html", withRenew);
       audit("termix opened", req);
-      return proxy(req, res, { setCookie: [`${goName(req)}=; ${cookieAttrs(req, 0)}`, renew].filter(Boolean) });
+      return proxy(req, res, { setCookie: [`${goName(req)}=; ${cookieAttrs(req, 0)}`, ...renew] });
     }
-    proxy(req, res, renew ? { setCookie: renew } : undefined);
+    proxy(req, res, renew.length ? { setCookie: renew } : undefined);
   } catch (e) {
     log("handler error", e.message);
     if (!res.headersSent) send(res, 500, "Internal error"); else res.destroy();
@@ -1567,7 +1607,9 @@ relayServer.keepAliveTimeout = 65000;
 relayServer.on("error", (e) => log(`relay: 127.0.0.1:${RELAY_LINK_PORT}:`, e.message));
 const relayWanted = () => {
   const n = tunnels.naming, v = relayLink.state.vps;
-  if (!relayLink.configured() || !burrow.on || !tunnels.domain || n.mode !== "wildcard" || !v || n.relay !== v.host) return false;
+  if (!relayLink.configured() || !burrow.on || !v) return false;
+  if (burrow.domains.wantsRelay()) return true;            // another domain's tunnels go through the VPS
+  if (!tunnels.domain || n.mode !== "wildcard" || n.relay !== v.host) return false;
   return n.certs === "relay" || (n.certs === "self" && (n.route === "vps" || tunnels.edge.target()?.via === "relay"));
 };
 const relayListen = () => relayServer.listening ? Promise.resolve() : new Promise((resolve, reject) => {
@@ -1608,8 +1650,33 @@ function superviseRelay() {
   }
 }
 // the certificate to the agent: when the link comes up, when it renews, and hourly (if it differs)
-relayLink.onUp = () => relayLink.pushCert(tunnels.edge.cur).catch((e) => log("relay: couldn't push the certificate:", e.message));
-setInterval(() => { if (relayLink.link.state === "up") relayLink.control("GET", "/status").then((s) => { relayLink.agent = { ...s, at: Date.now() }; return relayLink.pushCert(tunnels.edge.cur); }).catch(() => {}); }, 3600e3).unref();
+// the link came up: an older agent gets this Aegis's first (1.1+ take it over the link), then the certificates
+async function relayUp() {
+  if (relayLink.outdated() === "update") await relayLink.updateAgent().catch((e) => log("relay: couldn't update the agent:", e.message));
+  else if (relayLink.outdated() === "reinstall" && burrow.domains.wantsRelay()) log(`relay: the agent on ${relayLink.state.vps.host} is ${relayLink.agent.version}; other domains need ${AGENT_VERSION}: run the install command once more`);
+  if (tunnels.edge.cur) await relayLink.pushCert(tunnels.edge.cur).catch((e) => log("relay: couldn't push the certificate:", e.message));
+  await burrow.domains.pushAll();
+}
+relayLink.onUp = () => { relayUp().catch(() => {}); };
+setInterval(() => { if (relayLink.link.state === "up") relayLink.control("GET", "/status").then((s) => { relayLink.agent = { ...s, at: Date.now() }; return relayUp(); }).catch(() => {}); }, 3600e3).unref();
+// other domains through your VPS (burrow/domains.mjs): the link, its address, its agent
+burrow.domains.useRelay({
+  configured: () => relayLink.configured(),
+  host: () => relayLink.state.vps?.host || null,
+  version: () => relayLink.agent?.version || null,
+  outdated: () => relayLink.outdated(),
+  ip: async () => { const h = relayLink.state.vps?.host; if (!h) throw new Error("no VPS"); if (isIP(h)) return h; const { address } = await dnsLookup(h); return address; },
+  ready: async () => {
+    const v = await verifyRelay();
+    if (!v.ok) return v;
+    if (relayLink.outdated() === "update") await relayLink.updateAgent();
+    if (!relayLink.can("zones")) return { ok: false, error: `its agent is ${relayLink.agent?.version || "too old"} and needs ${AGENT_VERSION} for more domains: run the install command on it once more (Settings → Domain → Your VPS)` };
+    return v;
+  },
+  push: (cur, suffix) => relayLink.pushCert(cur, suffix),
+  remove: (suffix) => relayLink.removeZone(suffix),
+});
+burrow.onDomainsChange = () => superviseRelay();
 setInterval(superviseRelay, 20000).unref();
 setTimeout(superviseRelay, 8000).unref();
 async function relayRoute(method, path, readJson) {
@@ -1734,7 +1801,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (xc) return extRoute(xc[1], xc[2] || "/", method, new URLSearchParams(), readJson, "control");
   return null;
 });
-for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { relayLink.stop(); burrow.stop(); serveo.stop(); process.exit(0); });
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { relayLink.stop(); burrow.stop(); serveo.stop(); devices.stop(); process.exit(0); });
 
 const LOCAL_URL = `${TLS ? "https" : "http"}://${LISTEN.host === "0.0.0.0" || LISTEN.host === "::" ? "127.0.0.1" : LISTEN.host}:${LISTEN.port}`;
 // data/runtime.json: where it answers right now (bin/aegis prints these)
