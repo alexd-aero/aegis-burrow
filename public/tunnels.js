@@ -122,6 +122,22 @@ const targetPill = (t) => t.meta?.repo ? `<span class="pill site">${h(PROVIDER[t
   : t.kind === "site" ? `<span class="pill site">${h(PROVIDER[t.site.provider] || "Pages")} · ${h(t.site.url.replace(/^https:\/\//, "").replace(/\/$/, ""))}</span>`
   : `<span class="pill">→ ${h(t.targetHost)}:${t.targetPort}</span>`;
 
+// its names on the other domains (Settings → Domain → Other domains)
+const alsoOk = (t) => (t.also || []).filter((a) => !a.hidden);
+function alsoLine(t) {
+  const a = alsoOk(t);
+  if (!a.length) return "";
+  return `<div class="t-also">also <a href="${h(a[0].url)}" target="_blank" rel="noopener" data-stop>${h(a[0].host)}</a>${a.length > 1 ? `<span class="faint"> +${a.length - 1}</span>` : ""}</div>`;
+}
+function alsoRows(d) {
+  const rows = (d.also || []).map((a) => `<div class="t-url">${a.hidden ? `<span class="faint" title="Not reachable: ${h(a.hidden)}">${h(a.host)} · taken by ${h(a.hidden)}</span>`
+    : `<a href="${h(a.url)}" target="_blank" rel="noopener">${h(a.url)}</a><button class="copy" data-act="copy" data-text="${h(a.url)}" aria-label="Copy link">${ICON.copy}</button>`}</div>`);
+  return rows.length ? `<div class="d-also">${rows.join("")}</div>` : "";
+}
+function pickRows(d) {
+  if (!(d.pickable || []).length) return "";
+  return `<dt>Other domains</dt><dd class="d-picks">${d.pickable.map((z) => `<label class="check"><input type="checkbox" data-act="pick-domain" data-zone="${h(z)}" ${d.domains.includes(z) ? "checked" : ""}><span class="mono">${h(d.sub || d.port)}.${h(z)}</span></label>`).join("")}</dd>`;
+}
 function card(t) {
   return `<article class="card tcard${t.enabled ? "" : " off"}" data-act="open" data-port="${t.port}">
     <div class="t-top">
@@ -130,6 +146,7 @@ function card(t) {
         <div class="t-name">${h(displayName(t))}</div>
         <div class="t-url">${t.url ? `<a href="${h(t.url)}" target="_blank" rel="noopener" data-stop>${h(t.host)}</a>
           <button class="copy" data-act="copy" data-text="${h(t.url)}" title="Copy link" aria-label="Copy link">${ICON.copy}</button>` : `<span class="faint">port ${t.port} · waiting for trycloudflare.com</span>`}</div>
+        ${alsoLine(t)}
       </div>
       <label class="switch" title="${t.enabled ? "On" : "Off"}" data-stop><input type="checkbox" data-act="toggle" data-port="${t.port}" ${t.enabled ? "checked" : ""} aria-label="Tunnel on or off"><i></i></label>
     </div>
@@ -843,6 +860,7 @@ function renderDetail() {
         <h1>${h(displayName(d))}</h1>
         <div class="t-url" style="margin-top:4px"><a href="${h(d.url)}" target="_blank" rel="noopener">${h(d.url)}</a>
           <button class="copy" data-act="copy" data-text="${h(d.url)}" aria-label="Copy link">${ICON.copy}</button></div>
+        ${alsoRows(d)}
         <div class="t-meta" style="margin-top:10px">${statusPill(d)}${accessPill(d)}${targetPill(d)}</div>
       </div>
       <div class="row" style="flex-wrap:wrap">
@@ -895,6 +913,7 @@ function renderDetail() {
           <dt>Checked</dt><dd>${ago(d.health.checked)}</dd>
           <dt>Host header</dt><dd>${d.kind === "site" ? "the site's own; nothing about visitors is passed on" : d.preserveHost ? "kept (tunnel name)" : "rewritten to target"}</dd>
           <dt>DNS</dt><dd>${d.dns && d.dns.ok ? "proxied CNAME" : h(d.dns && d.dns.error || "pending")}</dd>
+          ${pickRows(d)}
           <dt>Created</dt><dd>${new Date(d.created).toLocaleString()}</dd>
           <dt>WebSockets</dt><dd>${fmtN(d.totals.ws)} total</dd>
         </dl>
@@ -1435,6 +1454,12 @@ document.addEventListener("click", async (e) => {
       toast(v === "public" ? "Anyone with the link can open it" : v === "password" ? "It opens with its own password (or your login)" : "Login required"); refresh();
     }
     else if (act === "password") passwordForm(S.detail);
+    else if (act === "pick-domain") {
+      const z = el.dataset.zone, on = el.checked, cur = new Set(S.detail.domains || []);
+      on ? cur.add(z) : cur.delete(z);
+      await patch(S.detail.port, { domains: [...cur] });
+      toast(on ? `Also at ${S.detail.sub || S.detail.port}.${z}` : `Not on ${z} any more`); refresh();
+    }
     else if (act === "check-ip") {
       const ip = el.dataset.ip;
       S.intel[ip] = { loading: true }; render();

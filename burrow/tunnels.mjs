@@ -43,6 +43,10 @@
 //                 that covers two levels (Advanced Certificate Manager) unless
 //                 the prefix is empty
 //
+// More domains (domains.mjs) add names beside those: https://<sub|PORT>.<zone>
+// on each other domain whose `tunnels` is "all", or "picked" and listed in
+// t.domains. One wildcard record per domain, so nothing is made per tunnel.
+//
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
 //
@@ -246,6 +250,8 @@ export class TunnelManager {
     this.tunnels = new Map();     // port -> config
     this.live = new Map();        // port -> runtime (stats, clients, recent, sockets, health)
     mkdirSync(join(dataDir, "favicons"), { recursive: true });
+    this.extras = [];             // other domains: [{zone, label, picked}] (domains.mjs)
+    this.taken = () => new Set(); // names on a zone with a record of their own
     this.load();
     this.useDomain(domain);
     if (this.naming.certs === "auto") setTimeout(() => this.resolveAuto(), 5000).unref?.();
@@ -281,6 +287,38 @@ export class TunnelManager {
     this._wild = null;
     this.syncEdge();
   }
+  // The other domains (domains.mjs): which answer for tunnels, and how.
+  useExtras(list, taken) {
+    this.extras = (list || []).filter((d) => d.tunnels !== "none").map((d) => ({ zone: d.zone.name, label: d.label || "", picked: d.tunnels === "picked" }));
+    if (taken) this.taken = taken;
+  }
+  extraZones() { return this.extras.map((d) => d.zone); }
+  onExtra(t, d) { return !d.picked || (t.domains || []).includes(d.zone); }
+  // a tunnel's names on the other domains: [{zone, host, url, hidden?}]
+  alsoFor(t) {
+    if (!this.domain) return [];
+    const out = [];
+    for (const d of this.extras) {
+      if (!this.onExtra(t, d)) continue;
+      const left = t.sub || String(t.port), host = `${left}.${d.zone}`;
+      const hidden = left === d.label ? "the dashboard's name there" : this.taken(d.zone).has(host) ? "a DNS record of its own on Cloudflare" : null;
+      out.push({ zone: d.zone, host, url: `https://${host}`, ...(hidden ? { hidden } : {}) });
+    }
+    return out;
+  }
+  matchExtra(name) {
+    for (const d of this.extras) {
+      const suffix = "." + d.zone;
+      if (!name.endsWith(suffix)) continue;
+      const left = name.slice(0, -suffix.length);
+      if (!left || left.includes(".") || left === d.label) return null;
+      let t = null;
+      for (const x of this.tunnels.values()) if (x.sub && x.sub === left) t = x;
+      if (!t && /^\d{1,5}$/.test(left)) { const x = this.tunnels.get(Number(left)); if (x && !x.sub) t = x; }
+      return t && this.onExtra(t, d) ? t.port : null;
+    }
+    return null;
+  }
   get selfCerts() { return this.wildcard && this.naming.certs === "self"; }
   // The edge serves *.<wbase> while this machine holds the certificate.
   syncEdge() {
@@ -308,6 +346,7 @@ export class TunnelManager {
   }
   matchHost(host) {
     const name = String(host || "").toLowerCase().split(":")[0];
+    if (this.domain && this.extras.length) { const p = this.matchExtra(name); if (p != null) return p; }
     if (this.wildcard) {
       const suffix = "." + this.wbase;
       if (!name.endsWith(suffix)) return null;
@@ -504,6 +543,11 @@ export class TunnelManager {
     }
     if (patch.block) { if (!t.blocked.includes(patch.block)) t.blocked.push(patch.block); this.kick(port, patch.block); }
     if (patch.unblock) t.blocked = t.blocked.filter((ip) => ip !== patch.unblock);
+    if ("domains" in patch) {
+      const known = new Set(this.extraZones());
+      t.domains = [...new Set((Array.isArray(patch.domains) ? patch.domains : []).map((z) => String(z).toLowerCase()))].filter((z) => known.has(z));
+      if (!t.domains.length) delete t.domains;
+    }
     if ("sub" in patch) {
       const sub = await this.checkSub(t.port, patch.sub);
       if (sub !== (t.sub || null)) {
@@ -862,6 +906,7 @@ export class TunnelManager {
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
+      also: this.alsoFor(t), domains: t.domains || [], pickable: this.domain ? this.extras.filter((d) => d.picked).map((d) => d.zone) : [],
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
       health: { up: rt.health.up, ms: rt.health.ms, checked: rt.health.checked },
       totals: { requests: rt.stats.requests, bytesIn: rt.stats.bytesIn, bytesOut: rt.stats.bytesOut,

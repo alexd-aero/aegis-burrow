@@ -390,6 +390,8 @@ const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo
 // the serveo link sends visitors on to the domain, once there is one (Settings → Modules)
 const serveoForward = () => settings.get("serveoForward") !== false;
 const mainHost = () => settings.get("domain")?.mainHost?.toLowerCase() || null;
+// the dashboard answers here: the main domain's name, local names, the serveo link, and another domain's dashboard name
+const isDashHost = (host) => host === mainHost() || isLocalName(host) || host === serveo.host() || burrow.domains.isDashboard(host);
 
 // ---------- helpers ----------
 
@@ -1008,6 +1010,18 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/cf/link" && req.method === "POST") return sendJson(res, 200, await cloudflare.link((await readJsonBody(req)).label));
     if (path === "/__gate/api/cf/unlink" && req.method === "POST") return sendJson(res, 200, await cloudflare.unlink());
     if (path === "/__gate/api/cf/rename" && req.method === "POST") return sendJson(res, 200, await cloudflare.rename((await readJsonBody(req)).label));
+    // more domains (burrow/domains.mjs)
+    const D = burrow.domains;
+    if (path === "/__gate/api/domains" && req.method === "GET") return sendJson(res, 200, D.view());
+    if (path === "/__gate/api/domains/login" && req.method === "POST") return sendJson(res, 200, await D.startLogin());
+    if (path === "/__gate/api/domains/cancel" && req.method === "POST") return sendJson(res, 200, D.cancelLogin());
+    if (path === "/__gate/api/domains/forget" && req.method === "POST") return sendJson(res, 200, D.forget());
+    if (path === "/__gate/api/domains" && req.method === "POST") {
+      const r = await D.add(await readJsonBody(req)); audit("domain added", req, { zone: r.domains.at(-1)?.zone }); return sendJson(res, 200, r);
+    }
+    const dm = /^\/__gate\/api\/domains\/([a-z0-9.-]{3,253})$/.exec(path);
+    if (dm && req.method === "PATCH") return sendJson(res, 200, await D.update(dm[1], await readJsonBody(req)));
+    if (dm && req.method === "DELETE") { const r = await D.remove(dm[1]); audit("domain removed", req, { zone: dm[1] }); return sendJson(res, 200, r); }
 
     // Updates and the changelogs
     if (path === "/__gate/api/update" && req.method === "GET") return sendJson(res, 200, url.searchParams.has("fresh") ? await updater.fresh() : updater.view());
@@ -1313,7 +1327,7 @@ function frontClaim(req) {
 // yourself out: signing in lifts a ban on your address.
 const SIGN_IN_PATHS = new Set(["/__gate/login", "/__gate/login.css", "/__gate/login.js", "/__gate/logos/aegis-burrow.svg", "/__gate/challenge", "/__gate/auth"]);
 function shieldStop(req, path, host) {
-  const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
+  const isMain = isDashHost(host);
   if (isMain && SIGN_IN_PATHS.has(path)) return null;
   const ip = clientIp(req);
   if (guardExt) {
@@ -1360,7 +1374,7 @@ async function handler(req, res) {
       return send(res, 302, "", { Location: s ? `https://${mainHost()}/__gate/sso/callback?t=${sealTicket(mainHost(), s.sid)}&next=${encodeURIComponent(next)}`
                                                : `https://${mainHost()}${next}` });
     }
-    const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
+    const isMain = isDashHost(host);
     if (!isMain) return send(res, 404, "Not found");
     // an app served under a path of the dashboard (it may live under /__gate/ too)
     const mount = settings.auth() ? mountAt(path) : null;
@@ -1428,7 +1442,7 @@ server.on("upgrade", (req, socket, head) => {
     if (!mayOpen(req, t)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
-  if (!(host === mainHost() || isLocalName(host) || host === serveo.host()) || !isAuthed(req)) {
+  if (!isDashHost(host) || !isAuthed(req)) {
     if (termixUpstream()) audit("termix connection refused: not signed in", req, { path: String(req.url || "").slice(0, 120), quiet: true });
     socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return;
   }
@@ -1648,6 +1662,7 @@ async function overview() {
     setup: !auth, user: auth?.username || null, setupOpen: !auth && Date.now() - startedAt < SETUP_WINDOW_MS,
     local: LOCAL_URL + "/", mainHost: mainHost(),
     domain: d ? { mainHost: d.mainHost, managed: !!d.managed, label: d.mainHost.split(".")[0], zone: d.zone?.name || d.mainHost.split(".").slice(1).join(".") } : null,
+    domains: burrow.domains.list().map((x) => ({ zone: x.zone.name, dashboard: x.label ? `${x.label}.${x.zone.name}` : null, tunnels: x.tunnels })),
     serveo: { ...serveo.state(), wanted: serveoWanted() },
     burrow: burrow.status(),
     termix: tx ? { upstream: tx.upstream, container: tx.container || null } : null,

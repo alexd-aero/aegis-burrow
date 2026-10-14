@@ -29,9 +29,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { join, delimiter } from "node:path";
 import { randomBytes } from "node:crypto";
 
-const LOGIN_URL_RE = /https:\/\/dash\.cloudflare\.com\/argotunnel\?[^\s"']+/;
+export const LOGIN_URL_RE = /https:\/\/dash\.cloudflare\.com\/argotunnel\?[^\s"']+/;
 const QUICK_URL_RE = /https:\/\/([a-z0-9-]+\.trycloudflare\.com)/;
-const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+export const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
 export function findCloudflared(configured, home) {
   const candidates = [configured, home && join(home, "bin", "cloudflared"),
@@ -43,7 +43,7 @@ export function findCloudflared(configured, home) {
   return null;
 }
 
-function run(bin, args, opts = {}) {
+export function run(bin, args, opts = {}) {
   return new Promise((resolve) => {
     execFile(bin, args, { timeout: 60000, maxBuffer: 4 << 20, ...opts }, (err, stdout, stderr) =>
       resolve({ code: err ? (err.code ?? 1) : 0, out: String(stdout || ""), err: String(stderr || err?.message || "") }));
@@ -59,7 +59,7 @@ export function decodeCert(path) {
   return { zoneId: d.zoneID, accountId: d.accountID, token: d.apiToken };
 }
 
-async function cfApi(token, method, path, body) {
+export async function cfApi(token, method, path, body) {
   const r = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
     method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000),
@@ -72,7 +72,7 @@ async function cfApi(token, method, path, body) {
 // ---------------------------------------------------------------- supervisor
 // Keeps one cloudflared process alive: restarts it with backoff, keeps the
 // last lines of its log for the dashboard.
-class Supervised {
+export class Supervised {
   constructor(name, log) { this.name = name; this.log = log; this.proc = null; this.lines = []; this.want = false; this.restarts = 0; }
   start(bin, args, env, onLine) {
     this.want = true;

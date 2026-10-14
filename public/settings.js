@@ -263,6 +263,7 @@ function domainBody() {
       </div>
       ${namingForm(d)}
       ${c && c.log && c.log.length ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
+      ${otherDomains(d)}
       ${S.renaming ? `<form id="renameForm" class="link-form" autocomplete="off">
           <label class="field"><span>New name for the dashboard</span>
             <div class="addr"><input class="input mono" id="label" value="${h(S.label ?? d.label)}" maxlength="40" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(d.zone)}</span></div></label>
@@ -305,6 +306,59 @@ function domainBody() {
       <span class="mono">tunnel-PORT-<i>name</i>.your-domain</span> or a subdomain of its own, through one post-quantum Cloudflare tunnel that Aegis runs for you.</p>
     ${l && l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
     <div class="row end"><button class="btn primary" data-act="login">${ICONS.globe} Connect Cloudflare</button></div>`;
+}
+
+// ------------------------------------------------------------------ other domains
+// More Cloudflare domains beside the main one (burrow/domains.mjs): each with
+// its own authorization and connector, the dashboard on <label>.<zone> and the
+// tunnels on <name>.<zone> (all, only the ones picked on the tunnel, or none).
+const OD_MODES = [["all", "All tunnels"], ["picked", "Picked ones"], ["none", "None"]];
+const odSeg = (cur, zone) => `<div class="seg od-seg" role="group" aria-label="Tunnels on it">${OD_MODES.map(([v, t]) =>
+  `<button type="button" data-act="od-tunnels" data-v="${v}"${zone ? ` data-zone="${h(zone)}"` : ""} class="${cur === v ? "on" : ""}">${t}</button>`).join("")}</div>`;
+const odHint = (m, zone) => m === "all" ? `Every tunnel at <span class="mono">NAME.${h(zone)}</span>: its own name, or its port.`
+  : m === "picked" ? `Only tunnels you tick (the tunnel → Target → Other domains), at <span class="mono">NAME.${h(zone)}</span>.` : "Just the dashboard.";
+function odRow(x) {
+  const c = x.connector, ren = S.odRename === x.zone;
+  return `<div class="od-row">
+    <div class="od-top"><b class="mono">${h(x.zone)}</b>
+      ${c.running ? `<span class="pill ok"><i class="dot ok"></i>connected · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>connector not running</span>'}
+      <span class="spacer"></span><button class="btn ghost sm" data-act="od-remove" data-zone="${h(x.zone)}">Remove</button></div>
+    <div class="kv-row"><span>Dashboard</span>${ren ? `<form class="od-ren" data-zone="${h(x.zone)}"><div class="addr"><input class="input mono sm" id="odRename" value="${h(x.label)}" maxlength="40" placeholder="none" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(x.zone)}</span></div><button class="btn sm primary">Save</button><button type="button" class="btn sm ghost" data-act="od-ren-cancel">Cancel</button></form>`
+      : `${x.dashboard ? `<a class="mono" href="https://${h(x.dashboard)}" target="_blank" rel="noopener">https://${h(x.dashboard)}</a>` : '<span class="faint">none</span>'}<button class="btn ghost sm" data-act="od-ren" data-zone="${h(x.zone)}">${x.dashboard ? "Change" : "Add one"}</button>`}</div>
+    <div class="kv-row"><span>Tunnels</span><span class="od-t">${odSeg(x.tunnels, x.zone)}<span class="faint small">${odHint(x.tunnels, x.zone)}</span></span></div>
+    ${c.log && c.log.length && !c.running ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
+  </div>`;
+}
+function otherDomains(main) {
+  const o = S.doms;
+  if (!o) return "";
+  const l = o.login, p = o.pending;
+  let add;
+  if (p) {
+    const zone = p.zone || "the domain";
+    add = `<form id="odForm" class="od-add" autocomplete="off">
+        <ol class="steps"><li class="done"><b>Cloudflare authorized</b><span>for <span class="mono">${h(zone)}</span></span></li><li class="on"><b>What answers there</b></li></ol>
+        <label class="field"><span>The dashboard's name there <span class="faint">(empty: no dashboard)</span></span>
+          <div class="addr"><input class="input mono" id="odLabel" value="${h(S.odLabel ?? main.label)}" maxlength="40" spellcheck="false" autocapitalize="none" placeholder="none"><span class="mono zone">.${h(zone)}</span></div></label>
+        <div class="field"><span>Tunnels on it</span>${odSeg(S.odMode || "all")}<p class="faint small" style="margin-top:6px">${odHint(S.odMode || "all", zone)}</p></div>
+        <p class="faint small">Aegis makes a Cloudflare tunnel for ${h(zone)} and runs its connector, and adds ${(S.odMode || "all") === "none" ? "one record (the dashboard's)" : "the dashboard's record and one wildcard, <span class=\"mono\">*." + h(zone) + "</span>"}. Records already there (mail, www, a website) are never touched; a name with a record of its own keeps it. ${h(main.zone)} stays as it is.</p>
+        <div class="err-msg" id="odErr">${h(S.odErr || "")}</div>
+        <div class="row end"><button type="button" class="btn ghost" data-act="od-forget">Use another domain</button><button class="btn primary" id="odGo">Add ${h(zone)}</button></div>
+      </form>`;
+  } else if (l && (l.url || l.waiting)) {
+    add = `<div class="authbox">
+        <a class="btn primary big" href="${h(l.url)}" target="_blank" rel="noopener">${ICONS.ext} Open the Cloudflare authorization</a>
+        <p class="muted"><i class="spin"></i> Pick the other domain on Cloudflare's page… this moves on by itself.</p>
+        ${l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}
+        <button class="btn ghost sm" data-act="od-cancel">Cancel</button></div>`;
+  } else {
+    add = `${l && l.error ? `<p class="err-msg">${h(l.error)}</p>` : ""}<div class="row end"><button class="btn" data-act="od-login">${ICONS.globe} Add a domain</button></div>`;
+  }
+  return `<div class="od">
+    <div class="od-head"><h3>Other domains</h3><p class="faint small">More Cloudflare domains beside <span class="mono">${h(main.zone)}</span>: the dashboard and your tunnels answer on them too, each through a connector of its own. One sign-in still covers all of them.</p></div>
+    ${o.domains.map(odRow).join("")}
+    ${add}
+  </div>`;
 }
 
 // ------------------------------------------------------------------ updates
@@ -433,7 +487,7 @@ const INDEX = [
   ["Serveo link", "modules", "public link serveousercontent phone url temporary"],
   ["Serveo link: send visitors on to the domain", "modules", "forward redirect serveo domain"],
   ["The full pack", "modules", "termix forge install welcome first run"],
-  ["Domain", "domain", "cloudflare dns link custom domain address"],
+  ["Domain", "domain", "cloudflare dns link custom domain address other domains more domains add a domain"],
   ["Change the dashboard's name (subdomain)", "domain", "rename subdomain name aegis private"],
   ["Unlink the domain", "domain", "remove cloudflare tunnel"],
   ["Termix", "termix", "ssh terminal install remove docker"],
@@ -593,7 +647,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "odLabel", "odRename", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -648,6 +702,21 @@ function wireForms() {
       } catch (ex) { S.busy = false; $("#linkErr").textContent = ex.message; b.disabled = false; b.textContent = "Link domain"; }
     });
   }
+  $("#odLabel")?.addEventListener("input", (e) => { S.odLabel = e.target.value; });
+  $("#odForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const b = $("#odGo"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Adding…'; S.busy = true;
+    try {
+      S.doms = await post("/__gate/api/domains", { label: $("#odLabel").value.trim().toLowerCase(), tunnels: S.odMode || "all" });
+      S.busy = false; S.odLabel = null; S.odMode = null; S.odErr = ""; toast(`${S.doms.domains.at(-1)?.zone} added. New names can take a minute to resolve.`); load();
+    } catch (ex) { S.busy = false; S.odErr = ex.message; $("#odErr").textContent = ex.message; b.disabled = false; b.textContent = "Try again"; }
+  });
+  document.querySelector(".od-ren")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const z = e.target.dataset.zone;
+    try { S.doms = await api(`/__gate/api/domains/${encodeURIComponent(z)}`, { method: "PATCH", body: JSON.stringify({ label: $("#odRename").value.trim().toLowerCase() }) }); S.odRename = null; toast("Saved"); document.activeElement?.blur(); render(); }
+    catch (ex) { toast(ex.message); }
+  });
   const sf = $("#siForm");
   if (sf) sf.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -774,6 +843,7 @@ async function load() {
     const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
     S.me = me; S.cf = cf; S.termix = termix;
     S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
+    S.doms = cf.domain ? await api("/__gate/api/domains").catch(() => null) : null;
     S.relay = cf.domain ? { ...(await api("/__gate/api/relay").catch(() => null)), setup: S.relay?.setup } : null;
     S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
@@ -786,7 +856,7 @@ async function load() {
   if (setupDone(S.relay)) {
     toast(S.relay.checked?.ok ? `${S.relay.vps.host} is linked` : `${S.relay.vps.host} registered, but the link check failed`); S.relay.setup = null; render();
   }
-  const waiting = (S.cf?.login && S.cf.login.waiting) || (S.termix?.job && S.termix.job.state === "running") || vpsWaiting;
+  const waiting = (S.cf?.login && S.cf.login.waiting) || (S.doms?.login && S.doms.login.waiting) || (S.termix?.job && S.termix.job.state === "running") || vpsWaiting;
   S.poll = setTimeout(load, waiting ? 2000 : 8000);
 }
 
@@ -889,6 +959,28 @@ document.addEventListener("click", async (e) => {
         toast(j.active ? `Tunnels now live under ${j.record}` : "Tunnels have a DNS record each again");
       } catch (ex) { S.nmErr = ex.message; }
       finally { S.busy = false; }
+      render();
+    }
+    else if (act === "od-login") {
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Asking Cloudflare…';
+      const r = await post("/__gate/api/domains/login");
+      window.open(r.url, "_blank", "noopener");
+      load();
+    }
+    else if (act === "od-cancel") { S.doms = await post("/__gate/api/domains/cancel"); render(); }
+    else if (act === "od-forget") { S.doms = await post("/__gate/api/domains/forget"); S.odErr = ""; render(); }
+    else if (act === "od-ren") { S.odRename = el.dataset.zone; render(); $("#odRename")?.focus(); }
+    else if (act === "od-ren-cancel") { S.odRename = null; render(); }
+    else if (act === "od-tunnels") {
+      if (!el.dataset.zone) { S.odMode = el.dataset.v; render(); return; }
+      S.doms = await api(`/__gate/api/domains/${encodeURIComponent(el.dataset.zone)}`, { method: "PATCH", body: JSON.stringify({ tunnels: el.dataset.v }) });
+      toast(el.dataset.v === "none" ? `Only the dashboard on ${el.dataset.zone}` : `Tunnels on ${el.dataset.zone}: ${el.dataset.v === "all" ? "all of them" : "the ones you pick"}`); render();
+    }
+    else if (act === "od-remove") {
+      const z = el.dataset.zone;
+      if (!confirm(`Remove ${z}? Its dashboard and tunnel names stop working; Aegis deletes its records and its Cloudflare tunnel. ${S.cf.domain.zone} is not touched.`)) return;
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Removing…'; S.busy = true;
+      try { S.doms = await api(`/__gate/api/domains/${encodeURIComponent(z)}`, { method: "DELETE" }); toast(`${z} removed`); } finally { S.busy = false; }
       render();
     }
     else if (act === "rename-cancel") { S.renaming = false; S.label = null; render(); }

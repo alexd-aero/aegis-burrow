@@ -48,6 +48,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { TunnelManager } from "./tunnels.mjs";
 import { Cloudflare, QuickTunnels, findCloudflared } from "./cloudflare.mjs";
+import { Domains } from "./domains.mjs";
 import { checkIp, checkMany, useLists } from "./ipintel.mjs";
 import { Shield } from "./shield.mjs";
 
@@ -73,6 +74,13 @@ export class Burrow {
         else { this.tunnels.useDomain(domain); if (domain) await this.tunnels.publishAll(); }
       },
     });
+    // other domains beside the main one (domains.mjs): their dashboards, and tunnel names on them
+    this.domains = new Domains({
+      settings, dataDir, origin, log: this.log, bin: () => this.cloudflare.bin(),
+      mainZone: () => { const d = settings.get("domain"); return d ? (d.zone?.name || d.mainHost.split(".").slice(1).join(".")).toLowerCase() : null; },
+      onChange: (list) => this.tunnels.useExtras(list),
+    });
+    this.tunnels.useExtras(this.domains.list(), (zone) => this.domains.takenOn(zone));
     // who may reach the gate at all (shield.mjs); Aegis asks it about every request
     this.shield = new Shield({
       dataDir, log: this.log,
@@ -301,7 +309,7 @@ export class Burrow {
   }
 
   stop() {
-    this.tunnels.stop(); this.cloudflare.stop(); this.shield.stop();
+    this.tunnels.stop(); this.cloudflare.stop(); this.domains.stop(); this.shield.stop();
     for (const p of new Set([this.controlPath, this.controlReal].filter(Boolean))) { try { unlinkSync(p); } catch { /* gone */ } }
   }
 }

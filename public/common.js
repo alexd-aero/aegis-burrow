@@ -60,7 +60,7 @@ export async function chrome(active) {
 // in the top bar with the unread count, a list grouped by day (each notice with
 // its addon's logo, and its addresses as rows that open in the addon), and a
 // banner for an unread critical one. Checked again every 30 s.
-const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
+const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.4a6 6 0 1 0-12 0c0 4.6-1.4 6.4-2.6 7.6-.4.4-.1 1 .4 1h16.4c.5 0 .8-.6.4-1-1.2-1.2-2.6-3-2.6-7.6"/><path d="M10.2 20.2a2 2 0 0 0 3.6 0"/></svg>';
 const SRC = (s) => s === "aegis" ? "Aegis" : s.charAt(0).toUpperCase() + s.slice(1);
 const flagOf = (cc) => /^[A-Z]{2}$/.test(cc || "") ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : "";
 const srcLogo = (s) => s === "aegis" ? "/__gate/logos/aegis-burrow.svg" : `/__gate/api/addons/${encodeURIComponent(s)}/image`;
