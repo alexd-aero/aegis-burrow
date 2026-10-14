@@ -393,11 +393,11 @@ async function defaultAddons() {
 }
 setTimeout(defaultAddons, 30000);
 // addons from a link get checked for updates like Aegis × Burrow itself: their
-// cards on the Burrow page then offer the update, no visit to Addons needed
+// cards on the home and Burrow pages then offer the update, no visit needed
 setTimeout(() => addons.checkAll(), 120000).unref();
 // the watchdog: addons (Selkies Forge among them) that stop on their own
 setTimeout(addons.watch(60e3), 45000).unref();
-setInterval(() => addons.checkAll(), 3600e3).unref();
+setInterval(() => addons.checkAll(50 * 60e3), 3600e3).unref();      // every hour (a git ls-remote each)
 setInterval(defaultAddons, 6 * 3600 * 1000);
 
 // Both ways: once the Forge has us as an addon, we add it as one of ours.

@@ -108,6 +108,12 @@ async function render() {
   notices(me);
   if (!document.querySelector(".ds")) dashSwitch(me);
   if (!S.freshAsked) { S.freshAsked = true; freshUpdate(me, opts); }
+  // the same fresh look the Burrow page takes (anything not checked in 15 minutes),
+  // so an addon update shows here without going there first
+  if (!S.addonsAsked) {
+    S.addonsAsked = true;
+    api("/__gate/api/addons/updates?fresh=1").then((r) => { if (!Object.keys(AU.job).length) { AU.list = r.updates || []; paintUpds(); } }).catch(() => {});
+  }
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")
     : `<div class="card lit empty-home"><p>Every tile is hidden. Use ${GEAR} to bring some back.</p></div>`;
