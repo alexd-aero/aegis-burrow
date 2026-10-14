@@ -174,6 +174,8 @@ export class RelayLink {
       const until = Date.now() + ms;
       while (Date.now() < until && this.link.state !== "up") await new Promise((r) => setTimeout(r, 400));
       const ok = this.link.state === "up";
+      // what the agent is now (it may have been updated or reinstalled since the link came up)
+      if (ok) { const st = await this.control("GET", "/status").catch(() => null); if (st?.version) this.agent = { ...st, at: Date.now() }; }
       this.checked = { ok, at: Date.now(), error: ok ? null : explain(this.link.error) || "the agent didn't answer through the link" };
       if (ok) this.log(`relay: checked: this machine reaches the agent on ${this.state.vps.host}`);
       else this.log(`relay: check failed for ${this.state.vps.host}: ${this.checked.error}`);
