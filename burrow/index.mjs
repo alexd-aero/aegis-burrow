@@ -30,6 +30,12 @@
 //   POST   /tunnels/PORT/kick        {ip?}: drop live connections (one client, or all)
 //   GET    /tunnels/PORT/favicon     the target's icon
 //   GET    /ports                    listening ports worth publishing
+//   GET    /ipintel/IP               an address's reputation (ipintel.mjs), in under half a second
+//   GET    /shield                   the shield (shield.mjs): bans, lists, what it turned away
+//   PUT    /shield                   {auto?, drop?, lookups?}
+//   POST   /shield/ban               {ip, reason?}     POST /shield/unban {ip}
+//   POST   /shield/allow             {ip, note?}       POST /shield/disallow {ip}
+//   POST   /shield/feeds             download every list again now
 //
 // The control socket adds GET /status and POST /module {burrow: bool}, and
 // remembers who called (an X-Burrow-Client header, e.g. "selkies-forge/1.10.8")
@@ -42,7 +48,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { TunnelManager } from "./tunnels.mjs";
 import { Cloudflare, QuickTunnels, findCloudflared } from "./cloudflare.mjs";
-import { checkIp, checkMany } from "./ipintel.mjs";
+import { checkIp, checkMany, useLists } from "./ipintel.mjs";
+import { Shield } from "./shield.mjs";
 
 const ACTIVITY = 60;
 
@@ -66,6 +73,13 @@ export class Burrow {
         else { this.tunnels.useDomain(domain); if (domain) await this.tunnels.publishAll(); }
       },
     });
+    // who may reach the gate at all (shield.mjs); Aegis asks it about every request
+    this.shield = new Shield({
+      dataDir, log: this.log,
+      remote: (ip, { probe }) => checkIp(ip, { light: true, probe, deadline: 0 }),
+      onBan: (ip) => { for (const port of this.tunnels.tunnels.keys()) this.tunnels.kick(port, ip); },
+    });
+    useLists((ip) => this.shield.lookup(ip), (ip) => (this.shield.lists.has("tor") ? this.shield.lookup(ip).some((l) => l.id === "tor") : null));
     this.clients = new Map();     // "selkies-forge" -> {name, version, first, last, calls}
     this.activity = [];           // newest first: {at, client, action, port, name}
     this.control = null;
@@ -101,8 +115,9 @@ export class Burrow {
     // an IP's reputation (ipintel.mjs): GET /ipintel/<ip>
     const ipm = /^\/ipintel\/([0-9a-fA-F.:]{3,45})$/.exec(path);
     if (ipm && method === "GET") {
-      try { return ok(await checkIp(ipm[1])); } catch (e) { return { status: 400, json: { error: e.message } }; }
+      try { return ok({ ...(await checkIp(ipm[1])), shield: this.shield.peek(ipm[1]) }); } catch (e) { return { status: 400, json: { error: e.message } }; }
     }
+    if (path === "/shield" || path.startsWith("/shield/")) return this.shieldRoute(method, path, readJson);
     if (path !== "/ports" && !path.startsWith("/tunnels")) return null;
     if (!this.on) return { status: 409, json: { error: "Burrow is switched off. Turn it on under Settings → Modules." } };
     const T = this.tunnels;
@@ -172,9 +187,30 @@ export class Burrow {
       return ok({ results: await checkMany([...d.clientList].sort((a, b) => (b.last || 0) - (a.last || 0)).map((c) => c.ip)) });
     }
     if (m[2]) return null;
-    if (method === "GET") { const d = T.details(port); return d ? ok(d) : { status: 404, json: { error: "No such tunnel." } }; }
+    if (method === "GET") {
+      const d = T.details(port);
+      if (d) for (const c of d.clientList) c.shield = this.shield.peek(c.ip);
+      return d ? ok(d) : { status: 404, json: { error: "No such tunnel." } };
+    }
     if (method === "PATCH") return ok(await T.update(port, await readJson()));
     if (method === "DELETE") return ok(await T.remove(port));
+    return null;
+  }
+
+  async shieldRoute(method, path, readJson) {
+    const ok = (json) => ({ status: 200, json });
+    const S = this.shield;
+    try {
+      if (path === "/shield" && method === "GET") return ok(S.view());
+      if (path === "/shield" && method === "PUT") { S.setSettings(await readJson()); return ok(S.view()); }
+      if (method !== "POST") return null;
+      if (path === "/shield/feeds") { await S.refreshDue(true); return ok(S.view()); }
+      const b = await readJson();
+      if (path === "/shield/ban") { S.ban(b.ip, b.reason || "banned by you", { source: "manual" }); return ok(S.view()); }
+      if (path === "/shield/unban") { S.unban(b.ip); return ok(S.view()); }
+      if (path === "/shield/allow") { S.allow(b.ip, true, b.note || ""); return ok(S.view()); }
+      if (path === "/shield/disallow") { S.allow(b.ip, false); return ok(S.view()); }
+    } catch (e) { return { status: 400, json: { error: e.message } }; }
     return null;
   }
 
@@ -257,7 +293,7 @@ export class Burrow {
   }
 
   stop() {
-    this.tunnels.stop(); this.cloudflare.stop();
+    this.tunnels.stop(); this.cloudflare.stop(); this.shield.stop();
     for (const p of new Set([this.controlPath, this.controlReal].filter(Boolean))) { try { unlinkSync(p); } catch { /* gone */ } }
   }
 }

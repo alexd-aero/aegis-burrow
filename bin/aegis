@@ -1011,7 +1011,7 @@ usage() {
     aegis front-login [--wildcard PREFIX | --token]
                                  connect Cloudflare Workers: tunnel names two levels deep
                                  (NAME.PREFIX.your-domain), free certificates, nothing open
-    aegis ip ADDRESS             who is this IP? GreyNoise, Shodan, StopForumSpam, blocklists, Tor, vonweber.nl
+    aegis ip ADDRESS             who is this IP? the shield's blocklists, GreyNoise, Shodan, StopForumSpam, DNS lists, Tor
     aegis audit [N | -f]         sign-ins, failed sign-ins, Termix sessions, tunnel changes (with IPs)
     aegis serveo on | off | url  a public link to the dashboard, no account
     aegis termix install | remove
@@ -1085,8 +1085,11 @@ case "$1" in
       fi
     done ;;
   ip) shift; need_installed; ensure_running; [ -n "${1:-}" ] || die "aegis ip ADDRESS"
-    spin_start "asking GreyNoise, Shodan, StopForumSpam, the blocklists, Tor and vonweber.nl"
-    out="$(burrow_call GET "/ipintel/$1")"; rc=$?; spin_stop; [ $rc -eq 0 ] || die "$out"
+    spin_start "asking GreyNoise, Shodan, StopForumSpam, the blocklists and Tor"
+    out="$(burrow_call GET "/ipintel/$1")"; rc=$?
+    # whatever wasn't in by the deadline is in a moment later
+    if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q '"pending"'; then sleep 1.5; out="$(burrow_call GET "/ipintel/$1")"; rc=$?; fi
+    spin_stop; [ $rc -eq 0 ] || die "$out"
     printf '%s' "$out" | "$NODE" -e '
       const r = JSON.parse(require("fs").readFileSync(0, "utf8")), s = r.sources || {}, o = r.owner || {};
       const C = { malicious: "\x1b[31m", suspicious: "\x1b[33m", notice: "\x1b[36m", clean: "\x1b[32m" }, N = "\x1b[0m", D = "\x1b[2m";
@@ -1096,8 +1099,10 @@ case "$1" in
       const row = (k, x, f) => console.log(`  ${k.padEnd(14)} ${x?.error ? D + "could not ask: " + x.error + N : f(x?.result)}`);
       console.log("");
       row("GreyNoise", s.greynoise, (g) => !g?.seen ? "never seen scanning" : [g.classification, g.scanner && "mass scanner", g.benign && "known service", g.name].filter(Boolean).join(", "));
-      row("vonweber.nl", s.vonweber, (x) => x?.listed ? `BANNED since ${x.since} (${x.hits}x)` : "not on the elsnet ban list");
-      row("Blocklists", s.dnsbl, (d) => d?.skipped || Object.entries(d || {}).map(([k, x]) => `${k}: ${x.listed ? "LISTED " + x.why.join("/") : x.error || "clean"}`).join(" · "));
+      const sh = r.shield;
+      if (sh) console.log(`  ${"Shield".padEnd(14)} ${sh.banned ? "\x1b[31mBANNED\x1b[0m: " + sh.banned.reason : sh.trusted || sh.allowed ? "yours (never banned)" : "not banned"}${sh.probes ? `, ${sh.probes} probes` : ""}`);
+      row("Blocklists", s.lists, (x) => (x?.hits || []).filter((l) => l.id !== "tor").map((l) => `${l.strength === "strong" ? "LISTED " : ""}${l.name}${l.extra?.since ? " since " + l.extra.since.slice(0, 10) : ""}`).join(" · ") || "on none");
+      row("DNS lists", s.dnsbl, (d) => d?.skipped || Object.entries(d || {}).map(([k, x]) => `${k}: ${x.listed ? "LISTED " + x.why.join("/") : x.error || "clean"}`).join(" · "));
       row("StopForumSpam", s.sfs, (x) => x?.reports ? `${x.reports} reports, last ${x.lastSeen}` : "no reports");
       row("Shodan", s.shodan, (x) => !x?.seen ? "nothing indexed" : `ports ${x.ports.join(",") || "-"}${x.vulns ? `, ${x.vulns} vulns` : ""}${x.tags.length ? `, ${x.tags.join(",")}` : ""}`);
       row("Tor", s.tor, (x) => x?.skipped || (x?.exit ? "EXIT NODE" : "not an exit"));

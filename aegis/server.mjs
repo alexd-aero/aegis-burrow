@@ -157,6 +157,12 @@ const EDGE_PORTS = EDGE.port ? [Number(EDGE.port)] : [443, 8443, 18443];
 const burrow = new Burrow({ settings, dataDir: DATA, home: HOME, origin, forbiddenPorts: [LISTEN.port, ...EDGE_PORTS], log, version: VERSION,
                             edge: { port: EDGE_PORTS[0], upnp: EDGE.upnp } });
 const { tunnels, cloudflare } = burrow;
+// the shield (burrow/shield.mjs): its lists, and the addresses you signed in from
+if (process.env.AEGIS_SHIELD_OFFLINE !== "1") burrow.shield.start();
+setTimeout(() => {
+  const since = Date.now() - 30 * 86400e3;
+  for (const e of auditRead(2000)) if (e.event === "sign-in" && Date.parse(e.t) > since && !burrow.shield.isTrusted(e.ip)) burrow.shield.trust(e.ip);
+}, 0);
 const burrowOn = () => burrow.on;
 // Burrow's addons: the same format as Selkies Forge's (burrow/addons.mjs).
 const addons = new Addons({
@@ -636,6 +642,7 @@ async function handleGate(req, res, path, url, host, isMain) {
       return sendJson(res, 401, { error: "Invalid username or password." });
     }
     fails.delete(ip); log("auth ok", ip, host); audit("sign-in", req, { user: String(creds.username || "") });
+    burrow.shield.trust(ip);
     return sendJson(res, 200, { ok: true, next: safeNext(creds.next, "/") }, { "Set-Cookie": sessionCookie(req, b64u(randomBytes(12))) });
   }
   if (path === "/__gate/logout") {
@@ -1161,6 +1168,20 @@ function frontClaim(req) {
   if (f.ip) req.headers["cf-connecting-ip"] = f.ip;
 }
 
+// The shield (burrow/shield.mjs) on every request, before anything else:
+// banned addresses, blocklisted ones and payloads stop here. The main host's
+// sign-in stays open to everyone (it is throttled), so you can never lock
+// yourself out: signing in lifts a ban on your address.
+const SIGN_IN_PATHS = new Set(["/__gate/login", "/__gate/login.css", "/__gate/login.js", "/__gate/logos/aegis-burrow.svg", "/__gate/challenge", "/__gate/auth"]);
+function shieldStop(req, path, host) {
+  const isMain = host === mainHost() || isLocalName(host) || host === serveo.host();
+  if (isMain && SIGN_IN_PATHS.has(path)) return null;
+  return burrow.shield.gate(clientIp(req), {
+    method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""),
+    trusted: () => isAuthed(req),
+  });
+}
+
 async function handler(req, res) {
   res.req = req;
   frontClaim(req);
@@ -1174,6 +1195,8 @@ async function handler(req, res) {
       const name = String(url.searchParams.get("domain") || "").toLowerCase();
       return send(res, burrow.on && tunnels.relayAsk(name) ? 200 : 404, "");
     }
+    const stop = shieldStop(req, path, host);
+    if (stop) return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close" });
     const port = burrow.matchHost(host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,
@@ -1241,6 +1264,8 @@ const server = TLS ? createHttpsServer(tlsOptions(), handler) : createHttpServer
 server.on("upgrade", (req, socket, head) => {
   frontClaim(req);
   const host = hostOf(req);
+  const stop = shieldStop(req, new URL(req.url || "/", "http://x").pathname, host);
+  if (stop) { socket.end(`HTTP/1.1 ${stop.status} ${stop.status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`); return; }
   const port = burrow.matchHost(host);
   if (port !== null) {
     const t = tunnels.get(port);

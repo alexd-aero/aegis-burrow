@@ -876,3 +876,14 @@ section.set.flash, .adv-set.flash { animation: setflash 1.6s ease-out; }
 .intel .kv-row { padding: 6px 0; }
 .intel .kv-row > span:first-child { min-width: 120px; color: var(--muted); }
 button.pill { cursor: pointer; font: inherit; font-size: 11px; }
+
+/* ---- Shield ---- */
+.sh-opt { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.sh-opt:first-of-type { border-top: 0; padding-top: 4px; }
+.sh-opt .grow { display: grid; gap: 3px; min-width: 0; }
+.sh-opt b { font-weight: 550; }
+.sh-why { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-feed { align-items: flex-start; gap: 12px; }
+.kv-row.wide > span:first-child { width: auto; flex: 1; min-width: 0; color: inherit; }
+.input.sm { padding: 6px 10px; font-size: 12px; }
+@media (max-width: 720px) { .sh-why { max-width: 180px; } }

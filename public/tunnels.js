@@ -5,7 +5,7 @@ import { distroLogo, distroLabel } from "./distros.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
-const S = { intel: {}, intelOpen: null, scanning: false, upd: [], updJob: {}, updDone: {}, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
+const S = { intel: {}, intelOpen: null, shield: null, shCheck: null, scanning: false, upd: [], updJob: {}, updDone: {}, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
             mode: "domain", pattern: "", integrations: [], integ: null, integData: null, forgeSummary: {}, addon: null,
             addons: null, scan: null, scanning: false, bridge: null, bridgeBusy: false };
 
@@ -181,6 +181,7 @@ function subtabs() {
   return `${downCards()}<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
     <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${S.upd?.length ? '<span class="newchip">update</span>' : ""}</button>
+    <button data-act="tab" data-v="shield" class="${S.view === "shield" ? "on" : ""}">${ICON.shield}Shield${S.shield?.stats?.bans ? `<span class="count">${S.shield.stats.bans}</span>` : ""}</button>
     ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
   </nav>`;
 }
@@ -906,11 +907,12 @@ function renderDetail() {
         <thead><tr><th></th><th>Client</th><th>Browser</th><th>Requests</th><th>Served</th><th>Open</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
         <tbody>${d.clientList.map((c) => `<tr>
           <td><i class="dot ${c.active ? "ok" : Date.now() - c.last < 120000 ? "warn" : "idle"}"></i></td>
-          <td class="mono">${flag(c.country)} ${h(c.ip)}${c.country ? ` <span class="faint">${h(c.country)}</span>` : ""}${intelBadge(c.ip)}</td>
+          <td class="mono">${flag(c.country)} ${h(c.ip)}${c.country ? ` <span class="faint">${h(c.country)}</span>` : ""}${shieldBadge(c.shield)}${intelBadge(c.ip)}</td>
           <td>${h(c.agent || "–")}</td><td class="mono">${fmtN(c.requests)}</td><td class="mono">${fmtB(c.bytesOut)}</td>
           <td class="mono">${c.active || ""}</td><td class="faint">${ago(c.first)}</td><td>${ago(c.last)}</td>
           <td style="text-align:right">${S.intel[c.ip] ? "" : `<button class="btn sm ghost" data-act="check-ip" data-ip="${h(c.ip)}">Check</button>`}${c.active ? `<button class="btn sm ghost" data-act="kick" data-ip="${h(c.ip)}">Kick</button>` : ""}
-            ${blocked.has(c.ip) ? `<button class="btn sm" data-act="unblock" data-ip="${h(c.ip)}">Unblock</button>` : `<button class="btn sm ghost danger" data-act="block" data-ip="${h(c.ip)}">Block</button>`}</td>
+            ${blocked.has(c.ip) ? `<button class="btn sm" data-act="unblock" data-ip="${h(c.ip)}">Unblock</button>` : `<button class="btn sm ghost danger" data-act="block" data-ip="${h(c.ip)}" title="Block on this tunnel only">Block</button>`}
+            ${c.shield ? c.shield.banned ? `<button class="btn sm" data-act="sh-unban" data-ip="${h(c.ip)}" title="${h(c.shield.banned.reason)}">Unban</button>` : `<button class="btn sm ghost danger" data-act="sh-ban" data-ip="${h(c.ip)}" title="Ban from every tunnel and the dashboard">Ban</button>` : ""}</td>
         </tr>${S.intelOpen === c.ip ? `<tr class="intel-row"><td></td><td colspan="8">${intelDetails(c.ip)}</td></tr>` : ""}`).join("")}</tbody></table></div>` : '<p class="muted" style="margin:0">Nobody has used this tunnel yet.</p>'}
       ${[...blocked].filter((ip) => !d.clientList.some((c) => c.ip === ip)).map((ip) => `<div class="row" style="margin-top:10px"><span class="pill err">blocked</span><span class="mono">${h(ip)}</span><button class="btn sm" data-act="unblock" data-ip="${h(ip)}">Unblock</button></div>`).join("")}
     </section>
@@ -943,21 +945,131 @@ function intelDetails(ip) {
   const src = r.sources, o = r.owner || {};
   const line = (name, x, fmt) => `<div class="kv-row"><span>${name}</span><span>${x?.error ? `<span class="faint">couldn't ask: ${h(x.error)}</span>` : fmt(x?.result)}</span></div>`;
   const yes = (t) => `<span class="pill err">${h(t)}</span>`, no = (t) => `<span class="faint">${h(t)}</span>`;
-  return `<div class="intel">
+  const pend = r.pending?.length ? `<div class="kv-row"><span></span><span class="faint"><i class="spin"></i> still asking ${h(r.pending.join(", "))}…</span></div>` : "";
+  return `<div class="intel">${pend}
     <div class="kv-row"><span>Owner</span><span>${h([o.org, o.city, o.country].filter(Boolean).join(" · ") || "unknown")}${o.hostname ? ` <span class="mono faint">${h(o.hostname)}</span>` : ""}</span></div>
     ${line("GreyNoise", src.greynoise, (g) => !g?.seen ? no("never seen scanning the internet") : `${g.classification === "malicious" ? yes("malicious") : g.scanner ? '<span class="pill warn">mass scanner</span>' : ""} ${g.benign ? '<span class="pill ok">known service</span>' : ""} ${h(g.name || "")} <span class="faint">${g.lastSeen ? "last seen " + h(g.lastSeen) : ""}</span>`)}
-    ${line("vonweber.nl", src.vonweber, (v) => v?.listed ? `${yes("banned")} since ${h(v.since)}${v.host ? ` <span class="mono faint">${h(v.host)}</span>` : ""} <span class="faint">(${v.hits}×, of ${v.total} on the list)</span>` : no("not on elsnet's ban list"))}
-    ${line("Blocklists", src.dnsbl, (d) => d?.skipped ? no(d.skipped + ": not checked") : Object.entries(d || {}).map(([k, x]) => x.listed ? yes(`${k}: ${x.why.join(", ")}`) : x.error ? `<span class="faint">${h(k)}: ${h(x.error)}</span>` : `<span class="faint">${h(k)} clean</span>`).join(" · "))}
+    ${line("Blocklists", src.lists, (x) => { const L = (x?.hits || []).filter((l) => l.id !== "tor"); return L.length ? L.map((l) => `<span class="pill ${l.strength === "strong" ? "err" : "warn"}">${h(l.name)}</span>${l.extra?.since ? ` <span class="faint">since ${h(l.extra.since.slice(0, 10))}${l.extra.host ? ` · <span class="mono">${h(l.extra.host)}</span>` : ""}</span>` : ""}`).join(" ") : no("on none of the shield's lists"); })}
+    ${line("DNS lists", src.dnsbl, (d) => d?.skipped ? no(d.skipped + ": not checked") : Object.entries(d || {}).map(([k, x]) => x.listed ? yes(`${k}: ${x.why.join(", ")}`) : x.error ? `<span class="faint">${h(k)}: ${h(x.error)}</span>` : `<span class="faint">${h(k)} clean</span>`).join(" · "))}
     ${line("StopForumSpam", src.sfs, (x) => x?.reports ? `${yes(x.reports + " reports")} <span class="faint">last ${h(x.lastSeen || "?")}</span>` : no("no reports"))}
     ${line("Shodan", src.shodan, (x) => !x?.seen ? no("nothing indexed") : `ports <span class="mono">${h(x.ports.join(", ") || "none")}</span>${x.vulns ? ` · ${x.vulns} vulns` : ""}${x.tags.length ? ` · ${h(x.tags.join(", "))}` : ""}`)}
     ${line("Tor", src.tor, (x) => x?.skipped ? no(x.skipped) : x?.exit ? '<span class="pill warn">exit node</span>' : no("not an exit node"))}
   </div>`;
 }
 
+// whatever the lookups hadn't answered by the deadline: asked again a moment later
+async function askIntel(ip, tries = 0) {
+  try { S.intel[ip] = await api(`/__gate/api/ipintel/${encodeURIComponent(ip)}`); }
+  catch (ex) { S.intel[ip] = { error: ex.message }; return; }
+  if (S.intel[ip].pending?.length && tries < 4) setTimeout(() => askIntel(ip, tries + 1).then(render), 1200);
+}
+
+// ------------------------------------------------------------------ the shield (burrow/shield.mjs)
+function shieldBadge(sh) {
+  if (!sh) return "";
+  if (sh.banned) return ` <span class="pill err" title="${h(sh.banned.reason)}">banned</span>`;
+  const strong = sh.lists.filter((l) => l.strength === "strong"), weak = sh.lists.filter((l) => l.strength === "weak");
+  if (sh.trusted || sh.allowed) return ` <span class="pill ok" title="${sh.allowed ? "on your allow list" : "signed in to Aegis from here"}">yours</span>`;
+  if (strong.length) return ` <span class="pill err" title="${h(strong.map((l) => l.name).join(", "))}">blocklisted</span>`;
+  if (sh.probes) return ` <span class="pill warn" title="asked for paths that look for holes">${sh.probes} probe${sh.probes === 1 ? "" : "s"}</span>`;
+  if (weak.length) return ` <span class="pill warn" title="${h(weak.map((l) => l.name).join(", "))}">listed</span>`;
+  return "";
+}
+const ACT = { banned: ["err", "banned"], blocked: ["err", "blocked"], dropped: ["warn", "payload dropped"], probe: ["warn", "probe"],
+              lifted: ["ok", "ban lifted"], unbanned: ["ok", "unbanned"] };
+const SRC = { list: "blocklist", payload: "payloads", lookup: "lookup", manual: "by you" };
+function shSwitch(key, on, title, sub) {
+  return `<label class="sh-opt"><span class="grow"><b>${title}</b><span class="faint small">${sub}</span></span>
+    <span class="switch"><input type="checkbox" data-act="sh-set" data-k="${key}" ${on ? "checked" : ""} aria-label="${h(title)}"><i></i></span></label>`;
+}
+function renderShield() {
+  const v = S.shield;
+  const head = `<div class="head"><div><h1>Shield</h1><p>Every request to a tunnel or the dashboard is checked first: blocklisted addresses, payloads and the scanners behind them are turned away before they reach an app.</p></div></div>${subtabs()}`;
+  if (!v) { app.innerHTML = head + '<p class="muted"><i class="spin"></i> Loading…</p>'; return; }
+  const st = v.stats, loaded = v.feeds.filter((f) => f.loadedNow), entries = loaded.reduce((a, f) => a + (f.count || 0), 0);
+  const ipCell = (ip, cc) => `<span class="mono">${flag(cc)} ${h(ip)}</span>`;
+  const c = S.shCheck;
+  // what's being typed survives the repaint every few seconds
+  const keep = ["shIp", "shBan", "shAllow"].map((id) => { const i = document.getElementById(id); return [id, i?.value || "", document.activeElement === i]; });
+  app.innerHTML = `${head}
+    <div class="stats">
+      <div class="card stat"><b>${fmtN(st.bans)}</b><span>banned now</span><div class="sub">${fmtN(st.banned)} bans since ${new Date(st.since).toLocaleDateString()}</div></div>
+      <div class="card stat"><b>${fmtN(st.blocked)}</b><span>requests turned away</span><div class="sub">from banned addresses</div></div>
+      <div class="card stat"><b>${fmtN(st.dropped)}</b><span>payloads dropped</span><div class="sub">never reached an app</div></div>
+      <div class="card stat"><b>${fmtN(entries)}</b><span>addresses on ${loaded.length} lists</span><div class="sub">${fmtN(st.checked)} looked up${v.queue ? ` · ${v.queue} waiting` : ""}</div></div>
+    </div>
+
+    <div class="d-two">
+      <section class="card panel"><h3>Rules</h3>
+        ${shSwitch("auto", v.settings.auto, "Ban automatically", "On a strong blocklist (FireHOL, blocklist.de, CINS, Emerging Threats, IPsum 3+), known attackers, two payloads, or a probe from an address with any mark against it.")}
+        ${shSwitch("drop", v.settings.drop, "Drop payloads", "/.env, /.git, ../../etc/passwd, phpunit, ${jndi:…} get a 404 here and never reach the app.")}
+        ${shSwitch("lookups", v.settings.lookups, "Look up every new address", "GreyNoise, Spamhaus, DroneBL and StopForumSpam, in the background. A shared school or carrier address on Spamhaus alone isn't banned.")}
+        <p class="faint small" style="margin:12px 0 0">Never banned: this network, addresses you signed in from (30 days), requests with your session, and your allow list. Signing in lifts a ban on your address.</p>
+      </section>
+      <section class="card panel"><h3>Check an address</h3>
+        <div class="row" style="gap:8px"><input class="input mono" id="shIp" placeholder="45.148.10.120" autocomplete="off" spellcheck="false" style="flex:1">
+          <button class="btn" data-act="sh-check">${c?.loading ? '<i class="spin"></i>' : "Check"}</button></div>
+        ${c && !c.loading ? `<div style="margin-top:10px"><div class="row" style="gap:8px;flex-wrap:wrap;align-items:center"><span class="mono">${h(c.ip)}</span>${intelBadge(c.ip)}${shieldBadge(S.intel[c.ip]?.shield)}
+            <span class="spacer"></span>${S.intel[c.ip]?.shield?.banned ? `<button class="btn sm" data-act="sh-unban" data-ip="${h(c.ip)}">Unban</button>` : S.intel[c.ip]?.private ? "" : `<button class="btn sm ghost danger" data-act="sh-ban" data-ip="${h(c.ip)}">Ban</button>`}</div>${intelDetails(c.ip)}</div>` : ""}
+      </section>
+    </div>
+
+    <section class="card panel" style="margin-bottom:14px"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Banned <span class="faint">${fmtN(st.bans)}</span></h3>
+      <div class="row" style="gap:8px"><input class="input mono sm" id="shBan" placeholder="ban an address" autocomplete="off" spellcheck="false" style="width:200px"><button class="btn sm ghost danger" data-act="sh-ban-input">Ban</button></div></div>
+      ${v.bans.length ? `<div class="scroll"><table>
+        <thead><tr><th>Address</th><th>Why</th><th>By</th><th>Since</th><th>Until</th><th>Requests</th><th></th></tr></thead>
+        <tbody>${v.bans.map((b) => `<tr>
+          <td>${ipCell(b.ip, b.country)}</td><td class="sh-why" title="${h(b.reason)}">${h(b.reason)}</td><td><span class="pill">${h(SRC[b.source] || b.source)}</span></td>
+          <td class="faint">${ago(b.at)}</td><td class="faint">${b.until ? new Date(b.until).toLocaleDateString() : "for good"}</td><td class="mono">${fmtN(b.hits)}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost" data-act="sh-check-ip" data-ip="${h(b.ip)}">Check</button><button class="btn sm" data-act="sh-unban" data-ip="${h(b.ip)}">Unban</button></td></tr>`).join("")}</tbody></table></div>`
+        : '<p class="muted" style="margin:0">Nobody is banned yet.</p>'}
+    </section>
+
+    <section class="card panel" style="margin-bottom:14px"><h3>Activity <span class="faint">newest first</span></h3>
+      ${v.events.length ? `<div class="scroll"><table>
+        <thead><tr><th>Time</th><th></th><th>Address</th><th>Where</th><th>Why</th></tr></thead>
+        <tbody>${v.events.map((e) => { const [cls, label] = ACT[e.act] || ["", e.act]; return `<tr>
+          <td class="faint mono">${ago(e.t)}</td><td><span class="pill ${cls}">${h(label)}</span></td><td>${ipCell(e.ip, e.country)}</td>
+          <td class="mono path" title="${h(e.host + (e.path || ""))}">${e.host ? `<span class="faint">${h(e.host.split(".")[0])}</span>` : ""}${h(e.path || "")}</td>
+          <td class="sh-why" title="${h(e.why)}">${h(e.why)}</td></tr>`; }).join("")}</tbody></table></div>`
+        : '<p class="muted" style="margin:0">Quiet so far.</p>'}
+    </section>
+
+    <div class="d-two">
+      <section class="card panel"><div class="row" style="justify-content:space-between;align-items:center"><h3 style="margin:0">Blocklists</h3><button class="btn sm ghost" data-act="sh-feeds">Update now</button></div>
+        ${v.feeds.map((f) => `<div class="kv-row wide sh-feed"><span><b>${h(f.name)}</b> <span class="pill ${f.strength === "strong" ? "err" : f.strength === "weak" ? "warn" : ""}">${f.strength === "strong" ? "bans" : f.strength === "weak" ? "a mark" : "shown"}</span><br><span class="faint small">${h(f.about)}</span></span>
+          <span class="mono small" style="text-align:right">${f.loadedNow ? fmtN(f.count) : "–"}<br><span class="faint">${f.error ? `<span class="s5">${h(f.error)}</span>` : f.at ? ago(f.at) : f.loadedNow ? "from disk" : "downloading…"}</span></span></div>`).join("")}
+      </section>
+      <section class="card panel"><h3>Yours</h3>
+        <div class="row" style="gap:8px;margin-bottom:10px"><input class="input mono sm" id="shAllow" placeholder="always allow an address" autocomplete="off" spellcheck="false" style="flex:1"><button class="btn sm" data-act="sh-allow">Allow</button></div>
+        ${v.allow.map((a) => `<div class="kv-row wide"><span>${ipCell(a.ip)} <span class="pill ok">allowed</span></span><span><button class="btn sm ghost" data-act="sh-disallow" data-ip="${h(a.ip)}">Remove</button></span></div>`).join("")}
+        ${v.trusted.map((t) => `<div class="kv-row wide"><span>${ipCell(t.ip)} <span class="faint small">signed in</span></span><span class="faint small">${ago(t.at)}</span></div>`).join("") || (v.allow.length ? "" : '<p class="muted small" style="margin:0">Addresses you sign in from show up here.</p>')}
+      </section>
+    </div>`;
+  for (const [id, val, focused] of keep) {
+    const i = document.getElementById(id);
+    if (!i) continue;
+    i.value = val;
+    if (focused) { i.focus(); i.setSelectionRange(val.length, val.length); }
+  }
+}
+async function shieldPost(path, body, msg) {
+  S.shield = await api(`/__gate/api/shield${path}`, { method: "POST", body: JSON.stringify(body || {}) });
+  if (msg) toast(msg);
+  if (S.view === "detail") refresh(); else render();
+}
+async function shieldCheck(ip) {
+  ip = String(ip || "").trim();
+  if (!ip) return;
+  S.shCheck = { ip, loading: true }; render();
+  await askIntel(ip);
+  S.shCheck = { ip }; render();
+}
+
 function render() {
   if (S.modal) return;          // never repaint under an open form
   if (S.view === "detail") renderDetail(); else if (S.view === "integ") renderInteg(); else if (S.view === "forge") renderAddon();
-  else if (S.view === "addons") renderAddons(); else { renderList(); wirePanels(); }
+  else if (S.view === "addons") renderAddons(); else if (S.view === "shield") renderShield(); else { renderList(); wirePanels(); }
   const to = S.scrollTo && document.getElementById(S.scrollTo);
   if (to) { S.scrollTo = null; to.scrollIntoView({ block: "center" }); to.classList.remove("flash"); void to.offsetWidth; to.classList.add("flash"); }
 }
@@ -969,6 +1081,7 @@ async function refresh() {
   loadDown();
   try {
     if (S.view === "detail") S.detail = await api(`/__gate/api/tunnels/${S.port}`);
+    else if (S.view === "shield") S.shield = await api("/__gate/api/shield");
     else if (S.view === "integ") S.integData = await api(`/__gate/api/integrations/${encodeURIComponent(S.integ)}/desktops`);
     else if (S.view === "addons") {
       S.addons = (await api("/__gate/api/addons")).addons;
@@ -989,6 +1102,10 @@ async function refresh() {
       S.list = r.tunnels; S.mode = r.mode; S.pattern = r.pattern;
       S.integrations = (await api("/__gate/api/integrations")).integrations;
       if (Date.now() - S.updAt > 60000) loadUpdates(false);
+      if (Date.now() - (S.shieldAt || 0) > 30000) {     // the Shield tab's count
+        S.shieldAt = Date.now();
+        api("/__gate/api/shield").then((v) => { S.shield = v; if (S.view === "list") render(); }).catch(() => {});
+      }
       if (!S.addon || Date.now() - (S.addonAt || 0) > 30000) {       // for the tab's dot
         S.addonAt = Date.now();
         api("/__gate/api/addon").then((a) => { S.addon = a; if (S.view === "list") render(); }).catch(() => {});
@@ -1017,7 +1134,7 @@ function schedule() {
 function go(view, port) {
   S.view = view; S.detail = null;
   if (view === "integ") { S.integ = port; S.integData = null; S.port = null; } else S.port = port || null;
-  const want = view === "detail" ? `#/t/${port}` : view === "integ" ? `#/i/${encodeURIComponent(port)}` : view === "forge" ? "#/forge" : view === "addons" ? "#/addons" : "#/";
+  const want = view === "detail" ? `#/t/${port}` : view === "integ" ? `#/i/${encodeURIComponent(port)}` : view === "forge" ? "#/forge" : view === "addons" ? "#/addons" : view === "shield" ? "#/shield" : "#/";
   if (location.hash !== want) history.pushState(null, "", want);
   render(); refresh(); schedule();
   window.scrollTo(0, 0);
@@ -1027,7 +1144,7 @@ function fromHash() {
   const m = /^#\/t\/(\d+)/.exec(location.hash);
   const i = /^#\/i\/([a-z0-9-]+)/.exec(location.hash);
   if (m) go("detail", Number(m[1])); else if (i) go("integ", i[1]); else if (/^#\/(forge|addon)$/.test(location.hash)) go("forge");
-  else if (location.hash === "#/addons") go("addons"); else go("list");
+  else if (location.hash === "#/addons") go("addons"); else if (location.hash === "#/shield") go("shield"); else go("list");
 }
 
 // ------------------------------------------------------------------ modals
@@ -1271,7 +1388,7 @@ document.addEventListener("click", async (e) => {
   try {
     if (act === "open") go("detail", port);
     else if (act === "home") go("list");
-    else if (act === "tab") go(["forge", "addons"].includes(el.dataset.v) ? el.dataset.v : "list");
+    else if (act === "tab") go(["forge", "addons", "shield"].includes(el.dataset.v) ? el.dataset.v : "list");
     else if (act === "bridge-check") loadBridge(true);
     else if (act === "bridge-ask") bridgeAsk();
     else if (act === "bridge-manual") { S.manual = !S.manual; render(); if (S.manual) setTimeout(() => document.querySelector(".ab-steps")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); }
@@ -1311,9 +1428,7 @@ document.addEventListener("click", async (e) => {
     else if (act === "check-ip") {
       const ip = el.dataset.ip;
       S.intel[ip] = { loading: true }; render();
-      try { S.intel[ip] = await api(`/__gate/api/ipintel/${encodeURIComponent(ip)}`); S.intelOpen = ip; }
-      catch (ex) { S.intel[ip] = { error: ex.message }; }
-      render();
+      await askIntel(ip); S.intelOpen = ip; render();
     }
     else if (act === "scan-clients") {
       S.scanning = true; render();
@@ -1325,6 +1440,14 @@ document.addEventListener("click", async (e) => {
       } catch (ex) { toast(ex.message); }
       S.scanning = false; render();
     }
+    else if (act === "sh-ban") { await shieldPost("/ban", { ip: el.dataset.ip }, `${el.dataset.ip} banned from everything`); }
+    else if (act === "sh-ban-input") { const i = $("#shBan"); if (i.value.trim()) await shieldPost("/ban", { ip: i.value.trim() }, `${i.value.trim()} banned`); }
+    else if (act === "sh-unban") { await shieldPost("/unban", { ip: el.dataset.ip }, `${el.dataset.ip} unbanned`); }
+    else if (act === "sh-allow") { const i = $("#shAllow"); if (i.value.trim()) await shieldPost("/allow", { ip: i.value.trim() }, `${i.value.trim()} is always let through`); }
+    else if (act === "sh-disallow") { await shieldPost("/disallow", { ip: el.dataset.ip }, "Removed"); }
+    else if (act === "sh-feeds") { el.disabled = true; el.innerHTML = '<i class="spin"></i> Updating…'; await shieldPost("/feeds", {}, "Lists updated"); }
+    else if (act === "sh-check") shieldCheck($("#shIp")?.value);
+    else if (act === "sh-check-ip") { shieldCheck(el.dataset.ip); window.scrollTo({ top: 0, behavior: "smooth" }); }
     else if (act === "intel-open") { S.intelOpen = S.intelOpen === el.dataset.ip ? null : el.dataset.ip; render(); }
     else if (act === "kick") { const r = await api(`/__gate/api/tunnels/${port}/kick`, { method: "POST", body: JSON.stringify({ ip: el.dataset.ip }) }); toast(`Closed ${r.kicked} connection${r.kicked === 1 ? "" : "s"}`); refresh(); }
     else if (act === "block") { await patch(port, { block: el.dataset.ip }); toast(`${el.dataset.ip} blocked`); refresh(); }
@@ -1351,6 +1474,12 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("change", async (e) => {
+  const sw = e.target.closest('[data-act="sh-set"]');
+  if (sw) {
+    try { S.shield = await api("/__gate/api/shield", { method: "PUT", body: JSON.stringify({ [sw.dataset.k]: sw.checked }) }); render(); }
+    catch (ex) { sw.checked = !sw.checked; toast(ex.message); }
+    return;
+  }
   const el = e.target.closest('[data-act="toggle"]');
   if (!el) return;
   e.stopPropagation();
@@ -1360,6 +1489,9 @@ document.addEventListener("change", async (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.modal) closeModal();
+  if (e.key === "Enter" && e.target.id === "shIp") shieldCheck(e.target.value);
+  if (e.key === "Enter" && e.target.id === "shBan") $('[data-act="sh-ban-input"]')?.click();
+  if (e.key === "Enter" && e.target.id === "shAllow") $('[data-act="sh-allow"]')?.click();
   const pr = e.target.closest?.(".prow");
   if (pr && e.key === "Enter" && e.target === pr) go("detail", Number(pr.dataset.port));
   const i = e.target.closest?.(".integ");
