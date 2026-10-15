@@ -59,7 +59,8 @@ export async function chrome(active) {
 // ------------------------------------------------------------- your dashboards
 // With other domains that have a dashboard name, a switcher next to the bell:
 // every dashboard of yours, and a click opens it signed in (this dashboard
-// hands it a ticket), from whichever one you are on.
+// hands it a ticket), from whichever one you are on. The gear on each opens
+// that domain's settings (Settings → Domain, on this dashboard: they're shared).
 export function dashSwitch(me) {
   const list = me?.dashboards || [];
   document.querySelector(".ds")?.remove();
@@ -72,9 +73,10 @@ export function dashSwitch(me) {
   wrap.className = "ds";
   wrap.innerHTML = `<button type="button" class="ds-btn" aria-haspopup="true" aria-expanded="false" title="Your dashboards">${ICONS.globe}<span class="ds-cur">${h(here ? here.zone : "Dashboards")}</span><b class="ds-n">${list.length}</b></button>
     <div class="ds-pop" hidden role="dialog" aria-label="Your dashboards"><div class="nt-head"><b>Your dashboards</b><span class="spacer"></span><span class="muted small">one sign-in for all</span></div>
-    <ul class="ds-list">${list.map((d) => `<li>${d.current
+    <ul class="ds-list">${list.map((d) => `<li class="ds-li">${d.current
       ? `<div class="ds-row on" aria-current="page"><span class="ds-ic">${ICONS.globe}</span><span class="ds-two"><b>${h(d.host)}</b><span>${d.main ? "Main dashboard" : h(d.zone)} · you're here</span></span></div>`
-      : `<a class="ds-row" href="/__gate/sso?to=${encodeURIComponent(d.host)}&amp;next=${encodeURIComponent(next)}"><span class="ds-ic">${ICONS.globe}</span><span class="ds-two"><b>${h(d.host)}</b><span>${d.main ? "Main dashboard" : h(d.zone)}</span></span>${ICONS.arrow}</a>`}</li>`).join("")}</ul>
+      : `<a class="ds-row" href="/__gate/sso?to=${encodeURIComponent(d.host)}&amp;next=${encodeURIComponent(next)}"><span class="ds-ic">${ICONS.globe}</span><span class="ds-two"><b>${h(d.host)}</b><span>${d.main ? "Main dashboard" : h(d.zone)}</span></span>${ICONS.arrow}</a>`}
+      <a class="ds-gear" href="/__gate/settings#${d.main ? "domain" : `domain-${encodeURIComponent(d.zone)}`}" title="${h(d.zone)}: domain settings" aria-label="${h(d.zone)}: domain settings">${ICONS.gear}</a></li>`).join("")}</ul>
     <p class="ds-foot muted small">Tunnels on every domain are on the Burrow page of any of them.</p></div>`;
   const anchor = host.querySelector(".nt") || host.querySelector(".gear") || host.querySelector(".out") || host.querySelector('a[href="/__gate/logout"]');
   anchor ? anchor.before(wrap) : host.prepend(wrap);

@@ -46,6 +46,8 @@
 // More domains (domains.mjs) add names beside those: https://<sub|PORT>.<zone>
 // on each other domain whose `tunnels` is "all", or "picked" and listed in
 // t.domains. One wildcard record per domain, so nothing is made per tunnel.
+// A domain's subdomains add more: a wildcard one (*.apps.<zone>) puts the same
+// tunnels at <sub|PORT>.apps.<zone>; a single one (blog.<zone>) is one tunnel's.
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -250,7 +252,7 @@ export class TunnelManager {
     this.tunnels = new Map();     // port -> config
     this.live = new Map();        // port -> runtime (stats, clients, recent, sockets, health)
     mkdirSync(join(dataDir, "favicons"), { recursive: true });
-    this.extras = [];             // other domains: [{zone, label, picked}] (domains.mjs)
+    this.extras = [];             // other domains: [{zone, label, picked, root, wilds, fixed}] (domains.mjs)
     this.taken = () => new Set(); // names on a zone with a record of their own
     this.load();
     this.useDomain(domain);
@@ -288,21 +290,33 @@ export class TunnelManager {
     this.syncEdge();
   }
   // The other domains (domains.mjs): which answer for tunnels, and how.
+  //   root: tunnels under *.<zone>; wilds: subdomains with a wildcard of their own (the same
+  //   tunnels under *.<name>.<zone>); fixed: {name: port}, subdomains that are one tunnel's
   useExtras(list, taken) {
-    this.extras = (list || []).filter((d) => d.tunnels !== "none").map((d) => ({ zone: d.zone.name, label: d.label || "", picked: d.tunnels === "picked" }));
+    this.extras = (list || []).map((d) => {
+      const subs = Array.isArray(d.subs) ? d.subs : [], root = d.tunnels !== "none";
+      return { zone: d.zone.name, label: d.label || "", picked: d.tunnels === "picked", root,
+               wilds: root ? subs.filter((x) => x.wildcard).map((x) => x.name) : [], fixed: Object.fromEntries(subs.filter((x) => !x.wildcard).map((x) => [x.name, x.port])) };
+    }).filter((d) => d.root || Object.keys(d.fixed).length);
     if (taken) this.taken = taken;
   }
-  extraZones() { return this.extras.map((d) => d.zone); }
-  onExtra(t, d) { return !d.picked || (t.domains || []).includes(d.zone); }
+  extraZones() { return this.extras.filter((d) => d.root).map((d) => d.zone); }
+  onExtra(t, d) { return d.root && (!d.picked || (t.domains || []).includes(d.zone)); }
   // a tunnel's names on the other domains: [{zone, host, url, hidden?}]
   alsoFor(t) {
     if (!this.domain) return [];
     const out = [];
     for (const d of this.extras) {
+      for (const [name, port] of Object.entries(d.fixed)) if (port === t.port) { const host = `${name}.${d.zone}`; out.push({ zone: d.zone, host, url: `https://${host}`, sub: name }); }
       if (!this.onExtra(t, d)) continue;
-      const left = t.sub || String(t.port), host = `${left}.${d.zone}`;
-      const hidden = left === d.label ? "the dashboard's name there" : this.taken(d.zone).has(host) ? "a DNS record of its own on Cloudflare" : null;
-      out.push({ zone: d.zone, host, url: `https://${host}`, ...(hidden ? { hidden } : {}) });
+      const left = t.sub || String(t.port), taken = this.taken(d.zone);
+      for (const base of [d.zone, ...d.wilds.map((w) => `${w}.${d.zone}`)]) {
+        const host = `${left}.${base}`, root = base === d.zone;
+        if (root && d.fixed[left] === t.port) continue;                                          // already there, as its subdomain
+        const hidden = root && left === d.label ? "the dashboard's name there" : root && left in d.fixed ? "a subdomain that's another tunnel's"
+          : taken.has(host) ? "a DNS record of its own on Cloudflare" : null;
+        out.push({ zone: d.zone, host, url: `https://${host}`, ...(root ? {} : { wild: base }), ...(hidden ? { hidden } : {}) });
+      }
     }
     return out;
   }
@@ -310,8 +324,15 @@ export class TunnelManager {
     for (const d of this.extras) {
       const suffix = "." + d.zone;
       if (!name.endsWith(suffix)) continue;
-      const left = name.slice(0, -suffix.length);
-      if (!left || left.includes(".") || left === d.label) return null;
+      let left = name.slice(0, -suffix.length);
+      if (!left || left === d.label) return null;
+      if (!left.includes(".")) {
+        if (left in d.fixed) return this.tunnels.has(d.fixed[left]) ? d.fixed[left] : null;      // a subdomain that is one tunnel's
+      } else {
+        const dot = left.indexOf("."), wild = left.slice(dot + 1);                              // NAME.<wildcard subdomain>
+        if (!d.wilds.includes(wild)) return null;
+        left = left.slice(0, dot);
+      }
       let t = null;
       for (const x of this.tunnels.values()) if (x.sub && x.sub === left) t = x;
       if (!t && /^\d{1,5}$/.test(left)) { const x = this.tunnels.get(Number(left)); if (x && !x.sub) t = x; }

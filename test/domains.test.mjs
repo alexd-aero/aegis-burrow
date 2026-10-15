@@ -189,3 +189,65 @@ test("through your VPS: a wildcard certificate goes on the agent before the reco
   await D.remove("other.net");
   assert.deepEqual(recs.map((r) => r.id), ["mx"]);
 });
+
+test("subdomains: a wildcard one through your VPS (its own certificate), a single one for one tunnel; removing one lets go of it", async () => {
+  const pushed = [], removed = [];
+  const relay = { configured: () => true, host: () => "203.0.113.7", ip: async () => "203.0.113.7", outdated: () => null, version: () => "1.2.0",
+                  ready: async () => ({ ok: true }), push: async (cur, suffix) => { pushed.push([suffix, cur.names]); }, remove: async (s) => { removed.push(s); } };
+  const { D, tm, recs, acme, authorize } = setup([], { relay });
+  await authorize();
+  await D.add({ label: "", tunnels: "all", route: "vps" });
+  await tm.create({ port: 3000 });
+  await tm.create({ port: 3001 });
+  const v = await D.update("other.net", { subs: [{ name: "apps", wildcard: true }, { name: "Blog", wildcard: false, port: 3001 }] });
+  assert.deepEqual(v.domains[0].subs.map((x) => x.host), ["*.apps.other.net", "blog.other.net"]);
+  assert.deepEqual(acme.issued, ["*.other.net", "*.apps.other.net"], "a certificate of its own for the wildcard subdomain");
+  assert.deepEqual(pushed.at(-1), [".apps.other.net", ["*.apps.other.net"]], "on the agent with its own suffix");
+  assert.deepEqual(v.domains[0].cert.names, ["*.other.net", "*.apps.other.net"]);
+  assert.deepEqual(recs.map((r) => [r.name, r.type, r.content]).sort(),
+    [["*.apps.other.net", "A", "203.0.113.7"], ["*.other.net", "A", "203.0.113.7"], ["blog.other.net", "A", "203.0.113.7"]]);
+  // names: every tunnel under the wildcard subdomain; the single one is 3001's only
+  assert.equal(tm.matchHost("3000.apps.other.net"), 3000);
+  assert.equal(tm.matchHost("3001.apps.other.net"), 3001);
+  assert.equal(tm.matchHost("blog.other.net"), 3001);
+  assert.equal(tm.matchHost("3000.other.net"), 3000, "the domain's own wildcard still works");
+  for (const n of ["x.3000.apps.other.net", "3000.nope.other.net", "apps.other.net"]) assert.equal(tm.matchHost(n), null, n);
+  const also = (port) => tm.alsoFor(tm.get(port)).filter((a) => !a.hidden).map((a) => a.host);
+  assert.deepEqual(also(3000), ["3000.other.net", "3000.apps.other.net"]);
+  assert.deepEqual(also(3001), ["blog.other.net", "3001.other.net", "3001.apps.other.net"]);
+  // what doesn't go together
+  await assert.rejects(D.update("other.net", { label: "apps" }), /dashboard's name there/);
+  await assert.rejects(D.update("other.net", { tunnels: "none" }), /set its tunnels to all or picked first/);
+  await assert.rejects(D.update("other.net", { route: "cloudflare" }), /Cloudflare's free certificate covers one/);
+  await assert.rejects(D.update("other.net", { subs: [{ name: "123", wildcard: true }] }), /only digits/);
+  await assert.rejects(D.update("other.net", { subs: [{ name: "a.b", wildcard: true }] }), /one level/);
+  await assert.rejects(D.update("other.net", { subs: [{ name: "x", wildcard: false }] }), /Pick the tunnel/);
+  await assert.rejects(D.update("other.net", { subs: [{ name: "x", wildcard: true }, { name: "x", port: 3000 }] }), /twice/);
+  assert.equal(D.get("other.net").subs.length, 2, "nothing changed");
+  // the wildcard subdomain goes: its record, and the VPS lets go of its suffix
+  await D.update("other.net", { subs: [{ name: "blog", wildcard: false, port: 3001 }] });
+  assert.deepEqual(removed, [".apps.other.net"]);
+  assert.deepEqual(recs.map((r) => r.name).sort(), ["*.other.net", "blog.other.net"]);
+  assert.equal(tm.matchHost("3000.apps.other.net"), null);
+  // only single subdomains, no wildcard: still a certificate for the names one level down
+  await D.update("other.net", { tunnels: "none" });
+  assert.deepEqual(recs.map((r) => r.name), ["blog.other.net"]);
+  assert.equal(tm.matchHost("blog.other.net"), 3001);
+  assert.equal(tm.matchHost("3000.other.net"), null);
+  assert.ok(D.wantsRelay());
+  await D.remove("other.net");
+  assert.deepEqual(recs, []);
+  assert.ok(removed.includes(".other.net"));
+});
+
+test("subdomains through Cloudflare: a single one is a proxied record and a rule before the wildcard; a wildcard one is refused", async () => {
+  const { D, tm, recs, authorize } = setup();
+  await authorize();
+  await D.add({ label: "home", tunnels: "all", route: "cloudflare", subs: [{ name: "blog", port: 3000 }] });
+  await assert.rejects(D.update("other.net", { subs: [{ name: "apps", wildcard: true }] }), /through your VPS/);
+  assert.deepEqual(recs.map((r) => [r.name, r.type, r.proxied]).sort(), [["*.other.net", "CNAME", true], ["blog.other.net", "CNAME", true], ["home.other.net", "CNAME", true]]);
+  const yml = readFileSync(D.writeConfig(D.get("other.net")), "utf8");
+  assert.ok(yml.indexOf('"blog.other.net"') > 0 && yml.indexOf('"blog.other.net"') < yml.indexOf('"*.other.net"'), "the single name before the wildcard");
+  await tm.create({ port: 3000 });
+  assert.equal(tm.matchHost("blog.other.net"), 3000);
+});

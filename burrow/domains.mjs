@@ -26,13 +26,21 @@
 //                 the agent takes the new zone as it takes a certificate
 //   "cloudflare"  Cloudflare's proxy: *.<zone> is a proxied CNAME to the
 //                 domain's tunnel (its free certificate covers one level)
+// Subdomains (d.subs), beside those, each one of two kinds:
+//   {name, wildcard: true}         *.<name>.<zone>: the same tunnels as `tunnels`
+//                                  (all or picked) at https://<sub|PORT>.<name>.<zone>;
+//                                  through your VPS only (a certificate of its own,
+//                                  pushed to the agent with the suffix .<name>.<zone>),
+//                                  since Cloudflare's free certificate covers one level
+//   {name, wildcard: false, port}  <name>.<zone>: one tunnel, that one only, a record
+//                                  of its own (it wins over *.<zone>)
 // A Cloudflare tunnel is only made when something needs it (the dashboard, or
 // the "cloudflare" route), so a token that can only edit DNS is enough for a
 // domain that sends its tunnels through your VPS.
 // A tunnel keeps its access (login, password, public) on every name, and signs
 // in through the main dashboard, so one sign-in covers every domain.
 //
-// settings "domains": [{zone: {id, name}, label, tunnels, route, cert,
+// settings "domains": [{zone: {id, name}, label, tunnels, route, subs, cert,
 //                       tunnelId?, tunnelName?, creds?, linked}]
 // settings "cfTokens": [{token, added}]   API tokens you pasted
 
@@ -50,6 +58,7 @@ const ROUTES = new Set(["vps", "cloudflare"]);
 const COMMENT = "aegis: another domain";
 export const ZONE_RE = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const TAKEN_TTL = 15 * 60e3;
+const MAX_SUBS = 20;
 const RENEW_BEFORE_MS = 30 * 864e5;
 const RENEW_EVERY_MS = 6 * 3600e3;
 const RETRY_MS = 3600e3;
@@ -105,8 +114,20 @@ export class Domains {
   dashboardOf(d) { return d.label ? `${d.label}.${d.zone.name}` : null; }
   suffixOf(d) { return "." + d.zone.name; }
   certBase(d) { return `zone-${d.zone.name}`; }
-  onVps(d) { return d.route === "vps" && d.tunnels !== "none"; }
-  needsTunnel(d) { return !!d.label || (d.tunnels !== "none" && d.route !== "vps"); }
+  subsOf(d) { return Array.isArray(d.subs) ? d.subs : []; }
+  // something on the domain is for tunnels: its wildcard, or a subdomain
+  hasTunnels(d) { return d.tunnels !== "none" || this.subsOf(d).length > 0; }
+  onVps(d) { return d.route === "vps" && this.hasTunnels(d); }
+  needsTunnel(d) { return !!d.label || (this.hasTunnels(d) && d.route !== "vps"); }
+  // The certificates a domain needs on your VPS: *.<zone> (its wildcard, and every
+  // one-level name: the single subdomains), and *.<name>.<zone> for each wildcard subdomain.
+  certsOf(d) {
+    if (!this.onVps(d)) return [];
+    const out = [];
+    if (d.tunnels !== "none" || this.subsOf(d).some((x) => !x.wildcard)) out.push({ base: this.certBase(d), name: `*.${d.zone.name}`, suffix: this.suffixOf(d) });
+    for (const x of this.subsOf(d)) if (x.wildcard) out.push({ base: `zone-${x.name}.${d.zone.name}`, name: `*.${x.name}.${d.zone.name}`, suffix: `.${x.name}.${d.zone.name}` });
+    return out;
+  }
   wantsRelay() { return this.list().some((d) => this.onVps(d)); }
 
   // ------------------------------------------------------------- names
@@ -135,10 +156,13 @@ export class Domains {
       main: this.mainZone() || null,
       vps: r?.configured() ? { host: r.host(), outdated: r.outdated?.() || null, version: r.version?.() || null } : null,
       domains: this.list().map((d) => {
-        const c = this.connectors.get(d.zone.name), cur = this.onVps(d) ? this.files.read(this.certBase(d)) : null, cs = this.certState.get(d.zone.name);
+        const c = this.connectors.get(d.zone.name), certs = this.certsOf(d).map((x) => ({ ...x, cur: this.files.read(x.base), st: this.certState.get(x.base) }));
+        const ends = certs.map((x) => x.cur?.notAfter || 0), bad = certs.find((x) => x.st?.error);
         return { zone: d.zone.name, label: d.label || "", dashboard: this.dashboardOf(d), tunnels: d.tunnels, route: d.route || "cloudflare", linked: d.linked,
                  example: d.tunnels === "none" ? null : `NAME.${d.zone.name}`,
-                 cert: this.onVps(d) ? { notAfter: cur?.notAfter || null, issuing: !!cs?.issuing, error: cs?.error || null } : null,
+                 subs: this.subsOf(d).map((x) => ({ ...x, host: x.wildcard ? `*.${x.name}.${d.zone.name}` : `${x.name}.${d.zone.name}`, example: x.wildcard ? `NAME.${x.name}.${d.zone.name}` : null })),
+                 cert: certs.length ? { notAfter: ends.every(Boolean) ? Math.min(...ends) : null, issuing: certs.some((x) => x.st?.issuing), error: bad ? bad.st.error : null,
+                                        names: certs.map((x) => x.name) } : null,
                  connector: c ? { running: !!c.running, since: c.since || null, log: (c.lines || []).slice(-12) } : null };
       }),
       login: this.login ? { url: this.login.url, error: this.login.error, waiting: !!this.login.proc } : null,
@@ -266,28 +290,56 @@ export class Domains {
   }
 
   // ------------------------------------------------------------- add, change, remove
-  static clean({ label, tunnels, route } = {}) {
+  static clean({ label, tunnels, route, subs } = {}) {
     label = String(label ?? "").trim().toLowerCase();
     if (label && !LABEL_RE.test(label)) throw new Error("The dashboard's name is 1-40 letters, digits and dashes (not at the ends), or empty for none.");
     if (/^\d+$/.test(label)) throw new Error("A name of only digits is how tunnels are reached; add a letter.");
     if (tunnels != null && !MODES.has(tunnels)) throw new Error("Tunnels on it: all, picked or none.");
     if (route != null && !ROUTES.has(route)) throw new Error("Tunnels arrive through your VPS or Cloudflare.");
-    return { label, tunnels, route };
+    return { label, tunnels, route, subs: subs == null ? subs : Domains.cleanSubs(subs) };
+  }
+  // [{name, wildcard: true} | {name, wildcard: false, port}], one level under the zone each
+  static cleanSubs(subs) {
+    if (!Array.isArray(subs)) throw new Error("Subdomains are a list.");
+    if (subs.length > MAX_SUBS) throw new Error(`Up to ${MAX_SUBS} subdomains on a domain.`);
+    const seen = new Set();
+    return subs.map((x) => {
+      const name = String(x?.name ?? "").trim().toLowerCase().replace(/^\*\./, "");
+      if (!LABEL_RE.test(name)) throw new Error(`"${name || " "}" isn't a subdomain: 1-40 letters, digits and dashes (not at the ends), one level (no dots).`);
+      if (/^\d+$/.test(name)) throw new Error(`A subdomain of only digits (${name}) is how tunnels are reached by port; add a letter.`);
+      if (seen.has(name)) throw new Error(`${name} is there twice.`);
+      seen.add(name);
+      if (x.wildcard) return { name, wildcard: true };
+      const port = Number(x.port);
+      if (!Number.isInteger(port) || port < 1 || port > 99999) throw new Error(`Pick the tunnel ${name} goes to.`);
+      return { name, wildcard: false, port };
+    });
+  }
+  // what a domain's settings may be together
+  validate(d) {
+    if (!d.label && !this.hasTunnels(d)) throw new Error("Give it the dashboard, some tunnels, or both. (Or remove the domain.)");
+    for (const x of this.subsOf(d)) {
+      if (x.name === d.label) throw new Error(`${x.name}.${d.zone.name} is the dashboard's name there; pick another subdomain.`);
+      if (!x.wildcard) continue;
+      if (d.tunnels === "none") throw new Error(`*.${x.name}.${d.zone.name} carries the same tunnels as the domain: set its tunnels to all or picked first (or make ${x.name} one tunnel's name).`);
+      if (d.route !== "vps") throw new Error(`*.${x.name}.${d.zone.name} is two levels under ${d.zone.name}, and Cloudflare's free certificate covers one. Send the domain's tunnels through your VPS (it gets a certificate for it by itself), or make ${x.name} one tunnel's name.`);
+    }
   }
   api(d, method, path, body) { const c = decodeCert(d.cert); return this.cfApi(c.token, method, `/zones/${c.zoneId}${path}`, body); }
 
   async add(spec) {
     const c = Domains.clean(spec);
+    const subs = c.subs || [];
     const tunnels = c.tunnels || "all", route = c.route || (this.relay?.configured() ? "vps" : "cloudflare");
     const p = this.pending();
     if (!p?.name) throw new Error("Tell Aegis which domain first.");
     if (this.get(p.name)) throw new Error(`${p.name} is already added.`);
-    if (!c.label && tunnels === "none") throw new Error("Give it the dashboard, some tunnels, or both.");
+    this.validate({ zone: { name: p.name }, label: c.label, tunnels, route, subs });
     const dir = join(this.dir, p.name);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const cert = join(dir, "cert.pem");
     renameSync(this.pendingPath(), cert);
-    let d = { zone: { id: p.id, name: p.name }, label: c.label, tunnels, route, cert, linked: Date.now() };
+    let d = { zone: { id: p.id, name: p.name }, label: c.label, tunnels, route, ...(subs.length ? { subs } : {}), cert, linked: Date.now() };
     try {
       if (this.needsTunnel(d)) d = await this.makeTunnel(d);
       if (this.onVps(d)) await this.toVps(d);
@@ -309,16 +361,23 @@ export class Domains {
   async update(zone, patch) {
     const d = this.get(zone);
     if (!d) throw new Error("No such domain.");
-    const c = Domains.clean({ label: "label" in patch ? patch.label : d.label, tunnels: patch.tunnels ?? d.tunnels, route: patch.route ?? d.route ?? "cloudflare" });
-    if (!c.label && c.tunnels === "none") throw new Error("Give it the dashboard, some tunnels, or both. (Or remove the domain.)");
-    let next = { ...d, label: c.label, tunnels: c.tunnels, route: c.route };
+    const c = Domains.clean({ label: "label" in patch ? patch.label : d.label, tunnels: patch.tunnels ?? d.tunnels, route: patch.route ?? d.route ?? "cloudflare", subs: patch.subs ?? this.subsOf(d) });
+    let next = { ...d, label: c.label, tunnels: c.tunnels, route: c.route, subs: c.subs };
+    if (!next.subs.length) delete next.subs;
+    this.validate(next);
     if (this.needsTunnel(next) && !next.tunnelId) next = await this.makeTunnel(next);
     if (this.onVps(next)) await this.toVps(next);                 // the VPS has the certificate before any name points at it
     await this.syncRecords(next, d);
-    if (this.onVps(d) && !this.onVps(next)) await this.relay?.remove(this.suffixOf(d)).catch((e) => this.log("domains: the VPS kept", d.zone.name, e.message));
+    const keep = new Set(this.certsOf(next).map((x) => x.suffix));
+    for (const x of this.certsOf(d)) {
+      if (keep.has(x.suffix)) continue;
+      await this.relay?.remove(x.suffix).catch((e) => this.log("domains: the VPS kept", x.name, e.message));
+      if (x.base !== this.certBase(d)) { for (const f of Object.values(this.files.paths(x.base))) rmSync(f, { force: true }); this.certState.delete(x.base); }
+    }
     this.save(this.list().map((x) => (x.zone.name === d.zone.name ? next : x)));
     this.startConnector(next);
-    this.log("domains:", d.zone.name, "now", next.label ? `dashboard ${this.dashboardOf(next)},` : "no dashboard,", "tunnels:", next.tunnels, next.tunnels === "none" ? "" : `through ${next.route}`);
+    this.log("domains:", d.zone.name, "now", next.label ? `dashboard ${this.dashboardOf(next)},` : "no dashboard,", "tunnels:", next.tunnels, this.hasTunnels(next) ? `through ${next.route}` : "",
+             this.subsOf(next).length ? `subdomains: ${this.subsOf(next).map((x) => (x.wildcard ? `*.${x.name}` : `${x.name}→${x.port}`)).join(" ")}` : "");
     return this.view();
   }
 
@@ -327,12 +386,12 @@ export class Domains {
     if (!d) throw new Error("No such domain.");
     this.connectors.get(d.zone.name)?.stop();
     this.connectors.delete(d.zone.name);
-    try { await this.syncRecords({ ...d, label: "", tunnels: "none" }, d); } catch (e) { this.log("domains: could not remove", d.zone.name, "records:", e.message); }
-    if (this.onVps(d)) await this.relay?.remove(this.suffixOf(d)).catch((e) => this.log("domains: the VPS kept", d.zone.name, e.message));
+    try { await this.syncRecords({ ...d, label: "", tunnels: "none", subs: [] }, d); } catch (e) { this.log("domains: could not remove", d.zone.name, "records:", e.message); }
+    for (const x of this.certsOf(d)) await this.relay?.remove(x.suffix).catch((e) => this.log("domains: the VPS kept", x.name, e.message));
     if (d.tunnelId) await this.dropTunnel(d);
     rmSync(join(this.dir, d.zone.name), { recursive: true, force: true });
-    for (const f of Object.values(this.files.paths(this.certBase(d)))) rmSync(f, { force: true });
-    this.taken.delete(d.zone.name); this.certState.delete(d.zone.name);
+    for (const x of this.certsOf(d)) { for (const f of Object.values(this.files.paths(x.base))) rmSync(f, { force: true }); this.certState.delete(x.base); }
+    this.taken.delete(d.zone.name);
     this.save(this.list().filter((x) => x.zone.name !== d.zone.name));
     this.log("domains: removed", d.zone.name);
     return this.view();
@@ -371,42 +430,45 @@ export class Domains {
     if (!r?.configured()) throw new Error("Link your VPS first (Settings → Domain → Your VPS), or send these tunnels through Cloudflare.");
     const ok = await r.ready();
     if (!ok.ok) throw new Error(`Your VPS (${r.host()}) isn't reachable: ${ok.error}. Nothing was moved.`);
-    const cur = await this.ensureCert(d, { force: true });
-    try { await r.push(cur, this.suffixOf(d)); }
-    catch (e) { throw new Error(`The certificate for *.${d.zone.name} couldn't go on your VPS: ${e.message}. Nothing was moved.`); }
+    for (const c of this.certsOf(d)) {
+      const cur = await this.ensureCert(d, c, { force: true });
+      try { await r.push(cur, c.suffix); }
+      catch (e) { throw new Error(`The certificate for ${c.name} couldn't go on your VPS: ${e.message}. Nothing was moved.`); }
+    }
   }
-  async ensureCert(d, { force = false } = {}) {
-    const cur = this.files.read(this.certBase(d)), name = `*.${d.zone.name}`;
+  // c: one of certsOf(d)
+  async ensureCert(d, c = this.certsOf(d)[0], { force = false } = {}) {
+    const cur = this.files.read(c.base), name = c.name;
     if (cur && cur.names.includes(name) && cur.notAfter - Date.now() > RENEW_BEFORE_MS) return cur;
-    const st = this.certState.get(d.zone.name) || {};
+    const st = this.certState.get(c.base) || {};
     if (st.issuing) return st.issuing;
     if (!force && st.retryAt > Date.now()) throw new Error(st.error || "Waiting to try again.");
     st.issuing = (async () => {
       this.log(`domains: asking Let's Encrypt for a certificate for ${name}`);
       try {
-        const c = await this.acme.issue([name], {
+        const got = await this.acme.issue([name], {
           set: async (n, value) => (await this.api(d, "POST", "/dns_records", { type: "TXT", name: n, content: value, ttl: 60, comment: "aegis (certificate check)" })).id,
           visible: this.txtVisible,
           remove: (id) => this.api(d, "DELETE", `/dns_records/${id}`),
         });
-        const saved = this.files.write(this.certBase(d), c, [name], this.acme.directoryUrl);
-        this.log(`domains: certificate for ${name} until ${new Date(c.notAfter).toISOString().slice(0, 10)}`);
-        this.certState.set(d.zone.name, {});
+        const saved = this.files.write(c.base, got, [name], this.acme.directoryUrl);
+        this.log(`domains: certificate for ${name} until ${new Date(got.notAfter).toISOString().slice(0, 10)}`);
+        this.certState.set(c.base, {});
         return saved;
       } catch (e) {
-        this.certState.set(d.zone.name, { error: e.message, retryAt: Date.now() + RETRY_MS });
+        this.certState.set(c.base, { error: e.message, retryAt: Date.now() + RETRY_MS });
         this.log("domains: no certificate for", name + ":", e.message);
         throw new Error(`Let's Encrypt didn't give a certificate for ${name}: ${e.message}`);
       }
     })();
-    this.certState.set(d.zone.name, st);
+    this.certState.set(c.base, st);
     return st.issuing;
   }
   // every VPS domain's certificate: renewed when due, and on the agent (link up, renewal, every few hours)
   async pushAll() {
-    for (const d of this.list().filter((x) => this.onVps(x))) {
-      try { await this.relay?.push(await this.ensureCert(d), this.suffixOf(d)); }
-      catch (e) { this.log("domains: couldn't put", d.zone.name + "'s certificate on the VPS:", e.message); }
+    for (const d of this.list()) for (const c of this.certsOf(d)) {
+      try { await this.relay?.push(await this.ensureCert(d, c), c.suffix); }
+      catch (e) { this.log("domains: couldn't put the certificate for", c.name, "on the VPS:", e.message); }
     }
   }
   renewAll() { return this.pushAll(); }
@@ -416,10 +478,14 @@ export class Domains {
   async records(d) {
     const out = {}, t = this.target(d);
     if (d.label) out[this.dashboardOf(d)] = { type: "CNAME", content: t, proxied: true };
-    if (d.tunnels !== "none") {
-      if (d.route === "vps") { const ip = await this.relay.ip(); out[`*.${d.zone.name}`] = { type: isIP(ip) === 6 ? "AAAA" : "A", content: ip, proxied: false }; }
-      else out[`*.${d.zone.name}`] = { type: "CNAME", content: t, proxied: true };
-    }
+    if (!this.hasTunnels(d)) return out;
+    const names = [];
+    if (d.tunnels !== "none") names.push(`*.${d.zone.name}`);
+    for (const x of this.subsOf(d)) names.push(x.wildcard ? `*.${x.name}.${d.zone.name}` : `${x.name}.${d.zone.name}`);
+    let rec;
+    if (d.route === "vps") { const ip = await this.relay.ip(); rec = { type: isIP(ip) === 6 ? "AAAA" : "A", content: ip, proxied: false }; }
+    else rec = { type: "CNAME", content: t, proxied: true };
+    for (const n of names) out[n] = { ...rec };
     return out;
   }
   // The records `d` needs, made first; then the ones `was` had that `d` doesn't, removed.
@@ -434,7 +500,7 @@ export class Domains {
       if (cur.some((r) => r.type === rec.type && r.content === rec.content && !!r.proxied === rec.proxied)) continue;
       const theirs = cur.find((r) => !ours(r));
       if (theirs) {
-        throw new Error(`${name} already has a ${theirs.type} record${theirs.content ? ` (${theirs.content})` : ""}. ${name.startsWith("*.") ? "Delete it on Cloudflare first, or set tunnels to none." : "Pick another name, or none."}`);
+        throw new Error(`${name} already has a ${theirs.type} record${theirs.content ? ` (${theirs.content})` : ""}. ${name === `*.${d.zone.name}` ? "Delete it on Cloudflare first, or set tunnels to none." : name.startsWith("*.") ? "Delete it on Cloudflare first, or pick another subdomain." : "Pick another name, or none."}`);
       }
       const body = { type: rec.type, name, content: rec.content, proxied: rec.proxied, ttl: 1, comment: COMMENT };
       const same = cur.find((r) => r.type === rec.type);
@@ -462,6 +528,7 @@ export class Domains {
       "loglevel: info",
       "ingress:",
       ...(d.label ? rule(this.dashboardOf(d)) : []),
+      ...this.subsOf(d).filter((x) => !x.wildcard).flatMap((x) => rule(`${x.name}.${d.zone.name}`)),
       ...rule(`*.${d.zone.name}`),
       "  - service: http_status:404",
     ].filter(Boolean).join("\n") + "\n";

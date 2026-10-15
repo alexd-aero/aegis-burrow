@@ -177,7 +177,7 @@ Everything else lives in **Settings**:
 | **Updates** | Check for a new version and install it in one click; **Update by itself** on or off |
 | **Changelog** | What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture, release by release |
 | **Modules** | Burrow on or off; the **serveo link** on or off (with its address); the pack |
-| **Domain** | Link a domain through Cloudflare with the subdomain you pick, **change that name later**, or unlink it |
+| **Domain** | Link a domain through Cloudflare with the subdomain you pick, **change that name later**, or unlink it. **Other domains** beside it, each with **subdomains** of its own: a wildcard one (`*.apps.other.net`, every tunnel at `NAME.apps.other.net`, through your VPS) or one tunnel's (`blog.other.net`). The gear by each domain in the dashboards menu (home page, top right) opens its settings |
 | **Termix** | Install, open, remove (its data volume is kept) |
 | **Login** | Your username and password |
 | **Connected apps** | Apps that plugged in |

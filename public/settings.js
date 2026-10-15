@@ -320,8 +320,8 @@ const odSeg = (act, opts, cur, zone) => `<div class="seg od-seg" role="group">${
   `<button type="button" data-act="${act}" data-v="${v}"${zone ? ` data-zone="${h(zone)}"` : ""} class="${cur === v ? "on" : ""}">${t}</button>`).join("")}</div>`;
 const odHint = (m, zone) => m === "all" ? `Every tunnel at <span class="mono">NAME.${h(zone)}</span>: its own name, or its port.`
   : m === "picked" ? `Only tunnels you tick (the tunnel → Target → Other domains), at <span class="mono">NAME.${h(zone)}</span>.` : "Just the dashboard.";
-const odRouteHint = (r, zone, vps) => r === "vps"
-  ? `Straight to <span class="mono">${h(vps?.host || "your VPS")}</span>: Aegis gets a Let's Encrypt certificate for <span class="mono">*.${h(zone)}</span>, puts it on the VPS and renews it. Nothing to run there.`
+const odRouteHint = (r, zone, vps, names) => r === "vps"
+  ? `Straight to <span class="mono">${h(vps?.host || "your VPS")}</span>: Aegis gets a Let's Encrypt certificate for ${(names?.length ? names : [`*.${zone}`]).map((n) => `<span class="mono">${h(n)}</span>`).join(" and ")}, puts it on the VPS and renews it. Nothing to run there.`
   : "Through Cloudflare's proxy and a Cloudflare tunnel of this domain's own.";
 function odVpsNote(o) {
   if (!o.vps) return '<p class="faint small">Link your VPS (Your VPS, above) and tunnels on other domains can go straight to it too.</p>';
@@ -333,17 +333,57 @@ function odRow(x, o) {
   const certLine = x.cert ? (x.cert.issuing ? '<span class="faint small"><i class="spin"></i> getting the certificate…</span>'
     : x.cert.error ? `<span class="err-msg small">certificate: ${h(x.cert.error)}</span>`
     : x.cert.notAfter ? `<span class="pill ok"><i class="dot ok"></i>certificate on ${h(o.vps?.host || "the VPS")} · until ${h(new Date(x.cert.notAfter).toLocaleDateString())}</span>` : "") : "";
-  return `<div class="od-row">
+  return `<div class="od-row" id="domain-${h(x.zone)}">
     <div class="od-top"><b class="mono">${h(x.zone)}</b>
       ${!c ? "" : c.running ? `<span class="pill ok"><i class="dot ok"></i>dashboard tunnel up · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>connector not running</span>'}
       <button class="btn ghost sm" data-act="od-remove" data-zone="${h(x.zone)}">Remove</button></div>
     <div class="kv-row"><span>Dashboard</span>${ren ? `<form class="od-ren" data-zone="${h(x.zone)}"><div class="addr"><input class="input mono sm" id="odRename" value="${h(x.label)}" maxlength="40" placeholder="none" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(x.zone)}</span></div><button class="btn sm primary">Save</button><button type="button" class="btn sm ghost" data-act="od-ren-cancel">Cancel</button></form>`
       : `${x.dashboard ? `<a class="mono" href="https://${h(x.dashboard)}" target="_blank" rel="noopener">https://${h(x.dashboard)}</a>` : '<span class="faint">none</span>'}<button class="btn ghost sm" data-act="od-ren" data-zone="${h(x.zone)}">${x.dashboard ? "Change" : "Add one"}</button>`}</div>
     <div class="kv-row"><span>Tunnels</span><span class="od-t">${odSeg("od-tunnels", OD_MODES, x.tunnels, x.zone)}<span class="faint small">${odHint(x.tunnels, x.zone)}</span></span></div>
-    ${x.tunnels === "none" ? "" : `<div class="kv-row"><span>Way in</span><span class="od-t">${odSeg("od-route", OD_ROUTES, x.route, x.zone)}<span class="faint small">${odRouteHint(x.route, x.zone, o.vps)}</span>${certLine}</span></div>`}
+    <div class="kv-row"><span>Subdomains</span>${odSubs(x, o)}</div>
+    ${x.tunnels === "none" && !(x.subs || []).length ? "" : `<div class="kv-row"><span>Way in</span><span class="od-t">${odSeg("od-route", OD_ROUTES, x.route, x.zone)}<span class="faint small">${odRouteHint(x.route, x.zone, o.vps, x.cert?.names)}</span>${certLine}</span></div>`}
     ${c && c.log && c.log.length && !c.running ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
   </div>`;
 }
+// A domain's subdomains (burrow/domains.mjs d.subs): a wildcard one carries the
+// domain's tunnels one level further down (*.apps.<zone>, through your VPS); a
+// single one is one tunnel's own name (blog.<zone>). Added and removed in place.
+const tunName = (port) => { const t = (S.tuns || []).find((y) => y.port === port); return t ? t.name || t.title || t.sub || `port ${port}` : null; };
+function odSubs(x, o) {
+  const subs = x.subs || [], open = S.odSubOpen === x.zone, kind = S.odSubKind || "wild";
+  const rows = subs.map((s) => {
+    const name = s.wildcard ? null : tunName(s.port);
+    return `<li class="od-sub ${s.wildcard ? "wild" : "one"}">
+      <span class="od-sub-k" title="${s.wildcard ? "Wildcard" : "One tunnel"}">${s.wildcard ? "*" : ICONS.tunnel}</span>
+      <span class="od-sub-two"><b class="mono">${h(s.host)}</b><span class="faint small">${s.wildcard
+        ? `wildcard · ${x.tunnels === "picked" ? "the tunnels you pick" : "every tunnel"} at <span class="mono">${h(s.example)}</span>`
+        : name ? `one tunnel · <b>${h(name)}</b> <span class="mono">:${h(s.port)}</span>` : `<span class="err-msg">its tunnel (${h(s.port)}) is gone</span>`}</span></span>
+      <button type="button" class="btn ghost sm" data-act="od-sub-rm" data-zone="${h(x.zone)}" data-name="${h(s.name)}">Remove</button></li>`;
+  }).join("");
+  const opts = (S.tuns || []).filter((t) => t.kind !== "site" || t.port).map((t) => `<option value="${t.port}" ${String(S.odSubPort) === String(t.port) ? "selected" : ""}>${h(t.name || t.title || t.sub || "Tunnel")} · ${t.kind === "site" ? "site" : `:${t.port}`}</option>`).join("");
+  const wildWhy = kind !== "wild" ? "" : x.route !== "vps" ? `A wildcard subdomain is two levels under ${h(x.zone)}: it needs the VPS way in (Cloudflare's free certificate covers one level).`
+    : x.tunnels === "none" ? "A wildcard subdomain carries this domain's tunnels: set Tunnels to all or picked first." : "";
+  const form = !open ? `<button type="button" class="btn ghost sm od-sub-open" data-act="od-sub-open" data-zone="${h(x.zone)}">+ Add a subdomain</button>`
+    : `<form class="od-sub-add" data-zone="${h(x.zone)}" autocomplete="off">
+        <div class="od-sub-line"><div class="addr"><span class="mono zone od-sub-star" ${kind === "wild" ? "" : "hidden"}>*.</span><input class="input mono sm" id="odSubName" value="${h(S.odSubName || "")}" maxlength="40" placeholder="${kind === "wild" ? "apps" : "blog"}" spellcheck="false" autocapitalize="none" aria-label="Subdomain"><span class="mono zone">.${h(x.zone)}</span></div>
+          ${odSeg("od-sub-kind", [["wild", "Wildcard"], ["one", "One tunnel"]], kind, x.zone)}</div>
+        ${kind === "one" ? (opts ? `<label class="od-sub-line"><span class="faint small">goes to</span><select class="input sm" id="odSubPort">${opts}</select></label>` : '<p class="faint small">No tunnels yet: add one on the Burrow page first.</p>') : ""}
+        <p class="faint small">${kind === "wild" ? `Every tunnel ${x.tunnels === "picked" ? "you pick for this domain " : ""}also at <span class="mono">NAME.${h(S.odSubName || "apps")}.${h(x.zone)}</span>${x.route === "vps" ? "; Aegis gets its certificate and puts it on your VPS" : ""}.` : `Just that tunnel at <span class="mono">${h(S.odSubName || "blog")}.${h(x.zone)}</span>, a record of its own.`}</p>
+        ${wildWhy ? `<p class="note-warn small">${wildWhy}</p>` : ""}
+        <div class="err-msg small" id="odSubErr">${h(S.odSubErr || "")}</div>
+        <div class="row"><button class="btn sm primary" ${wildWhy || (kind === "one" && !opts) ? "disabled" : ""}>Add</button><button type="button" class="btn sm ghost" data-act="od-sub-cancel">Cancel</button></div>
+      </form>`;
+  return `<span class="od-t">${subs.length ? `<ul class="od-subs">${rows}</ul>` : `<span class="faint small">None. Add a wildcard one (<span class="mono">*.apps.${h(x.zone)}</span>) or one tunnel's own (<span class="mono">blog.${h(x.zone)}</span>).</span>`}${form}</span>`;
+}
+const subsBody = (list) => list.map((s) => (s.wildcard ? { name: s.name, wildcard: true } : { name: s.name, wildcard: false, port: s.port }));
+async function patchSubs(zone, subs, busyMsg) {
+  S.busy = true;
+  const at = document.getElementById(`domain-${zone}`)?.querySelector(".od-sub-add, .od-subs");
+  at?.insertAdjacentHTML("afterend", `<span class="faint small od-sub-busy"><i class="spin"></i> ${busyMsg}</span>`);
+  try { S.doms = await api(`/__gate/api/domains/${encodeURIComponent(zone)}`, { method: "PATCH", body: JSON.stringify({ subs }) }); return true; }
+  finally { S.busy = false; document.querySelector(".od-sub-busy")?.remove(); }
+}
+
 function odAdd(o, main) {
   const l = o.login, p = o.pending, n = o.need;
   if (p) {
@@ -524,6 +564,7 @@ const INDEX = [
   ["The full pack", "modules", "termix forge install welcome first run"],
   ["Domain", "domain", "cloudflare dns link custom domain address other domains more domains add a domain"],
   ["Change the dashboard's name (subdomain)", "domain", "rename subdomain name aegis private"],
+  ["Subdomains on another domain: a wildcard one or one tunnel's", "domain", "subdomain subdomains wildcard more names apps blog other domains second level"],
   ["Unlink the domain", "domain", "remove cloudflare tunnel"],
   ["Termix", "termix", "ssh terminal install remove docker"],
   ["Change the username or password", "account", "login password user credentials"],
@@ -682,7 +723,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -698,8 +739,20 @@ function render() {
     ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
     ${advancedBody()}`;
   wireForms();
-  if (location.hash && !S.scrolled) { S.scrolled = true; document.querySelector(location.hash)?.scrollIntoView({ block: "start" }); }
+  landOnHash();
 }
+// #domain-<zone> (the gear in the dashboards menu) or a section: scrolled to once it's on the
+// page (other domains come in a moment later), and a domain's card lights up for a moment
+function landOnHash() {
+  if (!location.hash || S.scrolled) return;
+  const el = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+  if (!el) { if (S.doms || !location.hash.startsWith("#domain-")) S.scrolled = true; return; }     // a domain that isn't there (any more): stay put
+  S.scrolled = true;
+  el.scrollIntoView({ block: el.classList.contains("od-row") ? "center" : "start", behavior: document.readyState === "complete" ? "smooth" : "auto" });
+  if (el.classList.contains("od-row")) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+}
+
+addEventListener("hashchange", () => { S.scrolled = false; landOnHash(); });
 
 function wireForms() {
   const lf = $("#linkForm"), rf = $("#renameForm");
@@ -761,6 +814,27 @@ function wireForms() {
     const b = e.target.querySelector("button"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Checking the token…';
     try { S.doms = await post("/__gate/api/domains/token", { zone: S.doms.need.zone, token: $("#odToken").value }); }
     catch (ex) { S.doms = await api("/__gate/api/domains").catch(() => S.doms); toast(ex.message); }
+    document.activeElement?.blur(); render();
+  });
+  $("#odSubName")?.addEventListener("input", (e) => {
+    S.odSubName = e.target.value.trim().toLowerCase();
+    const f = e.target.closest("form"), z = f.dataset.zone, n = S.odSubName || (S.odSubKind === "one" ? "blog" : "apps"), hint = f.querySelector("p.faint .mono");
+    if (hint) hint.textContent = S.odSubKind === "one" ? `${n}.${z}` : `NAME.${n}.${z}`;
+  });
+  $("#odSubPort")?.addEventListener("change", (e) => { S.odSubPort = e.target.value; });
+  document.querySelector(".od-sub-add")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const z = e.target.dataset.zone, x = S.doms.domains.find((d) => d.zone === z), kind = S.odSubKind || "wild";
+    const name = $("#odSubName").value.trim().toLowerCase().replace(/^\*\./, "").replace(new RegExp(`\\.${z.replace(/\./g, "\\.")}$`), "");
+    const port = Number($("#odSubPort")?.value);
+    if (!name) { $("#odSubErr").textContent = "Type the subdomain."; return; }
+    const add = kind === "wild" ? { name, wildcard: true } : { name, wildcard: false, port };
+    e.target.querySelectorAll("button, input, select").forEach((b) => { b.disabled = true; });
+    try {
+      await patchSubs(z, [...subsBody(x.subs || []), add], kind === "wild" && x.route === "vps" ? `Getting a certificate for *.${name}.${z} and putting it on your VPS…` : `Adding ${name}.${z}…`);
+      S.odSubOpen = null; S.odSubName = ""; S.odSubErr = "";
+      toast(kind === "wild" ? `*.${name}.${z} added: tunnels there in a minute` : `${name}.${z} added`);
+    } catch (ex) { S.odSubErr = ex.message; }
     document.activeElement?.blur(); render();
   });
   document.querySelector(".od-ren")?.addEventListener("submit", async (e) => {
@@ -897,6 +971,7 @@ async function load() {
     S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
     S.doms = cf.domain ? await api("/__gate/api/domains").catch(() => null) : null;
     S.relay = cf.domain ? { ...(await api("/__gate/api/relay").catch(() => null)), setup: S.relay?.setup } : null;
+    S.tuns = S.doms ? (await api("/__gate/api/tunnels").catch(() => ({ tunnels: [] }))).tunnels || [] : [];
     S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
     loadLog(S.log);
@@ -1033,6 +1108,19 @@ document.addEventListener("click", async (e) => {
       render();
     }
     else if (act === "od-ren") { S.odRename = el.dataset.zone; render(); $("#odRename")?.focus(); }
+    else if (act === "od-sub-open") { S.odSubOpen = el.dataset.zone; S.odSubErr = ""; S.odSubName = ""; S.odSubKind = S.odSubKind || "wild"; render(); $("#odSubName")?.focus(); }
+    else if (act === "od-sub-cancel") { S.odSubOpen = null; S.odSubErr = ""; document.activeElement?.blur(); render(); }
+    else if (act === "od-sub-kind") {             // the box may still have focus (Safari doesn't focus buttons): repaint anyway
+      S.odSubKind = el.dataset.v; S.odSubErr = ""; if (!S.odSubPort && S.tuns?.length) S.odSubPort = S.tuns[0].port;
+      document.activeElement?.blur(); render(); $("#odSubName")?.focus();
+    }
+    else if (act === "od-sub-rm") {
+      const z = el.dataset.zone, n = el.dataset.name, x = S.doms.domains.find((d) => d.zone === z), s = (x.subs || []).find((y) => y.name === n);
+      if (!confirm(`Remove ${s.host}? ${s.wildcard ? `Tunnel names under it stop working, and your VPS lets go of its certificate.` : "That name stops working; the tunnel itself stays."}`)) return;
+      try { await patchSubs(z, subsBody(x.subs.filter((y) => y.name !== n)), `Removing ${s.host}…`); toast(`${s.host} removed`); }
+      catch (ex) { toast(ex.message); }
+      render();
+    }
     else if (act === "od-ren-cancel") { S.odRename = null; render(); }
     else if (act === "od-tunnels") {
       S.doms = await api(`/__gate/api/domains/${encodeURIComponent(el.dataset.zone)}`, { method: "PATCH", body: JSON.stringify({ tunnels: el.dataset.v }) });
