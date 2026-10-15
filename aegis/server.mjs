@@ -694,7 +694,9 @@ const GATE_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsaf
 
 function send(res, status, body, headers = {}) {
   const sec = res.req && isSecure(res.req) ? { "Strict-Transport-Security": "max-age=31536000" } : {};
-  res.writeHead(status, { ...SEC_HEADERS, ...sec, ...headers });
+  // text without a type, under nosniff, is a page Chrome won't show (ERR_INVALID_RESPONSE)
+  const type = body && !Object.keys(headers).some((k) => k.toLowerCase() === "content-type") ? { "Content-Type": "text/plain; charset=utf-8" } : {};
+  res.writeHead(status, { ...SEC_HEADERS, ...sec, ...type, ...headers });
   res.end(body);
 }
 const sendJson = (res, status, obj, headers = {}) =>
@@ -823,13 +825,18 @@ async function handleGate(req, res, path, url, host, isMain) {
 
   // ---- dashboard: hand a login tunnel a ticket (asks for the login first if needed) ----
   if (path === "/__gate/sso" && req.method === "GET") {
-    const to = String(url.searchParams.get("to") || "").toLowerCase();
-    const port = burrowOn() ? tunnels.matchHost(to) : null;
-    if (port === null || !tunnels.get(port)) return send(res, 404, "Not found");
+    const to = String(url.searchParams.get("to") || "").toLowerCase().split(":")[0];
+    // a login tunnel, or another of your dashboards (the dashboards menu: other domains' dashboards)
+    const toDash = to !== host && isWebDash(to);
+    const port = !toDash && burrowOn() ? tunnels.matchHost(to) : null;
+    if (!toDash && (port === null || !tunnels.get(port))) {
+      log("sso: nowhere to send", clientIp(req), JSON.stringify(to).slice(0, 120));
+      return messagePage(res, 404, "Not one of yours", `${esc(to || "That address")} isn't a dashboard or a tunnel of this Aegis (any more). <a href="/">Back home</a>.`);
+    }
     const s = sessionOf(req);
     if (!s) return send(res, 302, "", { Location: "/__gate/login?next=" + encodeURIComponent(req.url) });
     const next = safeNext(url.searchParams.get("next"), "/");
-    return send(res, 302, "", { Location: `https://${to}/__gate/sso/callback?t=${sealTicket(to, s.sid)}&next=${encodeURIComponent(next)}` });
+    return send(res, 302, "", { Location: `https://${to}/__gate/sso/callback?t=${sealTicket(to, s.sid, deviceOf(req))}&next=${encodeURIComponent(next)}` });
   }
 
   // ---- dashboard, signed in only ----
