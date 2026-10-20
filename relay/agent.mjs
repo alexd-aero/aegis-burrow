@@ -38,7 +38,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 
-export const VERSION = "1.2.0";
+export const VERSION = "1.3.0";
 export const FEATURES = ["zones", "update", "edge"];
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
@@ -203,15 +203,20 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
                () => log(`aegis relay agent ${VERSION}: ${cfg.mode === "tls" ? "TLS on :" + (cfg.tlsPort || 443) : "behind Caddy on 127.0.0.1:" + cfg.httpPort} -> 127.0.0.1:${cfg.upstreamPort}, names ${zones().map((z) => "*" + z).join(" ")}`));
 
   // the certificate, as Caddy wants it (files + a site), or for the agent's own TLS
-  // one site block per zone that has its certificate
+  // one site block per zone that has its certificate. TLS 1.3 only, post-quantum key
+  // exchange first. HTTP/2 only: Caddy offers HTTP/3 (QUIC, over UDP) to every site,
+  // and through the relay it crawled where UDP is throttled (a 3.8 MB file took 23 s,
+  // ~1 s over HTTP/2), so these names tell browsers to forget it (Alt-Svc: clear).
   function caddySite() {
     const have = zones().filter((z) => z === suffix || existsSync(filesOf(z).crt));
     return `# Aegis Relay: ${have.map((z) => "*" + z).join(", ")} -> the Aegis at home, through the relay agent (written by it; don't edit)
 ` + have.map((z) => `*${z} {
 	tls ${filesOf(z).crt} ${filesOf(z).key} {
+		protocols tls1.3
 		curves x25519mlkem768 x25519 secp256r1
 	}
 	header -Server
+	header Alt-Svc clear
 	reverse_proxy 127.0.0.1:${cfg.httpPort} {
 		header_up X-Aegis-Client {remote_host}
 	}
@@ -221,6 +226,10 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   // Caddy: our site file, imported by the Caddyfile (a glob over its folder, or a line of
   // its own; an older hand-made site's import line becomes ours), checked with
   // `caddy validate` before the reload, and everything put back if it doesn't pass.
+  // an agent that updated itself brings its site up to date (once, and only if Caddy takes it)
+  if (cfg.mode === "caddy" && cfg.caddySite && existsSync(cfg.caddySite) && readFileSync(cfg.caddySite, "utf8") !== caddySite()) {
+    try { caddyInstall(); log("the relay's Caddy site is up to date"); } catch (e) { log(e.message); }
+  }
   function caddyInstall() {
     const site = cfg.caddySite, cf = cfg.caddyfile || "/etc/caddy/Caddyfile";
     const undo = [];

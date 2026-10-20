@@ -89,6 +89,8 @@ test("the agent's control: only your Aegis may hand it a certificate; Caddy gets
     assert.ok(existsSync(join(dir, "certs", "tunnel.key")));
     const site = readFileSync(join(dir, "caddy", "aegis-relay.caddy"), "utf8");
     assert.match(site, /\*\.tunnel\.example\.com \{/); assert.match(site, /header_up X-Aegis-Client \{remote_host\}/);
+    assert.match(site, /protocols tls1\.3\n\t\tcurves x25519mlkem768/, "TLS 1.3 only, post-quantum first");
+    assert.match(site, /header Alt-Svc clear/, "HTTP/2 only: browsers are told to drop HTTP/3");
     assert.ok(!existsSync(join(dir, "old.caddy")) && existsSync(join(dir, "old.caddy.before-aegis-relay")), "the hand-made site moved aside");
     r = await get(ctl, "/status", signed("GET", "/status"));
     assert.equal(JSON.parse(r.body).cert.names, "DNS:*.tunnel.example.com, DNS:edge-check.example.com");
