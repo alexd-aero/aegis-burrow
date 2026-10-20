@@ -123,7 +123,6 @@ const siteAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
 const SITE_BASE = 70000;        // site keys: 70001…99999 (the API takes 1-5 digits)
 const SITE_HOST = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?\.(github|gitlab)\.io$/;
 const SITE_PATH = /^\/(?:[A-Za-z0-9._~%-]+\/)*$/;
-const PASS_MIN = 8;
 const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 export const accessOf = (v) => (v === "public" || v === "password" ? v : "login");
 // A tunnel an addon made carries its id (t.app) and a few words about itself
@@ -174,7 +173,7 @@ export function parseSite(input) {
 // A tunnel's own password: Burrow keeps a scrypt hash, Aegis checks it.
 export function makeLock(password) {
   const pw = String(password ?? "");
-  if (pw.length < PASS_MIN) throw new Error(`A tunnel password is at least ${PASS_MIN} characters.`);
+  if (!pw) throw new Error("Set a password for this tunnel.");
   if (pw.length > 256) throw new Error("That password is too long.");
   const salt = randomBytes(16);
   return { salt: salt.toString("base64url"), hash: scryptSync(pw, salt, 32, SCRYPT).toString("base64url"),

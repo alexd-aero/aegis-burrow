@@ -1158,7 +1158,7 @@ const accessSeg = (id, cur, site) => `<div class="seg" id="${id}">${ACCESS.filte
   .map(([v, l]) => `<button type="button" data-v="${v}" class="${cur === v ? "on" : ""}">${l}</button>`).join("")}</div>`;
 const pwFields = (locked) => `<div class="pw-box" id="fPwBox">
     <div class="row flexwrap">
-      <label class="field grow"><span>Password <span class="faint">(8+ characters${locked ? "; empty keeps the current one" : ""})</span></span><input class="input" id="fPw" type="password" autocomplete="new-password" placeholder="${locked ? "unchanged" : ""}"></label>
+      <label class="field grow"><span>Password ${locked ? '<span class="faint">(empty keeps the current one)</span>' : ""}</span><input class="input" id="fPw" type="password" autocomplete="new-password" placeholder="${locked ? "unchanged" : ""}"></label>
       <label class="field grow"><span>Repeat it</span><input class="input" id="fPw2" type="password" autocomplete="new-password"></label>
     </div>
     <p class="faint small pw-note">${ICON.key} Whoever has it gets in; your Aegis login works too. Sealed with ML-KEM-768 + X25519 on its way, kept only as a scrypt hash.</p>
@@ -1167,7 +1167,7 @@ const pwFields = (locked) => `<div class="pw-box" id="fPwBox">
 async function sealedPw(m, needed) {
   const pw = m.querySelector("#fPw").value, pw2 = m.querySelector("#fPw2").value;
   if (!pw && !needed) return {};
-  if (pw.length < 8) throw new Error("Use at least 8 characters for the password.");
+  if (!pw) throw new Error("Type a password.");
   if (pw !== pw2) throw new Error("The two passwords differ.");
   if (!window.AegisSeal) throw new Error("The sealing script didn't load. Reload the page.");
   return { sealedPassword: await window.AegisSeal({ password: pw }) };

@@ -100,7 +100,9 @@ test("a tunnel's own password", async () => {
   assert.ok(!checkLock(lock, "correct hors"));
   assert.ok(!checkLock(lock, undefined));
   assert.ok(!JSON.stringify(lock).includes("correct"));
-  assert.throws(() => makeLock("short"), /at least 8/);
+  // any length works, even a few characters; only an empty one is refused
+  for (const pw of ["1", "abcd", "abcdefgh"]) assert.ok(checkLock(makeLock(pw), pw));
+  assert.throws(() => makeLock(""), /Set a password/);
 
   const { tm } = manager();
   try {
