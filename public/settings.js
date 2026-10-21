@@ -559,6 +559,7 @@ const INDEX = [
   ["Changelog: Selkies Forge", "changelog", "release notes forge desktops", "log:selkies-forge"],
   ["Changelog: Weft", "changelog", "release notes addons format weft architecture", "log:weft"],
   ["Burrow on or off", "modules", "tunnels engine module switch"],
+  ["Machine management", "modules", "machines fleet ssh link another machine remote host standby clone failover swap apps install graph", "/__gate/tunnels#/machines"],
   ["Serveo link", "modules", "public link serveousercontent phone url temporary"],
   ["Serveo link: send visitors on to the domain", "modules", "forward redirect serveo domain"],
   ["The full pack", "modules", "termix forge install welcome first run"],
@@ -667,6 +668,7 @@ function accountBody() {
 function modulesBody() {
   const on = !!S.me?.modules?.burrow;
   const sv = S.me?.serveo || {};
+  const fl = S.me?.fleet || { enabled: false, machines: 0 };
   return `<div class="mod">
       <img src="/__gate/logos/burrow.svg" alt="" width="46" height="46">
       <div class="grow"><b>Burrow</b> <span class="pill">comes with Aegis</span>
@@ -683,6 +685,16 @@ function modulesBody() {
         ${sv.on && S.me?.domain ? `<label class="row sub-switch"><span class="switch"><input type="checkbox" id="modServeoFwd" ${sv.forward !== false ? "checked" : ""}><i></i></span>
           <span class="small">Send its visitors on to <span class="mono">${h(S.me.domain.mainHost)}</span> <span class="faint">(off: the serveo link is a dashboard of its own, handy where the domain doesn't load, like on this machine's own network)</span></span></label>` : ""}</div>
       <label class="switch" title="${sv.on ? "On" : "Off"}"><input type="checkbox" id="modServeo" ${sv.on ? "checked" : ""} aria-label="Serveo link on or off"><i></i></label>
+    </div>
+    <div class="mod">
+      <span class="mod-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>
+      <div class="grow"><b>Machine management</b> ${fl.machines ? `<span class="pill ok">${fl.machines} linked</span>` : '<span class="pill">new</span>'}
+        <p class="muted small">Other machines you own, linked to this one with one command you run on them. Aegis makes itself one SSH key; from then on this
+        dashboard draws them on a canvas, reads what they are made of and what runs on them, installs apps on them, moves an app and its data between two of
+        them, and can keep a copy of this gate on one that takes over if this host goes down. Off until you switch it on, and nothing reaches out until a
+        machine is linked.</p>
+        ${fl.enabled ? `<p class="small"><a class="link" href="/__gate/tunnels#/machines">Open Machines</a>${fl.standby ? ` · ${fl.standby} standby` : ""}${fl.unreachable ? ` · <span class="err-msg">${fl.unreachable} unreachable</span>` : ""}</p>` : ""}</div>
+      <label class="switch" title="${fl.enabled ? "On" : "Off"}"><input type="checkbox" id="modFleet" ${fl.enabled ? "checked" : ""} aria-label="Machine management on or off"><i></i></label>
     </div>
     <div class="mod">
       <img src="/__gate/logos/aegis-burrow.svg" alt="" width="46" height="46">
@@ -884,6 +896,15 @@ function wireForms() {
     if (!mb.checked && !confirm("Switch Burrow off? Its tunnels stop answering until you switch it back on (they are kept).")) { mb.checked = true; return; }
     try { S.me = await post("/__gate/api/prefs", { modules: { burrow: mb.checked } }); toast(mb.checked ? "Burrow is on" : "Burrow is off"); chrome("settings"); render(); }
     catch (ex) { toast(ex.message); mb.checked = !mb.checked; }
+  });
+  const mfl = $("#modFleet");
+  if (mfl) mfl.addEventListener("change", async () => {
+    if (!mfl.checked && !confirm("Switch machine management off? The machines are kept, and so are their keys; nothing here can reach them until you switch it back on.")) { mfl.checked = true; return; }
+    try {
+      S.me = await post("/__gate/api/prefs", { modules: { fleet: mfl.checked } });
+      toast(mfl.checked ? "Machine management is on" : "Machine management is off");
+      chrome("settings"); render();
+    } catch (ex) { toast(ex.message); mfl.checked = !mfl.checked; }
   });
   const mf = $("#modServeoFwd");
   if (mf) mf.addEventListener("change", async () => {

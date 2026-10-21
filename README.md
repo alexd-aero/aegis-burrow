@@ -176,7 +176,7 @@ Everything else lives in **Settings**:
 | **Sign-in** | The gate's name, the line on the sign-in page, how long a sign-in lasts, the lockout after wrong tries |
 | **Updates** | Check for a new version and install it in one click; **Update by itself** on or off |
 | **Changelog** | What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture, release by release |
-| **Modules** | Burrow on or off; the **serveo link** on or off (with its address); the pack |
+| **Modules** | Burrow on or off; **machine management** on or off; the **serveo link** on or off (with its address); the pack |
 | **Domain** | Link a domain through Cloudflare with the subdomain you pick, **change that name later**, or unlink it. **Other domains** beside it, each with **subdomains** of its own: a wildcard one (`*.apps.other.net`, every tunnel at `NAME.apps.other.net`, through your VPS) or one tunnel's (`blog.other.net`). The gear by each domain in the dashboards menu (home page, top right) opens its settings |
 | **Termix** | Install, open, remove (its data volume is kept) |
 | **Login** | Your username and password |
@@ -192,6 +192,34 @@ Termix normally answers at the root of the dashboard's address (the home page st
 - **Termix** is told its base path (its page carries a `termix-base-path` setting), so its API and terminals follow it there. The root then always shows the home page.
 - **Selkies Forge** is served through the gate; what its page asks for at absolute paths (`/api/…`, `/app.js`) is recognised by where it came from. Its own address keeps working on the machine.
 - Paths are `/name` or `/__gate/name`; Aegis's own pages (`/__gate/login`, `/__gate/settings`…) can't be taken, and two apps can't share one. Burrow's tunnels always keep addresses of their own.
+
+## 🖧 Machine management
+
+*Off until you switch it on, in Settings → Modules.* Other machines you own, run from this dashboard.
+
+**Linking one** takes a single command. The dashboard hands it to you; you run it on the other machine:
+
+```sh
+curl -fsSL "https://your-dashboard/__gate/fleet/join?t=…" | sh
+```
+
+The link is good once, for half an hour, and the dashboard shows you the script before you run it. It appends **one** public key — Aegis makes itself an `ed25519` key the first time, kept in `data/fleet/` — to that user's `~/.ssh/authorized_keys`, then tells this dashboard the machine's name, the addresses it answers on and its SSH port. Nothing else leaves it, and it is never asked for a password. A machine whose `authorized_keys` already has the key can be added by hand instead, with any address that reaches it: a domain, a LAN or subnet address, a public address, a Tailscale name, a bare hostname.
+
+**Machines** then shows up under Burrow: this machine in the middle of a canvas, the linked ones around it, drag to move, scroll to zoom (a phone gets the same machines as a list). Click one for:
+
+- **What it is made of**: system, model, cores, memory, disk, how long it has been up.
+- **How loaded it is**: processor, memory, disk and temperature, read live over the link.
+- **What runs on it**: Aegis × Burrow, Selkies Forge, Bulwark and Termix are recognised by name and version, with a link to open each; everything else it runs is there too (containers and services, folded away).
+- **Install an app on it** — the project's own published installer, run over the link, its output in front of you.
+- **Open it in Termix** — adds it to Termix as a host (address, SSH port, user) and opens it. It asks first, every time: Termix's own login is used once and never kept, and the machine signs in with this gate's key unless you give it a password instead.
+- **Swap an app with another machine** — Selkies Forge on A and the one on B change places, data and all. Both are stopped first and started again after, and neither machine's old data is deleted: it is kept beside the new one.
+- **Forget** — takes the key back off the machine and drops it. Nothing installed on it is touched.
+
+### The standby
+
+One linked machine can keep a **copy of this gate**: its code, this login, the domain and the tunnels, refreshed a few times a day. The copy does not run. A small watcher on that machine checks this host every half minute, and if it misses four checks in a row it starts the copy, says in its own dashboard what went wrong, and — only while this host is answering at all — runs a restart script on it, trying every way this machine might start Aegis. When this host is back for three checks running, the copy steps aside again.
+
+This gate's **machine key is not copied**: a standby cannot reach your other machines. The watcher gets a key of its own, allowed in here only to run that restart script, and taken away again when you switch the standby off.
 
 ## 🕳️ Burrow, the engine
 
@@ -386,6 +414,7 @@ forge-addon.json  forge/         how Selkies Forge installs, links and runs it
   data/state.json                everything you change in the UI
   data/tunnels.json  metrics.json  favicons/  revoked.json  cf/  control.sock  addons.json
   data/addons/<id>/repo  data/addons/<id>/data     Burrow's addons
+  data/fleet.json  data/fleet/id_ed25519           the machines you linked, and the key that reaches them
 ~/.config/aegis/aegis.json       where all that is (Selkies Forge reads it)
 ~/.config/aegis/integrations/    where other apps plug in
 ```

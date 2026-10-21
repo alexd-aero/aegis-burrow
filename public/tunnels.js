@@ -2,6 +2,7 @@
 // through data-act attributes and one delegated listener.
 import { chrome, AU, addonUpdCard, addonUpdClick } from "./common.js";
 import { distroLogo, distroLabel } from "./distros.js";
+import * as FLEET from "./fleet.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
@@ -39,6 +40,7 @@ const ICON = {
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 5.5V11c0 4.6 3 8.3 7 10 4-1.7 7-5.4 7-10V5.5z"/></svg>',
   key: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.7-8.7M17 6l3 3M14.5 8.5l2 2"/></svg>',
+  machine: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
   term: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M12 16h7"/></svg>',
 };
 
@@ -198,6 +200,7 @@ function subtabs() {
   return `${downCards()}<nav class="subtabs" aria-label="Burrow">
     <button data-act="tab" data-v="list" class="${S.view === "list" ? "on" : ""}">${ICON.tunnel}Tunnels${S.off ? "" : `<span class="count">${S.list.length}</span>`}</button>
     <button data-act="tab" data-v="addons" class="${S.view === "addons" ? "on" : ""}">${ICON.box}Addons${installed != null ? `<span class="count">${installed}</span>` : ""}${AU.list.length ? '<span class="newchip">update</span>' : ""}</button>
+    ${S.me?.modules?.fleet ? `<button data-act="tab" data-v="machines" class="${S.view === "machines" ? "on" : ""}">${ICON.machine}Machines${FLEET.machines().length ? `<span class="count">${FLEET.machines().length}</span>` : ""}</button>` : ""}
     ${bulwark() ? "" : `<button data-act="tab" data-v="shield" class="${S.view === "shield" ? "on" : ""}">${ICON.shield}Shield${S.shield?.stats?.bans ? `<span class="count">${S.shield.stats.bans}</span>` : ""}</button>`}
     ${forgeHere ? `<button data-act="tab" data-v="forge" class="${S.view === "forge" ? "on" : ""}"><img class="tab-logo" src="/__gate/logos/forge.svg" alt="">Selkies Forge${forgeReal && (a || b) ? `<i class="dot ${dot}"></i>` : ""}${upd ? '<span class="newchip">update</span>' : ""}</button>` : ""}
   </nav>`;
@@ -682,16 +685,24 @@ async function jobRun(id, op, body) {
   let job;
   try { job = (await api(`/__gate/api/addons/${id}/${op}`, { method: "POST", body: JSON.stringify(body || {}) })).job; }
   catch (e) { toast(e.message); return; }
+  jobFollow(job, `/__gate/api/addons/jobs/${job.id}`, (v) => {
+    S.scan = null; S.addons = null;
+    if (op === "update" && v.state === "done") afterAddonUpdate(id);
+  }, true);
+}
+
+// One job, one modal: the phase, the bar and the far side's own output.
+function jobFollow(job, pollUrl, after, cancellable) {
   let since = 0, done = false;
   openModal(`<h2 id="jobT">${h(job.label)}</h2><p id="jobP" class="mono small">${h(job.phase)}</p>
     <div class="jbar"><i id="jobB" style="width:${Math.round(job.progress * 100)}%"></i></div>
     <pre class="jlog" id="jobL"></pre>
-    <div class="modal-actions" id="jobA"><button class="btn ghost" data-act="job-cancel" data-job="${job.id}">Cancel</button></div>`);
+    <div class="modal-actions" id="jobA">${cancellable ? `<button class="btn ghost" data-act="job-cancel" data-job="${job.id}">Cancel</button>` : ""}</div>`);
   S.modal.querySelector(".modal").classList.add("wide");
   const tick = async () => {
     if (!S.modal || done) return;
     try {
-      const v = await api(`/__gate/api/addons/jobs/${job.id}?since=${since}`);
+      const v = await api(`${pollUrl}?since=${since}`);
       since = v.next;
       const L = S.modal.querySelector("#jobL");
       for (const l of v.lines) { const d = document.createElement("div"); d.textContent = l.line; if (l.cls) d.className = l.cls; L.append(d); }
@@ -703,8 +714,7 @@ async function jobRun(id, op, body) {
         S.modal.querySelector(".jbar").classList.add(v.state === "done" ? "ok" : "bad");
         const open = v.result && v.result.open_url;
         S.modal.querySelector("#jobA").innerHTML = `${open ? `<a class="btn" href="${h(open)}" target="_blank" rel="noopener">${ICON.ext} Open</a>` : ""}<button class="btn primary" data-act="close">Close</button>`;
-        S.scan = null; S.addons = null;
-        if (op === "update" && v.state === "done") afterAddonUpdate(id);
+        after?.(v);
         return;
       }
     } catch { /* Burrow restarting: keep asking */ }
@@ -1051,7 +1061,8 @@ async function shieldCheck(ip) {
 function render() {
   if (S.modal) return;          // never repaint under an open form
   if (S.view === "detail") renderDetail(); else if (S.view === "integ") renderInteg(); else if (S.view === "forge") renderAddon();
-  else if (S.view === "addons") renderAddons(); else if (S.view === "shield") renderShield(); else { renderList(); wirePanels(); }
+  else if (S.view === "addons") renderAddons(); else if (S.view === "shield") renderShield();
+  else if (S.view === "machines") FLEET.render(app, subtabs()); else { renderList(); wirePanels(); }
   const to = S.scrollTo && document.getElementById(S.scrollTo);
   if (to) { S.scrollTo = null; to.scrollIntoView({ block: "center" }); to.classList.remove("flash"); void to.offsetWidth; to.classList.add("flash"); }
 }
@@ -1064,6 +1075,7 @@ async function refresh() {
   try {
     if (S.view === "detail") S.detail = await api(`/__gate/api/tunnels/${S.port}`);
     else if (S.view === "shield") S.shield = await api("/__gate/api/shield");
+    else if (S.view === "machines") await FLEET.load();
     else if (S.view === "integ") S.integData = await api(`/__gate/api/integrations/${encodeURIComponent(S.integ)}/desktops`);
     else if (S.view === "addons") {
       S.addons = (await api("/__gate/api/addons")).addons;
@@ -1111,12 +1123,14 @@ async function refresh() {
 }
 function schedule() {
   clearInterval(S.timer);
-  S.timer = setInterval(refresh, S.view === "detail" ? 2000 : S.view === "forge" || S.view === "addons" ? 5000 : 3000);
+  S.timer = setInterval(refresh, S.view === "detail" ? 2000 : S.view === "machines" ? 10000
+                                 : S.view === "forge" || S.view === "addons" ? 5000 : 3000);
 }
 function go(view, port) {
   S.view = view; S.detail = null;
   if (view === "integ") { S.integ = port; S.integData = null; S.port = null; } else S.port = port || null;
-  const want = view === "detail" ? `#/t/${port}` : view === "integ" ? `#/i/${encodeURIComponent(port)}` : view === "forge" ? "#/forge" : view === "addons" ? "#/addons" : view === "shield" ? "#/shield" : "#/";
+  const want = view === "detail" ? `#/t/${port}` : view === "integ" ? `#/i/${encodeURIComponent(port)}` : view === "forge" ? "#/forge"
+    : view === "addons" ? "#/addons" : view === "shield" ? "#/shield" : view === "machines" ? "#/machines" : "#/";
   if (location.hash !== want) history.pushState(null, "", want);
   render(); refresh(); schedule();
   window.scrollTo(0, 0);
@@ -1126,7 +1140,8 @@ function fromHash() {
   const m = /^#\/t\/(\d+)/.exec(location.hash);
   const i = /^#\/i\/([a-z0-9-]+)/.exec(location.hash);
   if (m) go("detail", Number(m[1])); else if (i) go("integ", i[1]); else if (/^#\/(forge|addon)$/.test(location.hash)) go("forge");
-  else if (location.hash === "#/addons") go("addons"); else if (location.hash === "#/shield") go("shield"); else go("list");
+  else if (location.hash === "#/addons") go("addons"); else if (location.hash === "#/shield") go("shield");
+  else if (location.hash === "#/machines") go("machines"); else go("list");
 }
 
 // ------------------------------------------------------------------ modals
@@ -1368,9 +1383,14 @@ document.addEventListener("click", async (e) => {
   const port = Number(el.dataset.port || S.port);
   if (act === "integ" && e.target.closest("[data-stop]")) return;
   try {
+    if (act === "integ" && FLEET.askWhere(S.me, (S.integrations.find((i) => i.id === el.dataset.id) || {}).kind,
+                                          (S.integrations.find((i) => i.id === el.dataset.id) || {}).name || "it",
+                                          `/__gate/tunnels#/i/${encodeURIComponent(el.dataset.id)}`,
+                                          (p) => { if (p.self) go("integ", el.dataset.id); else window.open(p.url, "_blank", "noopener"); })) return;
     if (act === "open") go("detail", port);
     else if (act === "home") go("list");
-    else if (act === "tab") go(["forge", "addons", "shield"].includes(el.dataset.v) ? el.dataset.v : "list");
+    else if (act === "tab") go(["forge", "addons", "shield", "machines"].includes(el.dataset.v) ? el.dataset.v : "list");
+    else if (act.startsWith("fl-")) await FLEET.click(el, act);
     else if (act === "bridge-check") loadBridge(true);
     else if (act === "bridge-ask") bridgeAsk();
     else if (act === "bridge-manual") { S.manual = !S.manual; render(); if (S.manual) setTimeout(() => document.querySelector(".ab-steps")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); }
@@ -1491,5 +1511,6 @@ document.addEventListener("error", (e) => {
   if (img.tagName === "IMG" && img.dataset.fallback) img.parentElement.textContent = img.dataset.fallback;
 }, true);
 
+FLEET.init({ api, toast, openModal, closeModal, render, jobRun: (job, pollUrl, after) => jobFollow(job, pollUrl, after, false) });
 chrome("tunnels").then((me) => { S.me = me; AU.list = me?.addonUpdates || []; S.updAt = Date.now(); loadPanels(); render(); loadUpdates(true); });
 fromHash();

@@ -3,6 +3,7 @@
 // Settings → Customize the home page (/?customize=1; the gear opens Settings).
 // Saved in data/state.json (home).
 import { $, h, api, post, toast, ICONS, updateBanner, freshUpdate, notices, dashSwitch, AU, addonUpdCard, addonUpdClick } from "./common.js";
+import { askWhere } from "./fleet.js";
 
 const opts = $("#opts"), extra = $("#extra");
 const S = { me: null, draft: null, termixJob: false };
@@ -23,8 +24,8 @@ function available(me) {
     text: "Publish a port on its own address, with live traffic and clients.", foot: me.domain ? `tunnel-PORT-${me.domain.mainHost}` : "trycloudflare.com" });
   for (const i of me.integrations) {
     out.push(i.full
-      ? { id: "app:" + i.id, href: `/__gate/tunnels#/i/${encodeURIComponent(i.id)}`, img: i.logo, title: i.name, text: "Desktops, their links and tunnels, start and stop.", foot: i.version ? `v${i.version}` : "connected" }
-      : { id: "app:" + i.id, href: i.dashboard, ext: true, img: i.logo, title: i.name, text: "Open its dashboard.", foot: i.version ? `v${i.version}` : "connected" });
+      ? { id: "app:" + i.id, app: i.kind, href: `/__gate/tunnels#/i/${encodeURIComponent(i.id)}`, img: i.logo, title: i.name, text: "Desktops, their links and tunnels, start and stop.", foot: i.version ? `v${i.version}` : "connected" }
+      : { id: "app:" + i.id, app: i.kind, href: i.dashboard, ext: true, img: i.logo, title: i.name, text: "Open its dashboard.", foot: i.version ? `v${i.version}` : "connected" });
   }
   for (const a of (me.apps || [])) out.push({ id: "addon:" + a.id, href: a.href, img: a.logo, title: a.name, text: a.text, foot: "behind your Aegis login" });
   for (const l of (me.home?.links || [])) {
@@ -51,7 +52,7 @@ function iconOf(t) {
 }
 
 function tile(t) {
-  return `<a href="${h(t.href)}" class="card lit opt"${t.ext ? ' target="_blank" rel="noopener"' : ""}>
+  return `<a href="${h(t.href)}" class="card lit opt"${t.app ? ` data-app="${h(t.app)}"` : ""}${t.ext ? ' target="_blank" rel="noopener"' : ""}>
     ${iconOf(t)}
     <div><h2>${h(t.title)}</h2>${t.text ? `<p>${h(t.text)}</p>` : ""}</div>
     <div class="go"><span>${h(t.foot || "")}</span>${t.ext ? ICONS.ext : ICONS.arrow}</div>
@@ -274,6 +275,16 @@ document.addEventListener("click", async (e) => {
       $("#termixOffer")?.remove(); toast("You can add it later under Settings");
     }
   } catch (ex) { toast(ex.message); el.disabled = false; }
+});
+// A tile for an app that also runs on a linked machine asks which one first.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("a.opt[data-app]");
+  if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+  const href = a.getAttribute("href");
+  const asked = askWhere(S.me, a.dataset.app, a.querySelector("h2")?.textContent || "it", href, (p) => {
+    if (p.self) location.href = href; else window.open(p.url, "_blank", "noopener");
+  });
+  if (asked) e.preventDefault();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.scrim) closePanel(); });
 

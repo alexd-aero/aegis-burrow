@@ -54,6 +54,9 @@ import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
+import { Fleet, FleetError } from "./fleet.mjs";
+import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, toTermix,
+         standbyOn, standbyOff, standbyRefresh, takeover, takeoverNotice } from "./fleet-ops.mjs";
 import { Pack } from "./pack.mjs";
 import { Updater } from "./updater.mjs";
 import { listIntegrations, getIntegration, publicView, forgeDesktops, forgeAction, addonView } from "./integrations.mjs";
@@ -189,7 +192,7 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "ui.css", "login.css",
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "ui.css", "login.css",
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/bulwark.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
@@ -405,6 +408,13 @@ const bridgeTick = () => adoptForge({ addons, log }).catch((e) => log("bridge:",
 setTimeout(bridgeTick, 20000);
 setInterval(bridgeTick, 120000);
 const termix = new Termix({ settings, log });
+// Machine management: other machines you own, reached over SSH (aegis/fleet.mjs).
+// Off until Settings -> Modules switches it on; every route below says so.
+const fleet = new Fleet({
+  settings, dir: join(DATA, "fleet"), file: join(DATA, "fleet.json"), log, version: VERSION, notify,
+  dashboards: () => [...dashboards(null).map((d) => d.host), ...(serveo.host() ? [serveo.host()] : []),
+                     ...(settings.get("extraHosts") || []), ...localAddrs, "localhost", "127.0.0.1"],
+});
 const pack = new Pack({ settings, termix, log, tunnels, addon: { has: (id) => !!addons.load()[id]?.installed, install: (id, say) => installDefault(id, say) } });
 // Updates from GitHub, by hand or by itself (Settings → Updates)
 const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo.stop(); process.exit(0); } });
@@ -839,6 +849,36 @@ async function handleGate(req, res, path, url, host, isMain) {
     return send(res, 302, "", { Location: `https://${to}/__gate/sso/callback?t=${sealTicket(to, s.sid, deviceOf(req))}&next=${encodeURIComponent(next)}` });
   }
 
+  // ---- linking a machine ----
+  // The other machine runs one command; it fetches the script below and
+  // calls back. Both are opened with the one-shot token from "Link a
+  // machine", good for half an hour, and neither reads or sets a session.
+  if (path === "/__gate/fleet/join" && req.method === "GET") {
+    const t = url.searchParams.get("t") || "";
+    const pend = fleet.enabled() ? fleet.pending(t) : null;
+    if (!pend) {
+      audit("machine: link command refused", req);
+      return send(res, 404, "That link command has expired. Make a new one in the dashboard.\n");
+    }
+    log("fleet: handing the link script to", clientIp(req));
+    return send(res, 200, fleet.joinScript(t, pend.base), { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+  }
+  if (path === "/__gate/fleet/claim" && req.method === "POST") {
+    const t = url.searchParams.get("t") || "";
+    if (!fleet.enabled() || !fleet.pending(t)) {
+      audit("machine: claim refused", req);
+      return sendJson(res, 404, { error: "that link command has expired" });
+    }
+    try {
+      const r = await fleet.claim(t, await readJsonBody(req), clientIp(req));
+      audit("machine: linked", req, { machine: r.id, name: r.name });
+      notify("fleet", { level: "info", key: "linked", title: "{n} {machine|machines} linked",
+                        body: `${r.name} answered the link command and is now in Machines.`, link: "/__gate/tunnels#/machines",
+                        items: [{ label: r.name, sub: clientIp(req) || "", tag: "linked" }] });
+      return sendJson(res, 200, r);
+    } catch (e) { return sendJson(res, 400, { error: e.message }); }
+  }
+
   // ---- dashboard, signed in only ----
   if (!isAuthed(req)) {
     if (path.startsWith("/__gate/api/")) return sendJson(res, 401, { error: "login required" });
@@ -898,7 +938,8 @@ function me(req) {
     termix: !!settings.get("termix"),
     integrations: listIntegrations().map((i) => viewOf(i)),
     tunnels: tunnels.tunnels.size,
-    modules: { burrow: burrowOn() },
+    modules: { burrow: burrowOn(), fleet: fleet.enabled() },
+    fleet: fleetSummary(),
     home: settings.get("home") || null,
     login: { subtitle: (settings.get("login") || {}).subtitle || "Secure channel" },
     sessionDays: sessionTtl() / 864e5, lockout: { attempts: lockout().fails, minutes: lockout().windowMs / 60000 },
@@ -949,7 +990,11 @@ function savePrefs(p) {
   if ("sessionDays" in p) patch.sessionDays = Math.max(1, Math.min(365, Math.round(Number(p.sessionDays) || 30)));
   if ("lockout" in p) patch.lockout = { attempts: Math.max(3, Math.min(50, Math.round(Number(p.lockout?.attempts) || 5))),
                                         minutes: Math.max(1, Math.min(1440, Math.round(Number(p.lockout?.minutes) || 15))) };
-  if ("modules" in p) burrow.setOn(p.modules?.burrow !== false);
+  if ("modules" in p) {
+    const mod = p.modules || {};
+    if ("burrow" in mod) burrow.setOn(mod.burrow !== false);
+    if ("fleet" in mod) fleet.setEnabled(!!mod.fleet);
+  }
   if ("serveo" in p) setServeo(p.serveo !== false);
   if ("autoUpdate" in p) updater.setAuto(!!p.autoUpdate);
   if ("serveoForward" in p) patch.serveoForward = p.serveoForward !== false;
@@ -1099,6 +1144,10 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/termix/install" && req.method === "POST") return sendJson(res, 200, termix.install());
     if (path === "/__gate/api/termix/remove" && req.method === "POST") return sendJson(res, 200, await termix.remove());
 
+    // machines
+    if (path === "/__gate/api/fleet" && req.method === "GET") return sendJson(res, 200, fleetListing());
+    if (path.startsWith("/__gate/api/fleet/")) return await handleFleet(req, res, path, url);
+
     // account
     if (path === "/__gate/api/password" && req.method === "POST") {
       const ip = clientIp(req);
@@ -1189,6 +1238,126 @@ async function handleAddons(req, res, path, url) {
     return sendJson(res, 400, { error: e.message });
   }
 }
+
+// ---------- machine management (aegis/fleet.mjs, aegis/fleet-ops.mjs) ----------
+
+// What the home page and the chooser need: is it on, how many machines, and
+// which of them has an app you may want to open.
+function fleetSummary() {
+  if (!fleet.enabled()) return { enabled: false, machines: 0, apps: {} };
+  const list = fleet.list(), now = Date.now();
+  const apps = {};
+  for (const m of list) {
+    for (const a of (m.probe?.apps || [])) {
+      (apps[a.id] ||= []).push({ machine: m.id, name: m.name, address: m.address, url: a.url,
+                                 version: a.version, up: !!m.lastSeen && now - m.lastSeen < 5 * 60000 });
+    }
+  }
+  return { enabled: true, machines: list.length, standby: list.filter((m) => m.standby).length,
+           unreachable: list.filter((m) => m.lastError).length, apps, takeover: takeover() };
+}
+
+function fleetListing() {
+  if (!fleet.enabled()) return { enabled: false, machines: [], hub: fleet.hub(), catalog: fleetCatalog() };
+  return { ...fleet.view(), catalog: fleetCatalog(), termix: !!settings.get("termix"), takeover: takeover(),
+           here: hereApps() };
+}
+const fleetCatalog = () => Object.entries(FLEET_APPS).map(([id, a]) =>
+  ({ id, name: a.name, note: a.note, installable: !!a.install, swappable: !!a.swappable }));
+
+// The apps on this machine, in the same shape as a linked machine's, so the
+// graph can draw this host like any other.
+function hereApps() {
+  const out = [{ id: "aegis-burrow", name: FLEET_APPS["aegis-burrow"].name, version: VERSION, url: null }];
+  for (const i of listIntegrations()) {
+    if (FLEET_APPS[i.kind]) out.push({ id: i.kind, name: i.name, version: i.version, url: i.url });
+  }
+  if (settings.get("termix")) out.push({ id: "termix", name: "Termix", version: null, url: null });
+  if (addons.load().bulwark?.installed) out.push({ id: "bulwark", name: "Bulwark", version: null, url: null });
+  return out;
+}
+
+async function handleFleet(req, res, path, url) {
+  const ok = (o) => sendJson(res, 200, o);
+  const rest = path.slice("/__gate/api/fleet/".length);
+  try {
+    fleet.need();
+    const body = req.method === "GET" ? {} : await readJsonBody(req);
+
+    if (rest === "invite" && req.method === "POST") {
+      const inv = await fleet.invite({ base: body.base || `${isSecure(req) ? "https" : "http"}://${req.headers.host}`, label: body.label });
+      audit("machine: link command made", req, { base: inv.base });
+      return ok(inv);
+    }
+    if (rest === "add" && req.method === "POST") {
+      const r = await fleet.addManual(body);
+      audit("machine: linked by hand", req, { machine: r.id, address: String(body.address || "").slice(0, 80) });
+      return ok({ ...r, machines: fleet.view().machines });
+    }
+    if (rest === "swap" && req.method === "POST") {
+      if (!body.confirm) return sendJson(res, 400, { error: "A swap stops both apps and moves their data. Confirm it first." });
+      const job = fleetSwap(fleet, String(body.app || ""), String(body.a || ""), String(body.b || ""));
+      audit("machine: swap started", req, { app: body.app, a: body.a, b: body.b });
+      return ok({ job });
+    }
+    if (rest.startsWith("jobs/")) return ok(fleet.job(rest.slice(5)).view(Number(url.searchParams.get("since")) || 0));
+    if (rest.startsWith("apps/")) return ok({ app: rest.slice(5), where: fleet.whereIs(rest.slice(5)) });
+
+    const m = /^(m-[0-9a-f]{10})(?:\/([a-z]+))?(?:\/([a-z]+))?$/.exec(rest);
+    if (!m) return sendJson(res, 404, { error: "not found" });
+    const [, id, what, more] = m;
+
+    if (!what && req.method === "GET") return ok(fleet.detail(id));
+    if (!what && req.method === "PATCH") return ok(fleet.rename(id, body.name) && fleet.detail(id));
+    if (!what && req.method === "DELETE") {
+      const r = await fleet.forget(id, url.searchParams.get("keep-key") !== "1");
+      audit("machine: forgotten", req, { machine: id, keyRemoved: r.removed });
+      return ok({ ...r, machines: fleet.view().machines });
+    }
+    if (what === "probe" && req.method === "POST") return ok(fleet.detail((await fleet.probe(id, { fresh: true })).id));
+    if (what === "verify" && req.method === "POST") return ok(fleet.detail((await fleet.verify(id)).id));
+    if (what === "install" && req.method === "POST") {
+      audit("machine: install started", req, { machine: id, app: body.app });
+      return ok({ job: fleetInstall(fleet, id, String(body.app || "")) });
+    }
+    if (what === "termix" && req.method === "POST") {
+      if (!body.confirm) return sendJson(res, 400, { error: "Adding the machine to Termix needs your say-so first." });
+      const r = await toTermix(fleet, termix, id, body);
+      audit("machine: added to Termix", req, { machine: id, auth: body.auth === "password" ? "password" : "key" });
+      return ok(r);
+    }
+    if (what === "standby" && req.method === "POST") {
+      if (more === "refresh") return ok({ job: standbyRefresh(fleet, id) });
+      if (body.on === false) {
+        audit("machine: standby off", req, { machine: id });
+        return ok({ job: standbyOff(fleet, id) });
+      }
+      if (!body.confirm) return sendJson(res, 400, { error: "The standby copies this gate (login included) to that machine. Confirm it first." });
+      audit("machine: standby on", req, { machine: id, url: String(body.url || "").slice(0, 120) });
+      return ok({ job: standbyOn(fleet, id, body) });
+    }
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (!(e instanceof FleetError)) log("fleet:", e.message);
+    return sendJson(res, 400, { error: e.message });
+  }
+}
+
+// A clone that took over says so, loudly, on every start and while it keeps
+// trying to bring the other host back.
+takeoverNotice(notify);
+setInterval(() => { try { takeoverNotice(notify); } catch (e) { log("fleet:", e.message); } }, 60000).unref();
+
+// Keep the standby's copy current, a few times a day, quietly.
+setInterval(() => {
+  if (!fleet.enabled()) return;
+  for (const m of fleet.list()) {
+    if (!m.standby) continue;
+    const age = Date.now() - (m.standbyState?.at || 0);
+    if (age < 6 * 3600e3) continue;
+    try { standbyRefresh(fleet, m.id); } catch (e) { log("fleet: standby refresh", m.name, e.message); }
+  }
+}, 30 * 60000).unref();
 
 // Linking Selkies Forge here finishes the bridge from our side too: once that
 // job is done, the Forge is asked to add us (if it hasn't).

@@ -1141,3 +1141,153 @@ a.ds-row:hover, a.ds-row:focus-visible { background: rgba(255,255,255,.05); }
   .hello { gap: 8px; } .hello > div:not([class]) { min-width: 0; } .hello > div:not([class]) b, .hello > div:not([class]) span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ds-btn { padding: 0 9px; gap: 0; } .ds-btn .ds-n { display: none; }
 }
+
+/* ---------------------------------------------------------------- machines */
+/* The Machines tab: a canvas of this machine and the ones linked to it, and
+   a panel for whichever one is open. Same room, same surfaces. */
+.fl-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 14px; align-items: start; }
+.fl-graph { padding: 0; overflow: hidden; }
+.fl-canvas { position: relative; height: 460px; overflow: hidden; cursor: grab; touch-action: none;
+  background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,.05) 1px, transparent 0); background-size: 26px 26px; }
+.fl-canvas:active { cursor: grabbing; }
+.fl-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.fl-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.fl-edge { fill: none; stroke: var(--line-hi); stroke-width: 1.6; opacity: .5; }
+.fl-edge.on { stroke: var(--ok); opacity: .55; }
+.fl-edge.off { stroke: var(--err); opacity: .45; stroke-dasharray: 5 5; }
+.fl-edge.standby { stroke-width: 2.4; }
+.fl-node { position: absolute; width: 230px; display: flex; gap: 10px; padding: 10px 11px; border-radius: 13px;
+  background: var(--raise); border: 1px solid var(--line-2); cursor: pointer; user-select: none;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45); transition: border-color .15s, box-shadow .15s, transform .15s; }
+.fl-node:hover { border-color: var(--line-hi); transform: translateY(-1px); }
+.fl-node.on { border-color: var(--text); box-shadow: 0 0 0 1px var(--text), 0 10px 30px rgba(0,0,0,.5); }
+.fl-node.hub { background: linear-gradient(180deg, #17191d, #101114); cursor: default; }
+.fl-node.down { opacity: .75; }
+.fl-ico { width: 34px; height: 34px; flex: none; border-radius: 10px; display: grid; place-items: center;
+  border: 1px solid var(--line-2); color: var(--muted); background: var(--card-2); }
+.fl-node.hub .fl-ico { color: var(--ok); border-color: rgba(61,220,151,.3); }
+.fl-ico svg { width: 17px; height: 17px; }
+.fl-body { min-width: 0; display: grid; gap: 4px; }
+.fl-body b { font-size: 13px; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-sub { color: var(--muted); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-sub .dot { margin: 0 3px 0 0; }
+.fl-tag { font: 600 9px/1.6 var(--sans); letter-spacing: .08em; text-transform: uppercase; padding: 0 5px;
+  border-radius: 5px; color: var(--ok); border: 1px solid rgba(61,220,151,.35); }
+.fl-meters { display: flex; gap: 5px; }
+.fl-meter { position: relative; flex: 1; height: 13px; border-radius: 4px; background: #1d1f23; overflow: hidden; }
+.fl-meter i { position: absolute; inset: 0 auto 0 0; background: rgba(255,255,255,.22); }
+.fl-meter.hot i { background: rgba(255,90,82,.6); }
+.fl-meter em { position: relative; display: block; text-align: center; font: 600 8px/13px var(--sans);
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-style: normal; }
+.fl-apps { display: flex; flex-wrap: wrap; gap: 4px; }
+.fl-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 1px 6px; border-radius: 6px;
+  font-size: 11px; color: var(--muted); background: rgba(255,255,255,.04); border: 1px solid var(--line); }
+.fl-chip img { width: 11px; height: 11px; object-fit: contain; }
+.fl-chip.muted { color: var(--faint); }
+.fl-tools { position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 10px; background: rgba(8,9,10,.86); border: 1px solid var(--line-2); backdrop-filter: blur(6px); }
+.fl-tools button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px;
+  background: transparent; color: var(--muted); cursor: pointer; }
+.fl-tools button:hover { color: var(--text); background: rgba(255,255,255,.07); }
+.fl-tools svg { width: 14px; height: 14px; }
+.fl-zoom { padding: 0 6px; font: 11px var(--mono); color: var(--faint); }
+.fl-hint { position: absolute; left: 12px; bottom: 14px; font-size: 11px; color: var(--faint); pointer-events: none; }
+
+.fl-panel { padding: 16px; display: grid; gap: 12px; align-content: start; position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+.fl-panel h2 { margin: 0; font-size: 16px; }
+.fl-panel h3 { margin: 4px 0 0; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.fl-panel p { margin: 0; }
+.fl-head { display: flex; align-items: flex-start; gap: 8px; }
+.fl-head > div { min-width: 0; flex: 1; }
+.fl-head p { color: var(--muted); margin-top: 3px; }
+.fl-warn { padding: 9px 11px; border-radius: 10px; font-size: 12px; color: #ffd9d6;
+  background: rgba(255,90,82,.09); border: 1px solid rgba(255,90,82,.3); }
+.fl-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.fl-facts div { display: grid; gap: 1px; min-width: 0; }
+.fl-facts span { font-size: 11px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.fl-facts b { font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-bars { display: grid; gap: 7px; }
+.fl-bar { display: grid; grid-template-columns: 74px 1fr 38px; align-items: center; gap: 8px; font-size: 12px; }
+.fl-bar i { height: 6px; border-radius: 4px; background: #1d1f23; overflow: hidden; }
+.fl-bar i b { display: block; height: 100%; background: #e8eaed; transition: width .4s; }
+.fl-bar.hot i b { background: var(--err); }
+.fl-bar em { font: 11px var(--mono); color: var(--muted); font-style: normal; text-align: right; }
+.fl-bar small { grid-column: 2 / -1; color: var(--faint); font-size: 11px; margin-top: -4px; }
+.fl-applist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.fl-applist li { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 9px;
+  background: var(--card-2); border: 1px solid var(--line); }
+.fl-applist img, .fl-applist svg { width: 17px; height: 17px; flex: none; object-fit: contain; color: var(--muted); }
+.fl-applist b { font-size: 12.5px; }
+.fl-applist .mono { color: var(--faint); }
+.fl-applist .btn { margin-left: auto; }
+.fl-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fl-note { font-size: 12px; color: var(--muted); padding: 9px 11px; border-radius: 10px;
+  background: rgba(61,220,151,.06); border: 1px solid rgba(61,220,151,.22); }
+.fl-note svg { width: 13px; height: 13px; vertical-align: -2px; color: var(--ok); }
+.fl-note .link { background: 0; border: 0; padding: 0; font: inherit; cursor: pointer; }
+.fl-more summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.fl-raw { list-style: none; margin: 8px 0 0; padding: 0 0 0 2px; display: grid; gap: 4px; max-height: 210px; overflow: auto; font-size: 12px; }
+.fl-foot { font-size: 11px; }
+.fl-key { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); }
+.fl-empty { text-align: center; padding: 38px 26px; display: grid; gap: 10px; justify-items: center; }
+.fl-empty p { max-width: 62ch; margin: 0; color: var(--muted); }
+.fl-hero { width: 60px; height: 60px; border-radius: 17px; display: grid; place-items: center;
+  border: 1px solid var(--line-2); color: var(--muted); background: var(--card-2); }
+.fl-hero svg { width: 28px; height: 28px; }
+.fl-takeover { padding: 16px; border-color: rgba(255,90,82,.35); background: linear-gradient(180deg, rgba(255,90,82,.07), transparent 60%); margin-bottom: 14px; }
+.fl-takeover h2 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 7px; }
+.fl-takeover h2 svg { width: 16px; height: 16px; color: var(--err); }
+.fl-takeover p { margin: 0 0 5px; font-size: 13px; }
+
+/* the forms */
+.fl-cmd { display: flex; align-items: center; gap: 8px; max-width: 100%; padding: 9px 11px; border-radius: 10px;
+  background: var(--field); border: 1px solid var(--line-2); margin: 8px 0; }
+.fl-cmd code { flex: 1 1 auto; min-width: 0; font: 12px var(--mono); overflow-x: auto; white-space: nowrap;
+  scrollbar-width: thin; padding-bottom: 2px; }
+.fl-cmd .btn { flex: 0 0 auto; }
+.fl-cmd .btn svg { width: 13px; height: 13px; }
+.fl-wait { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+.ok-msg { color: var(--ok); }
+.fl-pick { display: flex; align-items: flex-start; gap: 10px; padding: 10px 11px; margin-bottom: 6px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card-2); cursor: pointer; }
+.fl-pick:hover { border-color: var(--line-hi); }
+.fl-pick.has { opacity: .55; cursor: default; }
+.fl-pick > span { display: grid; gap: 2px; }
+.fl-pick b { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.fl-pick img { width: 15px; height: 15px; object-fit: contain; vertical-align: -2px; }
+.fl-pick small { color: var(--muted); }
+.fl-confirm { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 4px; font-size: 12.5px; color: var(--muted); }
+.fl-choose { display: grid; gap: 7px; margin: 12px 0; }
+.fl-choice { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 10px 12px;
+  border-radius: 11px; border: 1px solid var(--line-2); background: var(--card-2); color: var(--text); cursor: pointer; }
+.fl-choice:hover { border-color: var(--line-hi); background: var(--raise); }
+.fl-choice > span:nth-child(2) { display: grid; gap: 1px; flex: 1; min-width: 0; }
+.fl-choice b { font-size: 13px; }
+.fl-choice small { color: var(--muted); font: 11px var(--mono); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fld { display: grid; gap: 4px; margin-bottom: 10px; }
+.fld > span { font-size: 12px; color: var(--muted); }
+.fld input, .fld select { width: 100%; padding: 9px 11px; border-radius: 9px; background: var(--field);
+  border: 1px solid var(--line-2); color: var(--text); font: 13px var(--sans); }
+.fld input:focus, .fld select:focus { outline: 0; border-color: var(--line-hi); }
+@media (max-width: 980px) {
+  .fl-wrap { grid-template-columns: 1fr; }
+  .fl-panel { position: static; max-height: none; }
+  .fl-canvas { height: 380px; }
+}
+@media (max-width: 560px) { .fl-facts { grid-template-columns: 1fr; } .row2 { grid-template-columns: 1fr; } }
+.fl-none { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); display: grid; gap: 8px;
+  justify-items: center; text-align: center; }
+.fl-none p { margin: 0; color: var(--faint); font-size: 12px; }
+/* a phone gets the same machines as a list: a canvas you must pinch is no use there */
+.fl-cards { display: none; }
+@media (max-width: 700px) {
+  .fl-graph { display: none; }
+  .fl-cards { display: grid; gap: 10px; }
+  .fl-cards .fl-node { position: static; width: auto; box-shadow: none; }
+  .fl-cards .fl-node:hover { transform: none; }
+}
+/* more tabs than a phone is wide: let the strip scroll instead of clipping */
+.subtabs { overflow-x: auto; scrollbar-width: none; }
+.subtabs::-webkit-scrollbar { display: none; }
+.subtabs > button { flex: none; }
