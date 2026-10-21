@@ -71,7 +71,15 @@ const HOSTED_TREE = /^(https:\/\/(?:github\.com|codeberg\.org)\/[^/\s]+\/[^/\s#]
 // GitLab, gitlab.com or self-hosted, with subgroups: GROUP/SUB/.../REPO/-/tree|blob/REF[/path]
 const GITLAB_TREE = /^(https:\/\/[^/\s]+\/[^\s#]+?)(?:\.git)?\/-\/(?:tree|blob)\/([^/\s#]+)(?:\/([^#\s]*?))?\/?$/;
 // a download: .zip, .tar.gz, .tgz (GitHub's and GitLab's archive links included)
-const ARCHIVE = /^https?:\/\/[^\s#]+?\.(zip|tar\.gz|tgz)(?:\?[^\s#]*)?$/i;
+// An archive link: the name can sit anywhere in the path or in a query value
+// (a CDN hands out /download/addon.tgz, /d/abc?file=addon.zip, …), not only at
+// the very end of the URL.
+const ARCHIVE = /^https?:\/\/[^\s#]+\.(zip|tar\.gz|tgz|tar)(?:[/?][^\s#]*)?$/i;
+// Plainly a git source: a .git URL, ssh, or one of the hosts that serve repos
+// at /owner/name. Anything else over http(s) is looked at before we guess
+// (fetchSource): a direct download link is not a repository.
+const GIT_PLAIN = /^(?:ssh:\/\/|git@)/;
+const GIT_HOST = /^https?:\/\/(?:[^/\s]*\.)?(?:github\.com|gitlab\.com|codeberg\.org|bitbucket\.org|git\.sr\.ht|gitea\.[^/\s]+|git\.[^/\s]+)\/[^/\s]+\/[^/\s]+/i;
 
 export function parseSource(text) {
   const raw = String(text || "").trim();
@@ -97,10 +105,14 @@ export function parseSource(text) {
     if (sub === MANIFEST || sub.endsWith("/" + MANIFEST)) sub = sub.slice(0, -MANIFEST.length);   // a /blob/ link to the manifest
   }
   url = url.replace(/\/+$/, "");
-  if (!/^(https?:\/\/[^\s/]+\/\S+|ssh:\/\/\S+|git@[^\s:]+:\S+)$/.test(url)) fail("That does not look like a git repository link.");
+  if (!/^(https?:\/\/[^\s/]+\/\S+|ssh:\/\/\S+|git@[^\s:]+:\S+)$/.test(url)) fail("That is not a link Burrow can install from (a git repository, a .zip or .tar.gz, or a direct download link).");
   sub = sub.replace(/^\/+|\/+$/g, "");
   if (sub && (sub.split("/").includes("..") || !/^[A-Za-z0-9._/-]+$/.test(sub))) fail("The folder part of the link is not valid.");
-  return { kind: "git", url, ref, subdir: sub, display: raw };
+  // Only a link that is plainly a repository is cloned on sight. The rest are
+  // fetched first and judged by what comes back, so a direct download link
+  // that ends in /download installs instead of failing as a bad repository.
+  const plainlyGit = GIT_PLAIN.test(url) || /\.git$/i.test(url) || GIT_HOST.test(url) || !!m;
+  return { kind: plainlyGit ? "git" : "web", url, ref, subdir: sub, display: raw };
 }
 
 function git(args, { cwd, timeout = 240 } = {}) {
@@ -109,16 +121,50 @@ function git(args, { cwd, timeout = 240 } = {}) {
   (err, out, errOut) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: String(out || ""), err: String(errOut || err?.message || "") })));
 }
 
+// zip, gzip or a tar's "ustar" marker: what the bytes say they are, whatever
+// the link looked like.
+function archiveBytes(buf) {
+  if (!buf || buf.length < 262) return false;
+  if (buf.readUInt32LE(0) === 0x04034b50 || buf.readUInt32LE(0) === 0x06054b50) return true;   // zip
+  if (buf[0] === 0x1f && buf[1] === 0x8b) return true;                                         // gzip
+  return buf.toString("latin1", 257, 262) === "ustar";                                         // tar
+}
+
 async function fetchSource(source, dest) {
   if (source.kind === "archive") {
     try { return unpack(await download(source.url, `burrow/${HOST}`), dest); }
     catch (e) { if (e instanceof ArchiveError) fail(e.message); throw e; }
+  }
+  // A link that is neither plainly a repository nor named like an archive:
+  // fetch it and look. Archives install; anything else (a repository served
+  // over http, say) falls through to git, and if that fails too we say what
+  // the server actually handed us.
+  if (source.kind === "web") {
+    let buf = null, why = null;
+    try { buf = await download(source.url, `burrow/${HOST}`); }
+    catch (e) { why = e.message; }
+    if (buf && archiveBytes(buf)) {
+      try { return unpack(buf, dest); }
+      catch (e) { if (e instanceof ArchiveError) fail(e.message); throw e; }
+    }
+    const r = await fetchGit(source, dest);
+    if (r.ok) return r.commit;
+    fail(`Could not install from ${source.display}: ${why
+      ? why
+      : `it is not a .zip or .tar.gz, and it is not a git repository either (${r.why})`}.`);
   }
   if (source.kind === "local") {
     cpSync(source.path, dest, { recursive: true, verbatimSymlinks: true,
       filter: (p) => !/(^|\/)(\.git|node_modules|__pycache__)$/.test(p) });
     return null;
   }
+  const r = await fetchGit(source, dest);
+  if (!r.ok) fail(`Could not fetch ${source.display}: ${r.why}`);
+  return r.commit;
+}
+
+// -> {ok: true, commit} | {ok: false, why}
+async function fetchGit(source, dest) {
   const base = ["clone", "--depth", "1", "--quiet", ...(source.ref ? ["--branch", source.ref] : [])];
   let r = { code: 1, err: "" };
   if (source.subdir) {
@@ -128,15 +174,19 @@ async function fetchSource(source, dest) {
       if (r.code !== 0) rmSync(dest, { recursive: true, force: true });
     }
   }
-  if (r.code !== 0) r = await git([...base, source.url, dest]);
   if (r.code !== 0) {
-    let msg = r.err.trim().split("\n").pop() || "git clone failed";
-    if (/could not read Username|Authentication failed|not found/i.test(r.err)) msg = "the repository was not found, or it is private";
-    if (/ENOENT/.test(r.err)) msg = "git is not installed on this machine";
-    fail(`Could not fetch ${source.display}: ${msg}`);
+    rmSync(dest, { recursive: true, force: true });
+    r = await git([...base, source.url, dest]);
+  }
+  if (r.code !== 0) {
+    rmSync(dest, { recursive: true, force: true });
+    let why = r.err.trim().split("\n").pop() || "git clone failed";
+    if (/could not read Username|Authentication failed|not found/i.test(r.err)) why = "the repository was not found, or it is private";
+    if (/ENOENT/.test(r.err)) why = "git is not installed on this machine";
+    return { ok: false, why };
   }
   const h = await git(["rev-parse", "HEAD"], { cwd: dest, timeout: 20 });
-  return h.code === 0 ? h.out.trim().slice(0, 40) : null;
+  return { ok: true, commit: h.code === 0 ? h.out.trim().slice(0, 40) : null };
 }
 
 // ------------------------------------------------------------------ the manifest (same rules as Selkies Forge)
@@ -476,6 +526,9 @@ export class Addons {
     const r = await this.run(rec, s, { timeout: TIMEOUT.detect, ...(at || {}) });
     if (r.code !== 0) return { found: false };
     const i = lastJson(r.lines);
+    // A detect script says so in its JSON ({"found": false}); exiting 0 with
+    // nothing to say still counts as found, the way the first ones did.
+    if (i.found === false || i.found === "false") return { found: false };
     return { found: true, version: String(i.version || "").slice(0, 30), url: /^https?:\/\/\S+$/.test(i.url || "") ? i.url : null,
              detail: String(i.detail || "").slice(0, 200) };
   }

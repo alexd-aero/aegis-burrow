@@ -29,6 +29,31 @@ test("sources", () => {
   assert.throws(() => A.parseSource("not a link"), A.AddonError);
 });
 
+test("sources: a download link is not a repository", () => {
+  // named like an archive, wherever the name sits in the link
+  for (const u of ["https://cdn.example.com/files/addon.tar.gz",
+                   "https://cdn.example.com/files/addon.tgz?token=abc",
+                   "https://cdn.example.com/d/9f?file=addon.zip",
+                   "https://cdn.example.com/download/addon.tar.gz/",
+                   "https://cdn.example.com/x/addon.tar"]) {
+    assert.equal(A.parseSource(u).kind, "archive", u);
+  }
+  // plainly a repository: cloned on sight
+  for (const u of ["https://github.com/o/r", "https://gitlab.com/o/r", "https://codeberg.org/o/r",
+                   "https://git.example.com/o/r", "https://example.com/o/r.git", "git@github.com:o/r.git"]) {
+    assert.equal(A.parseSource(u).kind, "git", u);
+  }
+  // neither: looked at before it is judged, instead of failing as a bad repo
+  for (const u of ["https://cdn.example.com/download", "https://files.example.com/addons/hello/latest",
+                   "https://example.com/d/abc123"]) {
+    assert.equal(A.parseSource(u).kind, "web", u);
+  }
+  // a tree link still wins over the host guess
+  const t = A.parseSource("https://codeberg.org/o/r/src/branch/main/addons/x");
+  assert.equal(t.kind, "git");
+  assert.equal(t.ref, "main");
+});
+
 test("the manifest: same rules as the forge", () => {
   const d = addon(tmp());
   const m = A.loadManifest(d);
