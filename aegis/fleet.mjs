@@ -160,6 +160,9 @@ for f in "$HOME/.config/aegis/aegis.json" "$HOME/.config/aegis/integrations/selk
 done
 [ -d "$HOME/.selkies-forge" ] && echo "--dir:selkies-forge=$HOME/.selkies-forge"
 [ -d "$HOME/.local/share/bulwark" ] && echo "--dir:bulwark=$HOME/.local/share/bulwark"
+for f in "$HOME"/.config/aegis/programs/*.json; do
+  [ -r "$f" ] && { echo "--prog:$f"; head -c 2000 "$f"; echo; }
+done
 sec end
 `;
 
@@ -249,6 +252,15 @@ function foundApps(files, docker, units, home) {
   const t = (docker || []).find((c) => /termix/i.test(c.name) || /termix/i.test(c.image));
   if (t) out.push({ id: "termix", name: APPS.termix.name, version: null, url: null, container: t.name,
                     status: t.status, ports: t.ports, data: null });
+  // programs an addon installed through Fleet: the note Fleet left beside them (fleet-ops.mjs)
+  for (const [k, v] of Object.entries(files)) {
+    if (!k.startsWith("prog:")) continue;
+    let p = null; try { p = JSON.parse(v); } catch { continue; }
+    if (p && typeof p.id === "string" && typeof p.name === "string" && !out.some((a) => a.id === p.id)) {
+      out.push({ id: p.id.slice(0, 80), name: p.name.slice(0, 80), version: p.version ? String(p.version).slice(0, 40) : null,
+                 url: typeof p.url === "string" ? p.url.slice(0, 300) : null, program: true, data: null });
+    }
+  }
   return out;
 }
 

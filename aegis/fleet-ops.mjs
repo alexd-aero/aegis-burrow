@@ -93,8 +93,13 @@ svc() {   # svc stop|start UNIT
 `;
 
 // ------------------------------------------------------------------ installing
-export function install(fleet, id, appId) {
+// programs: what installed addons bring (server.mjs addonPrograms): id ->
+// { name, note, addon, install(machine, tools) }. An addon's program does its
+// own work through tools.run (a script, over this Fleet's link); Fleet then
+// leaves a note on the machine so the next look sees it is there.
+export function install(fleet, id, appId, programs = new Map()) {
   const m = fleet.get(id);
+  if (!CATALOG[appId] && programs.has(appId)) return installProgram(fleet, m, appId, programs.get(appId));
   const app = CATALOG[appId];
   if (!app) fail("Aegis does not know how to install that.");
   if (!app.install) fail(app.note);
@@ -107,6 +112,27 @@ export function install(fleet, id, appId) {
     job.step("Looking at what it left behind", 0.9);
     await fleet.probe(id, { fresh: true }).catch(() => {});
     return { app: appId, machine: id };
+  });
+}
+
+function installProgram(fleet, m, appId, p) {
+  return fleet.start("install", `Installing ${p.name} on ${m.name}`, m.id, async (job) => {
+    job.step(`Installing ${p.name} on ${m.name}`, 0.1);
+    if (p.note) job.log(p.note, "muted");
+    const tools = {
+      run: (script, { timeout = 10 * 60000 } = {}) => fleet.ssh(m, String(script), { timeout, onLine: (l) => job.log(l) }),
+      log: (line, cls) => job.log(line, cls),
+      step: (phase, progress) => job.step(phase, progress),
+    };
+    const machine = { id: m.id, name: m.name, address: m.address, user: m.user, port: m.port, hostname: m.probe?.host?.hostname || null,
+                      addresses: [...(m.probe?.addresses || [])] };
+    const res = (await p.install(machine, tools)) || {};
+    job.step("Noting it on the machine", 0.92);
+    const note = JSON.stringify({ id: appId, name: p.name, addon: p.addon, version: res.version || null, url: res.url || null, at: Date.now() });
+    const file = `$HOME/.config/aegis/programs/${appId.replace(/[^a-z0-9._-]/gi, "_")}.json`;
+    await fleet.ssh(m, `mkdir -p "$HOME/.config/aegis/programs" && printf '%s\\n' ${sq(note)} > "${file}"\n`, { timeout: 30000 });
+    await fleet.probe(m.id, { fresh: true }).catch(() => {});
+    return { app: appId, machine: m.id, ...(res.url ? { url: res.url } : {}) };
   });
 }
 

@@ -279,3 +279,32 @@ test("the key is made once, kept to this user, and the known_hosts is ours", asy
   assert.equal(args.at(-1), "alex@10.0.0.9");
   assert.deepEqual(f.scpArgs({ port: 2222, user: "alex", address: "10.0.0.9" }).slice(-2), ["-P", "2222"]);
 });
+
+test("an addon's program installs like an app: its own steps over our link, then a note the next probe reads", async () => {
+  const f = fleet();
+  f.verify = async (id) => f.get(id);
+  const r = await f.addManual({ address: "10.0.0.9", user: "alex", port: 2200, name: "Far" });
+  const scripts = [];
+  f.ssh = async (m, script, o = {}) => { scripts.push(script); o.onLine?.("from the machine"); return { code: 0, out: "ok", err: "" }; };
+  f.probe = async () => {};
+  let seen = null;
+  const programs = new Map([["helper:thing", { name: "Thing", note: "A thing.", addon: "helper",
+    install: async (machine, tools) => { seen = machine; tools.step("Doing it", 0.5); await tools.run("echo hi"); return { url: "https://thing.example/" }; } }]]);
+  const job = OPS.install(f, r.id, "helper:thing", programs);
+  assert.equal(job.label, "Installing Thing on Far");
+  for (let i = 0; i < 50 && f.job(job.id).state === "running"; i++) await new Promise((res) => setTimeout(res, 10));
+  const done = f.job(job.id).view();
+  assert.equal(done.state, "done", done.error || "");
+  assert.deepEqual(done.result, { app: "helper:thing", machine: r.id, url: "https://thing.example/" });
+  assert.deepEqual([seen.address, seen.user, seen.port, seen.name], ["10.0.0.9", "alex", 2200, "Far"]);
+  assert.ok(done.lines.some((l) => l.line === "from the machine"), "the machine's output is in the job");
+  assert.equal(scripts[0], "echo hi");
+  assert.match(scripts[1], /\.config\/aegis\/programs\/helper_thing\.json/);
+  assert.ok(shOk(scripts[1]), "the note it leaves is valid shell");
+  // a built-in app's id still means the built-in app, and an unknown one is refused
+  assert.throws(() => OPS.install(f, r.id, "nothing:here", programs), /does not know/);
+  // the probe reads that note back as an app on the machine
+  const raw = `==host==\nhome=/h\n==apps==\n--prog:/h/.config/aegis/programs/helper_thing.json\n{"id":"helper:thing","name":"Thing","url":"https://thing.example/"}\n==end==\n`;
+  assert.deepEqual(F.readProbe(raw).apps.map((a) => [a.id, a.name, a.url, a.program]), [["helper:thing", "Thing", "https://thing.example/", true]]);
+  assert.ok(shOk(F.PROBE), "the probe, with the programs folder");
+});

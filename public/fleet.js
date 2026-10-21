@@ -33,8 +33,10 @@ const I = {
   fit: SVG('<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="12" cy="12" r="2.5"/>'),
   zin: SVG('<path d="M12 5v14M5 12h14"/>'), zout: SVG('<path d="M5 12h14"/>'),
 };
-const LOGO = { "aegis-burrow": "/__gate/logos/aegis-burrow.svg", "selkies-forge": "/__gate/logos/forge.svg",
+const LOGOS = { "aegis-burrow": "/__gate/logos/aegis-burrow.svg", "selkies-forge": "/__gate/logos/forge.svg",
                bulwark: "/__gate/logos/bulwark.svg", termix: "/__gate/logos/termix.svg" };
+// an addon's program ("<addon>:<program>") wears its addon's logo
+const LOGO = new Proxy(LOGOS, { get: (o, id) => o[id] || (typeof id === "string" && /^[a-z0-9-]+:[a-z0-9-]+$/.test(id) ? `/__gate/api/addons/${id.split(":")[0]}/image` : undefined) });
 
 // The tab's own state. `data` is the last /__gate/api/fleet.
 export const FS = { data: null, sel: null, at: 0, link: null, pollTimer: null, fitKey: null,
@@ -440,7 +442,7 @@ function installForm(m) {
       <small>${has ? "already on this machine" : H(c.note)}</small></span></label>`;
   }).join("");
   X.openModal(`<h2>Install on ${H(m.name)}</h2>
-    <p>Aegis runs that project's own published installer over the link, and shows you its output as it goes.</p>
+    <p>Aegis runs that project's own installer (or the addon's setup) over the link, and shows you its output as it goes.</p>
     ${rows}
     <div class="err-msg" id="flErr"></div>
     <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo">Install it</button></div>`, (mo) => {

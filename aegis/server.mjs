@@ -272,6 +272,9 @@ function pagesView() {
 //   observe(ip, info, {status, bytes, ms})      when the response is done
 //   signedIn(ip)  peek(ip)  lookup(ip)          sign-ins; badges; IP checks
 //   mount() -> {prefix, upstream, headers, name}   its app under the dashboard's login
+//   programs: [{id, name, note, install(machine, tools)}]   things Fleet can install on
+//             a linked machine (Machines -> Install); tools.run(script) runs there over
+//             Fleet's own link, tools.log/step feed the job. Returns {url?, version?}.
 //
 // Routes: /__gate/api/x/<id>/… (signed in) and /x/<id>/… on the control
 // socket; the panel is /__gate/x/<id>/ui.js. Burrow Pages is the first.
@@ -1262,8 +1265,22 @@ function fleetListing() {
   return { ...fleet.view(), catalog: fleetCatalog(), termix: !!settings.get("termix"), takeover: takeover(),
            here: hereApps() };
 }
-const fleetCatalog = () => Object.entries(FLEET_APPS).map(([id, a]) =>
-  ({ id, name: a.name, note: a.note, installable: !!a.install, swappable: !!a.swappable }));
+const fleetCatalog = () => [
+  ...Object.entries(FLEET_APPS).map(([id, a]) => ({ id, name: a.name, note: a.note, installable: !!a.install, swappable: !!a.swappable })),
+  ...[...addonPrograms()].map(([id, p]) => ({ id, name: p.name, note: p.note || "", installable: true, swappable: false, addon: p.addon })),
+];
+// What installed addons can put on a linked machine: "<addon>:<program>" -> program.
+function addonPrograms() {
+  const out = new Map();
+  for (const [aid, x] of extensions) {
+    if (x.error || !Array.isArray(x.mod.programs)) continue;
+    for (const p of x.mod.programs) {
+      if (!p || !/^[a-z0-9-]{1,40}$/.test(String(p.id || "")) || typeof p.install !== "function" || !p.name) continue;
+      out.set(`${aid}:${p.id}`, { name: String(p.name).slice(0, 60), note: p.note ? String(p.note).slice(0, 300) : "", install: p.install, addon: aid });
+    }
+  }
+  return out;
+}
 
 // The apps on this machine, in the same shape as a linked machine's, so the
 // graph can draw this host like any other.
@@ -1318,7 +1335,7 @@ async function handleFleet(req, res, path, url) {
     if (what === "verify" && req.method === "POST") return ok(fleet.detail((await fleet.verify(id)).id));
     if (what === "install" && req.method === "POST") {
       audit("machine: install started", req, { machine: id, app: body.app });
-      return ok({ job: fleetInstall(fleet, id, String(body.app || "")) });
+      return ok({ job: fleetInstall(fleet, id, String(body.app || ""), addonPrograms()) });
     }
     if (what === "termix" && req.method === "POST") {
       if (!body.confirm) return sendJson(res, 400, { error: "Adding the machine to Termix needs your say-so first." });
