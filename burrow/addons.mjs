@@ -131,8 +131,9 @@ async function fetchSource(source, dest) {
   // over http, say) falls through to git, and if that fails too we say what
   // the server actually handed us.
   if (source.kind === "web") {
+    const meta = {};
     let buf = null, why = null;
-    try { buf = await download(source.url, `burrow/${HOST}`); }
+    try { buf = await download(source.url, `burrow/${HOST}`, meta); }
     catch (e) { why = e.message; }
     if (buf && isArchive(buf)) {
       try { return unpack(buf, dest); }
@@ -140,9 +141,14 @@ async function fetchSource(source, dest) {
     }
     const r = await fetchGit(source, dest);
     if (r.ok) return r.commit;
-    fail(`Could not install from ${source.display}: ${why
-      ? why
-      : `it is not a .zip or .tar.gz, and it is not a git repository either (${r.why})`}.`);
+    if (why) fail(why);                              // it already names the address and what went wrong
+    // It answered, but with something that is not an addon. Say what it sent:
+    // a file-sharing page instead of the link behind its download button is
+    // the usual reason.
+    const page = /^\s*</.test(String(buf?.subarray(0, 64) || "")) || /html|xml/i.test(meta.type || "");
+    fail(page
+      ? `Could not install from ${source.display}: that address answers with a web page${meta.type ? ` (${meta.type})` : ""}, not an addon. If it is a download page, use the link behind its download button.`
+      : `Could not install from ${source.display}: what came back is not a .zip or .tar.gz${meta.type ? ` (${meta.type})` : ""}, and it is not a git repository either (${r.why}).`);
   }
   if (source.kind === "local") {
     cpSync(source.path, dest, { recursive: true, verbatimSymlinks: true,

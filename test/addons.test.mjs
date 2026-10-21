@@ -213,8 +213,9 @@ open(os.path.join(www, "page"), "w").write("<!doctype html><title>not an addon</
     assert.equal(a.id, "wrapped");
     const deep = await H.inspect(base + "deep.zip");
     assert.equal(deep.manifest.id, "wrapped", "three archives deep is still unwrapped");
-    // a web page is not an addon, and the error says so without blaming git
-    await assert.rejects(H.inspect(base + "page"), /not a .zip or .tar.gz/);
+    // a web page is not an addon: the error says what came back, and points
+    // at the link behind the download button instead of blaming git
+    await assert.rejects(H.inspect(base + "page"), /answers with a web page/);
   } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
 });
 

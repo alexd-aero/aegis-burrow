@@ -18,10 +18,18 @@ export class ArchiveError extends Error {}
 const fail = (m) => { throw new ArchiveError(m); };
 const safe = (n) => !!n && !n.startsWith("/") && !n.split("/").includes("..") && !/^[A-Za-z]:/.test(n) && !n.includes("\0");
 
-export async function download(url, ua) {
+// meta, when given, is filled in with what the server said: {status, type,
+// filename}. The caller uses it to explain a download that turned out not to
+// be an archive at all.
+export async function download(url, ua, meta) {
   let r;
   try { r = await fetch(url, { headers: { "User-Agent": ua }, redirect: "follow", signal: AbortSignal.timeout(120000) }); }
   catch (e) { fail(`Could not download ${url}: ${e.cause?.message || e.message}`); }
+  if (meta) {
+    meta.status = r.status;
+    meta.type = (r.headers.get("content-type") || "").split(";")[0].trim();
+    meta.filename = /filename\*?=(?:UTF-8'')?"?([^";]+)/i.exec(r.headers.get("content-disposition") || "")?.[1] || null;
+  }
   if (!r.ok) fail(`Could not download ${url}: HTTP ${r.status}`);
   const chunks = [];
   let got = 0;
