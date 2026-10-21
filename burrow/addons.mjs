@@ -26,7 +26,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
-import { ArchiveError, download, unpack } from "./archive.mjs";
+import { ArchiveError, download, unpack, isArchive } from "./archive.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -121,15 +121,6 @@ function git(args, { cwd, timeout = 240 } = {}) {
   (err, out, errOut) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: String(out || ""), err: String(errOut || err?.message || "") })));
 }
 
-// zip, gzip or a tar's "ustar" marker: what the bytes say they are, whatever
-// the link looked like.
-function archiveBytes(buf) {
-  if (!buf || buf.length < 262) return false;
-  if (buf.readUInt32LE(0) === 0x04034b50 || buf.readUInt32LE(0) === 0x06054b50) return true;   // zip
-  if (buf[0] === 0x1f && buf[1] === 0x8b) return true;                                         // gzip
-  return buf.toString("latin1", 257, 262) === "ustar";                                         // tar
-}
-
 async function fetchSource(source, dest) {
   if (source.kind === "archive") {
     try { return unpack(await download(source.url, `burrow/${HOST}`), dest); }
@@ -143,7 +134,7 @@ async function fetchSource(source, dest) {
     let buf = null, why = null;
     try { buf = await download(source.url, `burrow/${HOST}`); }
     catch (e) { why = e.message; }
-    if (buf && archiveBytes(buf)) {
+    if (buf && isArchive(buf)) {
       try { return unpack(buf, dest); }
       catch (e) { if (e instanceof ArchiveError) fail(e.message); throw e; }
     }

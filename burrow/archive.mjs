@@ -7,10 +7,12 @@
 
 import { createHash } from "node:crypto";
 import { inflateRawSync, gunzipSync } from "node:zlib";
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const LIMITS = { download: 200 << 20, unpacked: 500 << 20, files: 20000 };
+const MAX_NESTED = 3;                // a zip of a zip of a zip is still fine; deeper is a prank
+const MANIFEST = "forge-addon.json";
 
 export class ArchiveError extends Error {}
 const fail = (m) => { throw new ArchiveError(m); };
@@ -98,8 +100,22 @@ function tarEntries(buf) {
   return out;
 }
 
+// What the bytes say they are, whatever the link looked like: zip, gzip, or a
+// tar (its "ustar" marker sits at 257). Used to tell an archive from a web
+// page before anything is unpacked.
+export function isArchive(buf) {
+  if (!buf || buf.length < 4) return false;
+  if (buf.readUInt32LE(0) === 0x04034b50 || buf.readUInt32LE(0) === 0x06054b50) return true;   // zip
+  if (buf[0] === 0x1f && buf[1] === 0x8b) return true;                                         // gzip
+  return buf.length >= 262 && buf.toString("latin1", 257, 262) === "ustar";                    // tar
+}
+
 // Unpack buf into dest (which must not exist). Returns "sha256:<hex>" of the download.
-export function unpack(buf, dest) {
+//
+// An archive holding nothing but another archive - a .zip of the .zip you
+// downloaded, which is what a file-sharing link often hands back - is unpacked
+// again, up to MAX_NESTED deep, so the addon inside it is what lands in dest.
+export function unpack(buf, dest, depth = 0) {
   const digest = "sha256:" + createHash("sha256").update(buf).digest("hex");
   const isZip = buf.readUInt32LE(0) === 0x04034b50 || buf.readUInt32LE(0) === 0x06054b50;
   const entries = isZip ? zipEntries(buf) : tarEntries(buf);
@@ -116,6 +132,19 @@ export function unpack(buf, dest) {
   let root = tmp;
   const names = readdirSync(tmp);
   if (names.length === 1 && statSync(join(tmp, names[0])).isDirectory() && !names.includes("forge-addon.json")) root = join(tmp, names[0]);
+  // one archive and nothing else inside: unpack that one instead
+  const inner = readdirSync(root);
+  if (inner.length === 1 && !inner.includes(MANIFEST)) {
+    const only = join(root, inner[0]);
+    let nested = null;
+    try { if (statSync(only).isFile() && statSync(only).size <= LIMITS.download) nested = readFileSync(only); } catch { /* not a file */ }
+    if (nested && isArchive(nested)) {
+      if (depth >= MAX_NESTED) fail("That archive holds another archive, too many deep.");
+      rmSync(tmp, { recursive: true, force: true });
+      unpack(nested, dest, depth + 1);
+      return digest;                                  // of what was downloaded, not of the one inside
+    }
+  }
   mkdirSync(dest, { recursive: true });
   for (const n of readdirSync(root)) renameSync(join(root, n), join(dest, n));
   rmSync(tmp, { recursive: true, force: true });

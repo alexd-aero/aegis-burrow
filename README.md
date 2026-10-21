@@ -314,7 +314,8 @@ Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it 
 - **Paste a link.** Any of these works:
   - a repository on GitHub, GitLab (subgroups and self-hosted too), Codeberg, or any git URL;
   - a folder in one (`…/tree/main/a/folder`, GitLab's `…/-/tree/…`, or a `/blob/` link to its `forge-addon.json`);
-  - a **`.zip` / `.tar.gz` download**, inspected statically first: unpacked into a fresh folder with size limits, refused if anything could escape it, then its manifest validated before anything runs;
+  - a **`.zip` / `.tar.gz` download**, inspected statically first: unpacked into a fresh folder with size limits, refused if anything could escape it, then its manifest validated before anything runs. The name can sit anywhere in the link (`/download/addon.tgz`, `?file=addon.zip`);
+  - a **direct download link with no extension at all** - `files.example.com/9a3b/download`, the kind a file-sharing site hands you. A link that is not plainly a repository is fetched and judged by its bytes, so an archive installs and anything else says so instead of failing as a bad repository. An archive holding nothing but another archive (a `.zip` of the `.zip` you uploaded) is unpacked again, up to three deep;
   - a folder on this machine. The addon shows up as a card. Install it, open it, run its actions, check for updates against its git commits, and uninstall it. An addon whose status reports a port gets **Publish**, which gives it a Burrow address.
 - **Found on this machine.** Opening *Addons* scans your home, `/opt`, `/srv` and the code folders apps declare. It lists every valid addon it finds, **running, stopped or not installed**, using each one's read-only `detect` and `status` scripts. Addons already in the list aren't repeated. Addons made for another host are shown greyed out.
 

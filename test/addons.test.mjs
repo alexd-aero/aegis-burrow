@@ -176,6 +176,48 @@ with zipfile.ZipFile(os.path.join(www, "evil.zip"), "w") as z:
   } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
 });
 
+test("a download link with no extension, and a zip inside a zip", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { createServer } = await import("node:http");
+  const { readFileSync, mkdirSync } = await import("node:fs");
+  const www = tmp(), src = join(tmp(), "zippy-main");
+  addon(src, { id: "wrapped", name: "Wrapped" });
+  mkdirSync(join(www, "f", "9a3b"), { recursive: true });
+  execFileSync("python3", ["-c", `
+import zipfile, os, sys, io
+src, www = sys.argv[1], sys.argv[2]
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as z:
+    for n in os.listdir(src): z.write(os.path.join(src, n), "zippy-main/" + n)
+# the zip a file-sharing site hands back: one zip, nothing else, and the link
+# has no extension at all
+with zipfile.ZipFile(os.path.join(www, "f", "9a3b", "download"), "w") as z:
+    z.writestr("wrapped.zip", inner.getvalue())
+# three deep is still fine
+mid = io.BytesIO()
+with zipfile.ZipFile(mid, "w") as z: z.writestr("wrapped.zip", inner.getvalue())
+with zipfile.ZipFile(os.path.join(www, "deep.zip"), "w") as z: z.writestr("mid.zip", mid.getvalue())
+# a page, not an archive: must not be mistaken for one
+open(os.path.join(www, "page"), "w").write("<!doctype html><title>not an addon</title>")`, src, www]);
+  const srv = createServer((q, r) => { try { r.end(readFileSync(join(www, q.url.slice(1)))); } catch { r.statusCode = 404; r.end(); } });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const base = `http://127.0.0.1:${srv.address().port}/`;
+  const dir = tmp();
+  const H = new A.Addons({ dir: join(dir, "addons"), registry: join(dir, "addons.json"), version: "2.0.0", log: () => {} });
+  try {
+    // /f/9a3b/download: no extension, so it is fetched and judged by its bytes
+    assert.equal(A.parseSource(base + "f/9a3b/download").kind, "web");
+    const r = await H.inspect(base + "f/9a3b/download");
+    assert.deepEqual([r.valid, r.manifest.id], [true, "wrapped"], "a zip inside a zip still installs");
+    const a = await H.add(base + "f/9a3b/download");
+    assert.equal(a.id, "wrapped");
+    const deep = await H.inspect(base + "deep.zip");
+    assert.equal(deep.manifest.id, "wrapped", "three archives deep is still unwrapped");
+    // a web page is not an addon, and the error says so without blaming git
+    await assert.rejects(H.inspect(base + "page"), /not a .zip or .tar.gz/);
+  } finally { srv.close(); rmSync(dir, { recursive: true }); rmSync(www, { recursive: true }); }
+});
+
 test("updates: checked in the background, listed for the Burrow page", async () => {
   const { execFileSync } = await import("node:child_process");
   const { createServer } = await import("node:http");
