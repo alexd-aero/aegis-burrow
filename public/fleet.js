@@ -318,6 +318,7 @@ function wireCanvas(el, G) {
     lightUp(el, G);
     paintPanel();
     if (FS.sel?.kind === "machine") loadDetail(FS.sel.id);
+    if (FS.sel?.kind === "hub" || FS.sel?.kind === "app") loadSelf();
   };
   canvas.addEventListener("pointerdown", (e) => {
     if (e.target.closest("[data-fl], .fw-controls, .fw-none")) return;
@@ -433,37 +434,66 @@ function panelHtml() {
     <div class="fl-key"><span><i class="dot ok"></i>answers</span><span><i class="dot warn"></i>slow to answer</span><span><i class="dot err"></i>not answering</span><span class="fl-tag">standby</span></div>`;
 }
 
+// This machine: the same panel as a linked one, from /fleet/self (the probe, run here).
+async function loadSelf(fresh) {
+  if (!fresh && FS.self && Date.now() - FS.self.at < 20000) return;
+  if (FS.selfLoading) return;
+  FS.selfLoading = true;
+  try { FS.self = { at: Date.now(), d: await X.api(`/__gate/api/fleet/self${fresh ? "?fresh=1" : ""}`) }; }
+  catch { /* the panel says it couldn't look */ }
+  finally { FS.selfLoading = false; }
+  if (FS.sel?.kind === "hub" || FS.sel?.kind === "app") paintPanel();
+}
+const manageOf = (where, app) => where === "self" ? FS.self?.d?.manage?.[app.id || app.appId] || null : app.url || null;
+
 function hubPanel() {
-  const d = FS.data, sb = machines().filter((m) => m.standby);
-  return `<div class="fp-head" style="--c:var(--ok)"><span class="fp-kind">the hub</span><h2>${H(d.hub.name)}</h2>
-      <p class="mono small">${H(d.hub.hostname)}${d.hub.version ? ` · Aegis × Burrow ${H(d.hub.version)}` : ""}</p>
+  const d = FS.data, me = FS.self?.d, sb = machines().filter((m) => m.standby);
+  const head = `<div class="fp-head" style="--c:var(--ok)"><span class="fp-kind">this machine · the hub</span><h2>${H(d.hub.name)}</h2>
+      <p class="mono small">${H(me?.hostname || d.hub.hostname)}${d.hub.version ? ` · Aegis × Burrow ${H(d.hub.version)}` : ""}</p>
+      <span class="pill ok"><i class="dot ok"></i>this machine${me ? ` · looked at ${ago(me.probedAt)}` : ""}</span>
       <button class="fp-x" data-act="fl-close" aria-label="Close">${I.close}</button></div>
-    <p class="muted small">This machine runs the gate. Every other machine is reached from here with one SSH key that never leaves it.</p>
-    <h3>Runs here</h3>
-    <ul class="fl-applist">${(d.here || []).map((a) => `<li>${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : I.box}<b>${H(a.name)}</b><span class="mono small">${H(a.version || "")}</span></li>`).join("")}</ul>
+    <div class="fp-acts main">
+      ${FS.data.termix ? `<a class="btn sm primary" href="/__gate/open/termix" target="_blank" rel="noopener">${I.term} Open Termix</a>` : ""}
+      <button class="btn sm" data-act="fl-self-again">${I.refresh} Look again</button>
+      <a class="btn sm ghost" href="/__gate/settings">${I.shield} Settings</a>
+    </div>`;
+  if (!me) return `${head}<p class="fl-wait small"><span class="spin"></span> looking at this machine…</p>`;
+  return `${head}${machineBody(me, me.probe, { hub: true })}
     <h3>Standby</h3>
     <p class="small ${sb.length ? "" : "muted"}">${sb.length ? `${sb.map((m) => H(m.name)).join(", ")} keeps a copy of this gate and takes over if it stops answering.` : "No machine keeps a copy of this gate. Pick one and choose “Make it the standby”."}</p>
-    <div class="fp-acts"><button class="btn sm primary" data-act="fl-link">${I.plus} Link a machine</button><button class="btn sm" data-act="fl-manual">Add by hand</button></div>`;
+    <div class="fp-acts"><button class="btn sm primary" data-act="fl-link">${I.plus} Link a machine</button><button class="btn sm" data-act="fl-manual">Add by hand</button>
+      ${machines().length ? `<button class="btn sm" data-act="fl-move-gate">${I.move} Move this gate to another machine</button>` : ""}</div>`;
 }
+
+const usageLine = (u) => u ? `<span class="fl-use">${u.cpu != null ? `<b>${Number(u.cpu).toFixed(u.cpu < 10 ? 1 : 0)}%</b> cpu` : ""}${u.mem != null ? ` <b>${fmtB(u.mem)}</b> memory` : ""}</span>` : "";
 
 function appPanel(n) {
   const where = n.on.map((o) => ({ ...o, m: o.where === "self" ? null : machines().find((x) => x.id === o.where) }));
   const c = catalog().find((x) => x.id === n.appId);
   const others = machines().filter((m) => !n.on.some((o) => o.where === m.id));
+  const usageAt = (o) => o.where === "self" ? (FS.self?.d?.apps || []).find((a) => a.id === n.appId)?.usage : (o.m?.apps || []).find((a) => a.id === n.appId)?.usage;
+  const hostOf = (o) => o.where === "self" ? FS.self?.d : o.m;
   return `<div class="fp-head" style="--c:var(--blue)"><span class="fp-kind">app</span>
       <h2>${LOGO[n.appId] ? `<img class="fp-logo" src="${LOGO[n.appId]}" alt="">` : ""}${H(n.name)}</h2>
       <p class="small muted">on ${n.on.length} ${n.on.length === 1 ? "machine" : "machines"}${c?.note ? ` · ${H(c.note)}` : ""}</p>
       <button class="fp-x" data-act="fl-close" aria-label="Close">${I.close}</button></div>
-    <h3>Where it runs</h3>
-    <ul class="fl-applist">${where.map((o) => `<li>
-        <span class="fl-ico sm">${o.m ? I.machine : I.hub}</span>
-        <span class="grow"><b>${o.m ? H(o.m.name) : "This machine"}</b>${o.version ? ` <span class="mono small">${H(o.version)}</span>` : ""}
-          ${o.m ? `<small class="faint">${H(o.m.address)} · ${stateOf(o.m)[1]}</small>` : ""}</span>
-        ${o.url ? `<a class="btn sm ghost" href="${H(o.url)}" target="_blank" rel="noopener">${I.ext} Open</a>` : ""}
-        ${o.m && c?.swappable && machines().length > 1 ? `<button class="btn sm" data-act="fl-transfer" data-app="${H(n.appId)}" data-from="${H(o.m.id)}">${I.move} Move</button>` : ""}
-      </li>`).join("")}</ul>
-    ${c?.swappable ? "" : `<p class="small muted">${H(c?.note || "Aegis can't move this one between machines.")}</p>`}
+    <h3>Where it runs, and what it uses there</h3>
+    <div class="fl-where">${where.map((o) => {
+      const h = hostOf(o), u = h?.usage || {}, au = usageAt(o), link = manageOf(o.where, { id: n.appId, url: o.url });
+      return `<div class="fl-place">
+        <div class="fl-place-h"><span class="fl-ico sm">${o.m ? I.machine : I.hub}</span>
+          <span class="grow"><b>${o.m ? H(o.m.name) : "This machine"}</b>${o.version ? ` <span class="mono small">${H(o.version)}</span>` : ""}
+            <small class="faint">${o.m ? `${H(o.m.address)} · ${stateOf(o.m)[1]}` : H(h?.hostname || "the hub")}</small></span>
+          ${link ? `<a class="btn sm primary" href="${H(link)}" target="_blank" rel="noopener">${I.ext} Manage</a>` : ""}</div>
+        ${au ? `<div class="fl-appuse">${I.box} ${H(n.name)} uses ${usageLine(au)}</div>` : '<div class="fl-appuse muted small">its own use isn’t known (no service or container Aegis can read)</div>'}
+        ${h?.specs ? `<div class="fw-meters wide">${meter("cpu", cpuOf(h))}${meter("ram", pct(u.memUsed, u.memTotal))}${meter("disk", u.disk ? pct(u.disk.used, u.disk.total) : null)}</div>
+          <small class="faint">that machine: ${fmtB(u.memUsed)} of ${fmtB(u.memTotal)} memory · load ${u.load ?? "–"} on ${u.cores || "?"} cores</small>` : o.where === "self" && !FS.self ? '<small class="faint"><span class="spin"></span> looking…</small>' : ""}
+        ${o.m && c?.swappable && machines().length > 1 ? `<div class="fp-acts"><button class="btn sm" data-act="fl-transfer" data-app="${H(n.appId)}" data-from="${H(o.m.id)}">${I.move} Move or copy it</button>
+          <button class="btn sm ghost" data-act="fl-pick" data-kind="machine" data-id="${H(o.m.id)}">${I.machine} The machine</button></div>` : ""}
+      </div>`; }).join("")}</div>
+    ${c?.swappable || n.appId === "aegis-burrow" ? "" : `<p class="small muted">${H(c?.note || "Aegis can't move this one between machines.")}</p>`}
     <div class="fp-acts">
+      ${n.appId === "aegis-burrow" && n.on.some((o) => o.where === "self") && machines().length ? `<button class="btn sm" data-act="fl-move-gate">${I.move} Move this gate to another machine</button>` : ""}
       ${c?.installable && others.length ? `<button class="btn sm" data-act="fl-install-app" data-app="${H(n.appId)}">${I.box} Install it on another machine</button>` : ""}
       ${c?.swappable && n.on.filter((o) => o.where !== "self").length > 1 ? `<button class="btn sm" data-act="fl-swap" data-app="${H(n.appId)}">${I.swap} Swap two copies</button>` : ""}
     </div>`;
@@ -471,12 +501,10 @@ function appPanel(n) {
 
 function machinePanel(m) {
   const det = FS.detail.get(m.id)?.d || {}, p = det.probe || null;
-  const u = m.usage || {}, s = m.specs || {}, [dot, said] = stateOf(m);
-  const cpu = cpuOf(m);
+  const [dot, said] = stateOf(m);
   const tx = det.termix || m.termix || null, hasTermix = !!FS.data.termix;
-  const fact = (k, v) => `<div><span>${k}</span><b title="${H(v ?? "–")}">${H(v ?? "–")}</b></div>`;
   return `<div class="fp-head" style="--c:${EDGE_C[m.standby ? "standby" : m.up ? "up" : m.lastError ? "down" : "idle"]}">
-      <span class="fp-kind">machine${m.standby ? " · standby" : ""}</span>
+      <span class="fp-kind">machine${m.standby ? " · standby" : ""}${m.via === "agent" ? " · through its agent" : ""}</span>
       <h2>${H(m.name)}</h2>
       <p class="mono small">${H(m.user)}@${H(m.address)}${m.port !== 22 ? ":" + m.port : ""}</p>
       <span class="pill ${dot === "idle" ? "" : dot}"><i class="dot ${dot}"></i>${said}${m.lastSeen ? ` · ${ago(m.lastSeen)}` : ""}</span>
@@ -487,7 +515,24 @@ function machinePanel(m) {
       ${hasTermix ? `<button class="btn sm${tx ? " ghost" : " primary"}" data-act="fl-termix">${I.term} ${tx ? "In Termix ✓" : "Add to Termix"}</button>` : ""}
       <button class="btn sm" data-act="fl-probe">${I.refresh} Look again</button>
     </div>
-    <div class="fl-bars">
+    ${p ? machineBody(m, p, {}) : `<p class="fl-wait small"><span class="spin"></span> loading everything it knows about it…</p>`}
+    <h3>Keep it safe</h3>
+    <div class="fp-acts">
+      <button class="btn sm ${m.standby ? "" : "ghost"}" data-act="fl-standby">${I.shield} ${m.standby ? "Standby is on" : "Make it the standby"}</button>
+      <button class="btn sm danger ghost" data-act="fl-forget">${I.trash} Forget</button>
+    </div>
+    ${m.standby ? `<p class="fl-note">${I.shield} This machine keeps a copy of this gate${m.standbyState?.at ? `, last refreshed ${ago(m.standbyState.at)}` : ""}.
+       If this host stops answering at <span class="mono">${H(m.standbyState?.url || "")}</span> and is not just slow, it starts that copy and tries to start this one again.
+       <button class="link" data-act="fl-standby-refresh">Refresh the copy now</button></p>` : ""}
+    <p class="fl-foot muted">Linked ${ago(m.addedAt)} · looked at ${ago(m.probedAt)}</p>`;
+}
+
+// What a machine is, how loaded it is, what runs on it and everything else the
+// probe saw - for a linked machine and for this one alike.
+function machineBody(m, p, { hub }) {
+  const u = m.usage || {}, s = m.specs || {}, cpu = cpuOf(m);
+  const fact = (k, v) => `<div><span>${k}</span><b title="${H(v ?? "–")}">${H(v ?? "–")}</b></div>`;
+  return `<div class="fl-bars">
       ${bar("Processor", cpu, u.load != null ? `load ${(p?.cpu?.load || [u.load]).map((x) => Number(x).toFixed(2)).join(" · ")} on ${u.cores || "?"} cores` : "not checked")}
       ${bar("Memory", pct(u.memUsed, u.memTotal), `${fmtB(u.memUsed)} of ${fmtB(u.memTotal)}`)}
       ${bar("Disk", u.disk ? pct(u.disk.used, u.disk.total) : null, u.disk ? `${fmtB(u.disk.used)} of ${fmtB(u.disk.total)} on ${H(u.disk.mount || "/")}` : "not checked")}
@@ -500,42 +545,31 @@ function machinePanel(m) {
       ${fact("cores", s.cores)}${fact("memory", s.mem ? fmtB(s.mem) : null)}
       ${fact("architecture", m.arch || p?.os?.arch)}${fact("virtual", p?.os?.virt || "no")}
       ${fact("hostname", m.hostname || p?.host?.hostname)}${fact("up for", dur(u.uptime))}
-      ${fact("ssh port", p?.ssh?.port || m.port)}${fact("signs in as", p?.host?.user || m.user)}
+      ${fact("ssh port", p?.ssh?.port || m.port)}${fact(hub ? "runs as" : "signs in as", p?.host?.user || m.user)}
     </div>
     <h3>What runs on it</h3>
     ${(m.apps || []).length ? `<ul class="fl-applist">${m.apps.map((a) => {
-      const c = catalog().find((x) => x.id === a.id);
+      const c = catalog().find((x) => x.id === a.id), link = hub ? manageOf("self", a) : a.url;
       return `<li>${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : I.box}
-        <span class="grow"><b>${H(a.name)}</b> <span class="mono small">${H(a.version || "")}</span></span>
-        ${a.url ? `<a class="btn sm ghost" href="${H(a.url)}" target="_blank" rel="noopener">${I.ext} Open</a>` : ""}
-        ${c?.swappable && machines().length > 1 ? `<button class="btn sm ghost" data-act="fl-transfer" data-app="${H(a.id)}" data-from="${H(m.id)}" title="Move or copy it to another machine">${I.move}</button>` : ""}
+        <span class="grow"><b>${H(a.name)}</b> <span class="mono small">${H(a.version || "")}</span>${a.usage ? `<small class="faint">${usageLine(a.usage)}</small>` : ""}</span>
+        ${link ? `<a class="btn sm ghost" href="${H(link)}" target="_blank" rel="noopener">${I.ext} ${hub ? "Manage" : "Open"}</a>` : ""}
+        ${!hub && c?.swappable && machines().length > 1 ? `<button class="btn sm ghost" data-act="fl-transfer" data-app="${H(a.id)}" data-from="${H(m.id)}" title="Move or copy it to another machine">${I.move}</button>` : ""}
       </li>`; }).join("")}</ul>`
       : `<p class="muted small">Nothing Aegis knows by name${m.probedAt ? "" : " — it has not been looked at yet"}.</p>`}
-    <div class="fp-acts">
+    ${hub ? "" : `<div class="fp-acts">
       <button class="btn sm" data-act="fl-install">${I.box} Install an app</button>
       ${machines().length > 1 ? `<button class="btn sm" data-act="fl-transfer" data-from="${H(m.id)}">${I.move} Move an app</button><button class="btn sm" data-act="fl-swap">${I.swap} Swap</button>` : ""}
-    </div>
-    ${p ? `
+    </div>`}
     ${p.disks?.length ? `<h3>Disks</h3><div class="fl-bars">${p.disks.map((dk) => bar(H(dk.mount), pct(dk.used, dk.total), `${fmtB(dk.used)} used · ${fmtB(dk.free)} free of ${fmtB(dk.total)}`)).join("")}</div>` : ""}
     <h3>Network</h3>
-    <ul class="fp-addr">${[...new Set([m.address, ...(m.candidates || []), ...(p.addresses || [])])].filter(Boolean).map((a) => `<li><span class="mono">${H(a)}</span>${a === m.address ? '<span class="fl-tag">used</span>' : ""}
+    <ul class="fp-addr">${[...new Set([hub ? null : m.address, ...(m.candidates || []), ...(p.addresses || [])])].filter(Boolean).map((a) => `<li><span class="mono">${H(a)}</span>${a === m.address ? '<span class="fl-tag">used</span>' : ""}
       <button class="iconbtn sm" data-act="fl-copy" data-text="${H(a)}" aria-label="Copy">${I.copy}</button></li>`).join("")}</ul>
     ${p.ssh?.listening?.length ? `<p class="small muted">Listening on ${p.ssh.listening.slice(0, 24).map((x) => `<span class="mono">${x}</span>`).join(", ")}${p.ssh.listening.length > 24 ? " …" : ""}</p>` : ""}
     ${p.docker ? `<details class="fl-more" ${p.docker.length && p.docker.length < 8 ? "open" : ""}><summary>${p.docker.length} ${p.docker.length === 1 ? "container" : "containers"} running</summary>
-      <ul class="fl-raw">${p.docker.map((c) => `<li><b>${H(c.name)}</b> <span class="mono small">${H(c.image)}</span><br><span class="muted small">${H(c.status)}${c.ports ? ` · ${H(c.ports)}` : ""}</span></li>`).join("") || '<li class="muted">none</li>'}</ul></details>`
+      <ul class="fl-raw">${p.docker.map((c) => { const cu = p.usage?.containers?.[c.name]; return `<li><b>${H(c.name)}</b> <span class="mono small">${H(c.image)}</span><br><span class="muted small">${H(c.status)}${c.ports ? ` · ${H(c.ports)}` : ""}</span>${cu ? `<br>${usageLine(cu)}` : ""}</li>`; }).join("") || '<li class="muted">none</li>'}</ul></details>`
       : '<p class="small muted">No Docker there (or this user may not use it).</p>'}
     ${p.units?.length ? `<details class="fl-more"><summary>${p.units.length} services running</summary>
-      <ul class="fl-raw">${p.units.map((x) => `<li class="mono small">${H(x)}</li>`).join("")}</ul></details>` : ""}`
-    : `<p class="fl-wait small"><span class="spin"></span> loading everything it knows about it…</p>`}
-    <h3>Keep it safe</h3>
-    <div class="fp-acts">
-      <button class="btn sm ${m.standby ? "" : "ghost"}" data-act="fl-standby">${I.shield} ${m.standby ? "Standby is on" : "Make it the standby"}</button>
-      <button class="btn sm danger ghost" data-act="fl-forget">${I.trash} Forget</button>
-    </div>
-    ${m.standby ? `<p class="fl-note">${I.shield} This machine keeps a copy of this gate${m.standbyState?.at ? `, last refreshed ${ago(m.standbyState.at)}` : ""}.
-       If this host stops answering at <span class="mono">${H(m.standbyState?.url || "")}</span> and is not just slow, it starts that copy and tries to start this one again.
-       <button class="link" data-act="fl-standby-refresh">Refresh the copy now</button></p>` : ""}
-    <p class="fl-foot muted">Linked ${ago(m.addedAt)} · looked at ${ago(m.probedAt)}</p>`;
+      <ul class="fl-raw">${p.units.map((x) => `<li class="mono small">${H(x)}</li>`).join("")}</ul></details>` : ""}`;
 }
 const bar = (label, v, sub) => `<div class="fl-bar${v != null && v > 85 ? " hot" : ""}">
   <span>${label}</span><i><b style="width:${v || 0}%"></b></i><em>${v == null ? "–" : v + "%"}</em><small>${sub}</small></div>`;
@@ -556,11 +590,13 @@ export async function click(el, act) {
     return true;
   }
   if (act === "fl-close") { FS.sel = null; X.render(); return true; }
+  if (act === "fl-self-again") { el.disabled = true; await loadSelf(true); return true; }
   if (act === "fl-link") { linkForm(); return true; }
   if (act === "fl-manual") { manualForm(); return true; }
   if (act === "fl-swap") { swapForm(el.dataset.app); return true; }
   if (act === "fl-transfer") { transferForm(el.dataset.app, el.dataset.from || m?.id); return true; }
   if (act === "fl-install-app") { installAppForm(el.dataset.app); return true; }
+  if (act === "fl-move-gate") { moveGateForm(); return true; }
   if (!m) return false;
   if (act === "fl-probe") {
     el.disabled = true;
@@ -776,6 +812,31 @@ function transferForm(appId, fromId) {
       if (from === to) { mo.querySelector("#flErr").textContent = "Pick two different machines."; return; }
       if (!mo.querySelector("#flOk").checked) { mo.querySelector("#flErr").textContent = "Tick the box first."; return; }
       job("/__gate/api/fleet/transfer", { app: mo.querySelector("#flApp").value, from, to, mode: mo.querySelector('input[name="flMode"]:checked').value, confirm: true });
+    });
+  });
+}
+
+// The whole gate - login, domain, tunnels, addons, machines - onto a linked machine.
+function moveGateForm() {
+  const ok = machines().filter((x) => x.up);
+  X.openModal(`<h2>${I.move} Move this gate to another machine</h2>
+    <p>Everything this dashboard is goes with it: the login, the domain and its tunnel, every tunnel, the addons and their
+       settings, the certificates, and these machines. The other machine gets Aegis × Burrow first if it doesn't have it.
+       Once it answers there, this machine steps aside and only shows where the gate went.</p>
+    <ul class="fl-steps">
+      <li>Your address stays the same: after a minute, this same link opens the gate on the new machine.</li>
+      <li>Addons start themselves there (their services are installed again where they need to be).</li>
+      <li>Apps beside the gate on this machine (Termix, Selkies Forge) stay here: move them with <b>Move an app</b>.</li>
+      <li>This machine becomes one of the new gate's machines, so you can move back from there.</li>
+    </ul>
+    ${ok.length ? `<label class="fld"><span>Move it to</span><select id="flTo">${ok.map((x) => `<option value="${H(x.id)}">${H(x.name)} · ${H(x.address)}</option>`).join("")}</select></label>`
+      : '<p class="err-msg">No linked machine is answering right now.</p>'}
+    <label class="row fl-confirm"><input type="checkbox" id="flOk"><span>Move the whole gate there. This machine stops being the gate.</span></label>
+    <div class="err-msg" id="flErr"></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo" ${ok.length ? "" : "disabled"}>${I.move} Move it</button></div>`, (mo) => {
+    mo.querySelector("#flGo").addEventListener("click", () => {
+      if (!mo.querySelector("#flOk").checked) { mo.querySelector("#flErr").textContent = "Tick the box first."; return; }
+      job(`/__gate/api/fleet/${mo.querySelector("#flTo").value}/movegate`, { confirm: true });
     });
   });
 }

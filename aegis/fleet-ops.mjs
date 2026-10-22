@@ -13,9 +13,9 @@
 // is a second key).
 
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { hostname, userInfo } from "node:os";
+import { hostname, networkInterfaces, userInfo } from "node:os";
 import { randomBytes } from "node:crypto";
 import { HOME, DATA, readJson, writeJson } from "./config.mjs";
 import { FleetError, run, sq } from "./fleet.mjs";
@@ -388,6 +388,125 @@ export async function toTermix(fleet, termix, id, { username, password, auth = "
   if (!made.ok) fail(made.j.error || `Termix would not add the host (HTTP ${made.status}).`);
   fleet.patch(id, { termix: { at: Date.now(), hostId: made.j.hostId || made.j.id || null, auth: body.authType } });
   return { ok: true, existed: false, id: made.j.hostId || made.j.id || null, name: m.name, upstream: t.upstream };
+}
+
+// ------------------------------------------------------------------ moving this gate
+// This whole gate - login, domain, tunnels, addons, machines, settings - onto
+// a linked machine, which then *is* the gate. In order:
+//
+//   1. refuse what can't move (a domain whose tunnel is run by a cloudflared
+//      service outside Aegis would keep sending its traffic here)
+//   2. the machine gets Aegis × Burrow (its own installer, --no-start), or the
+//      Aegis it already has is stopped and its config/data put aside
+//   3. this gate's config.json, secret.key and data/ go over; paths under this
+//      home are rewritten to that one; the target is dropped from its machines
+//      and this machine is added in its place (so the new gate can reach it)
+//   4. it starts there; on its first start every installed addon is started
+//      "whatever it takes" (burrow/rescue.mjs), which installs Bulwark's
+//      service and the like over there
+//   5. only once it answers: this gate stands down (settings.moved) - after a
+//      restart it serves a notice and nothing else. `aegis resume-here` undoes it.
+export function moveGate(fleet, id, { domain, version } = {}) {
+  const m = fleet.get(id);
+  if (domain && domain.managed === false) {
+    fail(`Your domain's tunnel is run by a cloudflared service outside Aegis on this machine, so its traffic would keep arriving here. Link the domain from Aegis itself (Settings → Domain) first, or move that cloudflared service with it.`);
+  }
+  return fleet.start("move-gate", `Moving this gate to ${m.name}`, id, async (job) => {
+    const tag = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    job.step(`Looking at ${m.name}`, 0.04);
+    const pre = await fleet.ssh(m, `set -u
+cfg="$HOME/.config/aegis/aegis.json"
+echo "arch=$(uname -m)"
+echo "free=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+command -v curl >/dev/null && echo curl=ok
+command -v tar >/dev/null && echo tar=ok
+[ -r "$cfg" ] && { echo "have=yes"; sed -n 's/.*"home": *"\\([^"]*\\)".*/home=\\1/p;s/.*"cli": *"\\([^"]*\\)".*/cli=\\1/p' "$cfg"; }
+echo "userhome=$HOME"`, { timeout: 30000 });
+    const kv = Object.fromEntries(pre.out.split("\n").map((l) => l.split("=")).filter((x) => x.length >= 2).map(([k, ...v]) => [k.trim(), v.join("=").trim()]));
+    if (!kv.tar) fail(`${m.name} has no tar.`);
+    const size = Number((await run("du", ["-sk", HOME])).out.split(/\s/)[0]) || 0;
+    if (Number(kv.free) && Number(kv.free) < size * 2 + 300 * 1024) fail(`${m.name} has ${Math.round(Number(kv.free) / 1024)} MB free; this gate needs about ${Math.round((size * 2) / 1024 + 300)} MB.`);
+
+    let home = kv.home, cli = kv.cli;
+    if (kv.have !== "yes" || !home || !cli) {
+      if (!kv.curl) fail(`${m.name} has no curl to fetch Aegis × Burrow with.`);
+      job.step(`Installing Aegis × Burrow on ${m.name} (its own installer)`, 0.1);
+      const r = await fleet.ssh(m, `set -o pipefail; curl -fsSL https://raw.githubusercontent.com/alexd-aero/aegis-burrow/main/install.sh | bash -s -- --no-start </dev/null`,
+                                { timeout: 20 * 60000, onLine: (l) => job.log(`  ${l}`) });
+      if (r.code !== 0) fail(`the installer failed on ${m.name} (exit ${r.code})`);
+      const again = await fleet.ssh(m, `sed -n 's/.*"home": *"\\([^"]*\\)".*/home=\\1/p;s/.*"cli": *"\\([^"]*\\)".*/cli=\\1/p' "$HOME/.config/aegis/aegis.json"`, { timeout: 20000 });
+      home = /home=(.+)/.exec(again.out)?.[1]?.trim(); cli = /cli=(.+)/.exec(again.out)?.[1]?.trim();
+      if (!home || !cli) fail(`Aegis × Burrow did not say where it lives on ${m.name}.`);
+    } else job.log(`${m.name} already has Aegis × Burrow in ${home}: its own config and data are put aside, not deleted.`);
+
+    job.step("Packing this gate", 0.35);
+    const tar = join(fleet.dir, `move-${tag}.tgz`);
+    // this machine joins the new gate's machines, with the key the gate already uses
+    const me = { id: `m-${randomBytes(5).toString("hex")}`, name: hostname(), hostname: hostname(), user: userInfo().username, port: 22,
+                 address: localAddrs()[0] || hostname(), candidates: localAddrs(), addedAt: Date.now(), addedFrom: "move", lastSeen: null,
+                 lastError: null, standby: false, probe: null, probedAt: null, os: "", arch: "" };
+    const t = await run("tar", ["-C", HOME, "--exclude=./data/fleet/swap", "--exclude=./data/fleet/clone-*", "--exclude=./data/fleet/move-*",
+                                "--exclude=./data/control.sock", "--exclude=./data/runtime.json", "-czf", tar,
+                                ...["config.json", "secret.key", "data"].filter((f) => existsSync(join(HOME, f)))], { timeout: 10 * 60000 });
+    if (t.code !== 0) fail(`could not pack this gate: ${t.err.split("\n").pop()}`);
+    job.log(`  ${(statSync(tar).size / 1e6).toFixed(1)} MB: config, secret key, data (login, domain, tunnels, addons, machines, certificates)`);
+    try {
+      const pub = (await fleet.publicKey()).trim();
+      job.step(`Copying it to ${m.name}`, 0.45);
+      const remote = `/tmp/aegis-move-${randomBytes(4).toString("hex")}.tgz`;
+      await fleet.copyTo(m, tar, remote, 20 * 60000);
+
+      job.step(`Putting it in place on ${m.name}`, 0.6);
+      const r = await fleet.ssh(m, `set -eu
+H=${sq(home)}
+"${cli.replace(/"/g, "")}" stop >/dev/null 2>&1 || true
+keep="$H/before-move-${tag}"
+mkdir -p "$keep"
+for f in config.json secret.key data; do [ -e "$H/$f" ] && mv "$H/$f" "$keep/" || true; done
+tar -C "$H" -xzf ${sq(remote)}
+rm -f ${sq(remote)}
+chmod 700 "$H" "$H/data"; chmod 600 "$H/secret.key"
+echo "  unpacked into $H (what was there is in $keep)"
+node_bin=$(command -v node || echo "$H/node/bin/node")
+OLD=${sq(HOME)} NEW="$H" DROP=${sq(id)} ME=${sq(JSON.stringify(me))} FROM=${sq(hostname())} "$node_bin" -e '
+  const fs = require("fs"), path = require("path");
+  const { OLD, NEW, DROP, ME, FROM } = process.env;
+  const walk = (d, n = 0) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name);
+    if (e.isDirectory() && n < 3 && e.name !== "addons") walk(p, n + 1);
+    else if (e.isFile() && e.name.endsWith(".json")) { const t = fs.readFileSync(p, "utf8"); if (t.includes(OLD)) { fs.writeFileSync(p, t.split(OLD).join(NEW)); console.log("  paths rewritten in " + path.relative(NEW, p)); } } } };
+  for (const f of ["config.json"]) { const p = path.join(NEW, f); if (fs.existsSync(p)) { const t = fs.readFileSync(p, "utf8"); if (t.includes(OLD)) fs.writeFileSync(p, t.split(OLD).join(NEW)); } }
+  walk(path.join(NEW, "data"));
+  const fj = path.join(NEW, "data", "fleet.json");
+  if (fs.existsSync(fj)) { const db = JSON.parse(fs.readFileSync(fj, "utf8")); db.machines = (db.machines || []).filter((x) => x.id !== DROP); db.machines.push(JSON.parse(ME)); fs.writeFileSync(fj, JSON.stringify(db)); console.log("  " + FROM + " is now one of its machines"); }
+  fs.writeFileSync(path.join(NEW, "data", "moved-in.json"), JSON.stringify({ from: FROM, at: Date.now() }));
+'`, { timeout: 5 * 60000 });
+      if (r.code !== 0) fail(`putting it in place failed: ${(r.err || r.out).split("\n").filter(Boolean).pop()}`);
+      for (const l of r.out.split("\n").filter(Boolean)) job.log(l);
+
+      job.step(`Letting the new gate reach ${hostname()}`, 0.7);
+      const ak = join(process.env.HOME || userInfo().homedir, ".ssh", "authorized_keys");
+      mkdirSync(dirname2(ak), { recursive: true, mode: 0o700 });
+      const had = existsSync(ak) && readFileSync(ak, "utf8").includes(pub);
+      if (!had) appendFileSync(ak, `${pub}\n`, { mode: 0o600 });
+      job.log(had ? "  its key was already allowed here" : `  its machine key may now sign in here as ${userInfo().username}`);
+
+      job.step(`Starting it on ${m.name}`, 0.8);
+      const st = await fleet.ssh(m, `"${cli.replace(/"/g, "")}" start 2>&1 | tail -5`, { timeout: 3 * 60000, onLine: (l) => job.log(`  ${l}`) });
+      if (!/started|done|already/i.test(st.out)) fail(`it did not come up on ${m.name}: ${st.out.split("\n").filter(Boolean).pop() || "no answer"}. This gate keeps running; nothing here changed.`);
+
+      job.step("Handing over", 0.95);
+      fleet.settings.set({ moved: { to: m.name, address: m.address, machine: id, at: Date.now(), version: version || null } });
+      job.log(`${m.name} is the gate now. This one stands down in a few seconds and only shows where it went; \`aegis resume-here\` on this machine undoes that.`, "ok");
+      job.log("Addons start themselves there on its first start (their services are installed again if they have to be). Apps that run beside Aegis on this machine - Termix, Selkies Forge - stay here: move them with Move an app.", "muted");
+      return { machine: id, home, standDown: true };
+    } finally { rmSync(tar, { force: true }); }
+  });
+}
+const dirname2 = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
+function localAddrs() {
+  const out = [];
+  for (const list of Object.values(networkInterfaces())) for (const a of list || []) if (!a.internal && a.family === "IPv4") out.push(a.address);
+  return out.sort((a, b) => (/^100\./.test(b) ? 1 : 0) - (/^100\./.test(a) ? 1 : 0));        // a Tailscale address first: it reaches from anywhere
 }
 
 // ------------------------------------------------------------------ the standby clone

@@ -1422,3 +1422,18 @@ html.fl-noscroll .wrap { z-index: 30; }
   .top-r { gap: 10px; flex: none; }
   .top-r .live span:not(.dot) { display: none; }
 }
+/* an app's panel: each place it runs, what it uses there */
+.fl-where { display: grid; gap: 8px; }
+.fl-place { display: grid; gap: 8px; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(255,255,255,.02); }
+.fl-place-h { display: flex; align-items: center; gap: 9px; }
+.fl-place-h .grow { min-width: 0; display: grid; }
+.fl-place-h small { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-appuse { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+.fl-appuse svg { width: 14px; height: 14px; color: var(--blue); flex: none; }
+.fl-use { font: 11.5px var(--mono); color: var(--muted); }
+.fl-use b { color: var(--text); font-weight: 600; }
+.fw-meters.wide .fl-meter { height: 16px; }
+.fw-meters.wide .fl-meter em { line-height: 16px; }
+.fl-applist small .fl-use { font-size: 11px; }
+.fl-steps { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.fl-steps b { color: var(--text); font-weight: 600; }

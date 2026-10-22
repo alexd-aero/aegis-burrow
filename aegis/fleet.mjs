@@ -24,9 +24,11 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readJson, writeJson } from "./config.mjs";
+import { newAgentKey } from "./fleet-agent.mjs";
 
 export class FleetError extends Error {}
 const fail = (m) => { throw new FleetError(m); };
@@ -163,6 +165,20 @@ done
 for f in "$HOME"/.config/aegis/programs/*.json; do
   [ -r "$f" ] && { echo "--prog:$f"; head -c 2000 "$f"; echo; }
 done
+sec usage
+if have docker && docker info >/dev/null 2>&1; then
+  timeout 8 docker stats --no-stream --format 'docker|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' 2>/dev/null | head -40
+fi
+aegis_unit=$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "$HOME/.config/aegis/aegis.json" 2>/dev/null | head -1)
+pick='^(bulwark|selkies-forge|aegis[a-z0-9-]*|termix[a-z0-9-]*)\.service$'
+if have systemctl; then
+  for u in $(systemctl --user list-units --type=service --state=running --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}' | grep -E "$pick"); do
+    pid=$(systemctl --user show -p MainPID --value "$u" 2>/dev/null); echo "user|$u|$pid|$(ps -o pcpu=,rss= -p "$pid" 2>/dev/null | tr -s ' ')|$(systemctl --user show -p MemoryCurrent --value "$u" 2>/dev/null)"
+  done
+  for u in $(systemctl list-units --type=service --state=running --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}' | grep -E "$pick|^$aegis_unit$"); do
+    pid=$(systemctl show -p MainPID --value "$u" 2>/dev/null); echo "system|$u|$pid|$(ps -o pcpu=,rss= -p "$pid" 2>/dev/null | tr -s ' ')|$(systemctl show -p MemoryCurrent --value "$u" 2>/dev/null)"
+  done
+fi
 sec end
 `;
 
@@ -212,6 +228,7 @@ export function readProbe(raw) {
   }
   if (key) files[key] = buf.join("\n");
 
+  const usage = readUsage(s.usage);
   const memTotal = num(mem.memtotal) * 1024, memFree = num(mem.memavailable) * 1024;
   return {
     host: { hostname: host.hostname || "", user: host.user || "", uid: num(host.uid), home: host.home || "", uptime: num(host.uptime) },
@@ -222,8 +239,38 @@ export function readProbe(raw) {
     mem: { total: memTotal, free: memFree, used: memTotal && memFree ? memTotal - memFree : null },
     disks, addresses,
     ssh: { port: num(ssh.port) || 22, listening: (ssh.listening || "").split(",").map(num).filter(Boolean) },
-    docker, units, apps: foundApps(files, docker, units, host.home || ""),
+    docker, units, apps: withUsage(foundApps(files, docker, units, host.home || ""), usage, files, host.home || ""), usage,
   };
+}
+
+// docker stats and the known apps' services, as {containers: {name: {cpu, mem}}, units: {unit: {cpu, mem, pid}}}
+const BYTES = { b: 1, kib: 1024, kb: 1e3, mib: 1024 ** 2, mb: 1e6, gib: 1024 ** 3, gb: 1e9, tib: 1024 ** 4 };
+const toBytes = (v) => { const m = /^([\d.]+)\s*([a-z]+)$/i.exec(String(v || "").trim()); return m ? Math.round(Number(m[1]) * (BYTES[m[2].toLowerCase()] || 1)) : null; };
+function readUsage(block) {
+  const out = { containers: {}, units: {} };
+  for (const l of String(block || "").split("\n")) {
+    const f = l.split("|");
+    if (f[0] === "docker" && f.length >= 4) out.containers[f[1]] = { cpu: num(String(f[2]).replace("%", "")), mem: toBytes(String(f[3]).split("/")[0]) };
+    else if ((f[0] === "user" || f[0] === "system") && f.length >= 4) {
+      const [pcpu, rss] = String(f[3] || "").trim().split(" ");
+      const cur = num(f[4]);
+      out.units[f[1].replace(/\.service$/, "")] = { scope: f[0], pid: num(f[2]), cpu: num(pcpu), mem: cur && cur < 2 ** 60 ? cur : num(rss) != null ? num(rss) * 1024 : null };
+    }
+  }
+  return out;
+}
+// each known app gets what it is using right now, when the probe could tell
+function withUsage(apps, usage, files, home) {
+  let aegisUnit = null;
+  try { aegisUnit = JSON.parse(files[`${home}/.config/aegis/aegis.json`] || "null")?.service?.name || null; } catch { /* none */ }
+  const unit = (n) => n && usage.units[String(n).replace(/^user:/, "").replace(/\.service$/, "")];
+  for (const a of apps) {
+    const u = a.container ? usage.containers[a.container]
+      : a.id === "aegis-burrow" ? unit(aegisUnit || a.service)
+      : unit(a.service) || unit(a.id);
+    if (u) a.usage = { cpu: u.cpu, mem: u.mem };
+  }
+  return apps;
 }
 
 // The apps Aegis knows how to work with, read off their own drop-in files;
@@ -268,6 +315,9 @@ function foundApps(files, docker, units, home) {
 // How often every linked machine is looked at in the background (one quick
 // SSH "echo"), and how many misses in a row make it "not answering". One slow
 // answer under load is not a machine going down.
+const PROXY = fileURLToPath(new URL("./fleet-proxy.mjs", import.meta.url));
+// the machine agent, pasted into the link script (aegis/agent/agent.py)
+const AGENT_PY = readFileSync(fileURLToPath(new URL("./agent/agent.py", import.meta.url)), "utf8");
 export const BEAT_MS = 60000;
 export const MISSES_DOWN = 3;
 export const isUp = (m, now = Date.now()) => !!m.lastSeen && (m.misses || 0) < MISSES_DOWN && now - m.lastSeen < (MISSES_DOWN + 2) * BEAT_MS;
@@ -382,10 +432,16 @@ export class Fleet {
   joinScript(token, base) {
     const url = `${base}/__gate/fleet/join?t=${token}`;
     const key = readFileSync(`${this.keyPath()}.pub`, "utf8").trim();
+    // the agent dials the dashboard's public name when there is one (a LAN address may not reach from elsewhere)
+    const main = this.settings.get("domain")?.mainHost;
+    const agentBase = main ? `https://${main}` : base;
     return `#!/bin/sh
 # Links this machine to the Aegis x Burrow dashboard at ${base}
 # It adds one public key to ~/.ssh/authorized_keys for the user running it,
-# then tells that dashboard this machine's name, addresses and SSH port.
+# makes sure an SSH server runs here, tells that dashboard this machine's name,
+# addresses and SSH port, and starts a small agent (with Python 3) that keeps
+# the dashboard able to reach this machine's SSH from wherever it is - one
+# outgoing connection to ${agentBase}, joined only to SSH on 127.0.0.1.
 # Nothing else is sent, and no password is asked for or stored.
 set -eu
 KEY=${JSON.stringify(key)}
@@ -407,8 +463,24 @@ if [ -r /etc/ssh/sshd_config ]; then
   P=$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)
   [ -n "\${P:-}" ] && PORT=$P
 fi
-if command -v ss >/dev/null 2>&1 && ! ss -H -ltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$PORT"; then
-  echo "  warning: nothing is listening on port $PORT - is the SSH server installed and running?"
+listening() { command -v ss >/dev/null 2>&1 || return 0; ss -H -ltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$PORT"; }
+if ! listening; then
+  echo "  no SSH server answers on port $PORT: starting one"
+  S=""; [ "$(id -u)" = 0 ] || { sudo -n true 2>/dev/null && S="sudo -n"; } || true
+  if [ "$(id -u)" = 0 ] || [ -n "$S" ]; then
+    if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+      if command -v apt-get >/dev/null 2>&1; then $S env DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server >/dev/null 2>&1 || true
+      elif command -v dnf >/dev/null 2>&1; then $S dnf install -y -q openssh-server >/dev/null 2>&1 || true
+      elif command -v pacman >/dev/null 2>&1; then $S pacman -S --noconfirm openssh >/dev/null 2>&1 || true
+      elif command -v apk >/dev/null 2>&1; then $S apk add -q openssh >/dev/null 2>&1 || true
+      elif command -v zypper >/dev/null 2>&1; then $S zypper -q -n install openssh >/dev/null 2>&1 || true; fi
+    fi
+    $S systemctl enable --now ssh >/dev/null 2>&1 || $S systemctl enable --now sshd >/dev/null 2>&1 || $S service ssh start >/dev/null 2>&1 || $S rc-service sshd start >/dev/null 2>&1 || true
+    if listening; then echo "  SSH server running"; else echo "  warning: the SSH server did not start - start it by hand once (it stays on)"; fi
+  else
+    echo "  warning: no SSH server here, and installing one needs your password. Run once:"
+    echo "    sudo apt install openssh-server    (or your system's openssh package)"
+  fi
 fi
 
 ADDRS=$(ip -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' | head -12 | tr '\\n' ' ' \\
@@ -432,6 +504,33 @@ case "$OUT" in
   FAILED|"") echo "  could not reach $BASE - is this machine able to open it?" >&2; exit 1 ;;
   *error*) echo "  the dashboard said: $OUT" >&2; exit 1 ;;
 esac
+
+# The agent: the dashboard's way in from anywhere, so nothing else is ever needed.
+AID=$(printf '%s' "$OUT" | sed -n 's/.*"agent":{"id":"\\([^"]*\\)","key":"\\([^"]*\\)".*/\\1/p')
+AKEY=$(printf '%s' "$OUT" | sed -n 's/.*"agent":{"id":"\\([^"]*\\)","key":"\\([^"]*\\)".*/\\2/p')
+if [ -n "$AID" ] && command -v python3 >/dev/null 2>&1; then
+  D="$HOME/.config/aegis-fleet"; mkdir -p "$D"; chmod 700 "$D"
+  cat > "$D/agent.py" <<'AEGIS_AGENT_PY'
+${AGENT_PY}AEGIS_AGENT_PY
+  printf '{"base":"%s","id":"%s","key":"%s","ssh_port":%s}\n' ${JSON.stringify(agentBase)} "$AID" "$AKEY" "$PORT" > "$D/agent.json"
+  chmod 600 "$D/agent.json"; chmod 700 "$D/agent.py"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    mkdir -p "$HOME/.config/systemd/user"
+    printf '[Unit]\nDescription=Aegis x Burrow machine agent (keeps this machine reachable from its gate)\nAfter=network-online.target\n\n[Service]\nExecStart=%s %s/agent.py\nRestart=always\nRestartSec=5\nStandardOutput=append:%s/agent.log\nStandardError=append:%s/agent.log\n\n[Install]\nWantedBy=default.target\n' "$(command -v python3)" "$D" "$D" "$D" > "$HOME/.config/systemd/user/aegis-fleet-agent.service"
+    systemctl --user daemon-reload
+    systemctl --user enable aegis-fleet-agent.service >/dev/null 2>&1 || true
+    systemctl --user restart aegis-fleet-agent.service
+    loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || sudo -n loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+    echo "  agent running (a user service; it keeps running after you log out)"
+  else
+    [ -f "$D/agent.pid" ] && kill "$(cat "$D/agent.pid")" 2>/dev/null || true
+    nohup python3 "$D/agent.py" >> "$D/agent.log" 2>&1 & echo $! > "$D/agent.pid"
+    (crontab -l 2>/dev/null | grep -v aegis-fleet/agent.py; echo "@reboot python3 $D/agent.py >> $D/agent.log 2>&1") | crontab - 2>/dev/null || true
+    echo "  agent running (and again at boot)"
+  fi
+elif [ -n "$AID" ]; then
+  echo "  no Python 3 here: the dashboard reaches this machine over SSH directly only"
+fi
 echo "Done. The machine now shows up under Burrow -> Machines."
 `;
   }
@@ -457,14 +556,14 @@ echo "Done. The machine now shows up under Burrow -> Machines."
       address: candidates[0], candidates, port, user,
       os: String(facts.os || "").slice(0, 80), arch: String(facts.arch || "").slice(0, 20),
       addedAt: Date.now(), addedFrom: ip || null, lastSeen: null, lastError: null,
-      standby: false, probe: null, probedAt: null,
+      standby: false, probe: null, probedAt: null, agentKey: newAgentKey(),
     };
     db.machines.push(m);
     this.save(db);
     this.log("fleet: claimed", id, host, candidates.join(","));
     // Try every address it gave us and keep the first that answers.
     this.verify(id).catch((e) => this.log("fleet: verify", id, e.message));
-    return { ok: true, id, name: m.name };
+    return { ok: true, id, name: m.name, agent: { id, key: m.agentKey } };
   }
 
   // Add one by hand: the key has to be there already (the command above, or
@@ -493,14 +592,26 @@ echo "Done. The machine now shows up under Burrow -> Machines."
             "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
             "-o", "LogLevel=ERROR"];
   }
-  sshArgs(m) { return [...this.opts(), "-p", String(m.port), `${m.user}@${m.address}`]; }
-  scpArgs(m) { return [...this.opts(), "-P", String(m.port)]; }
+  // Through its agent (aegis/fleet-agent.mjs) when it can't be reached directly.
+  viaAgent(m) { return m.via === "agent" && !!this.agents?.online(m.id); }
+  // force: true = through the agent, false = never, undefined = whichever it answers on
+  proxyOpts(m, force) {
+    if (force === false || !(force || this.viaAgent(m)) || !this.agents) return [];
+    return ["-o", `ProxyCommand=${process.execPath} ${PROXY} ${this.agents.sock} ${m.id}`];
+  }
+  sshArgs(m, force) { return [...this.opts(), ...this.proxyOpts(m, force), "-p", String(m.port), `${m.user}@${m.address}`]; }
+  scpArgs(m, force) { return [...this.opts(), ...this.proxyOpts(m, force), "-P", String(m.port)]; }
 
   // Feed a script to bash on the far side. Never builds a command line out of
   // anything you typed.
   async ssh(m, script, { timeout = 45000, onLine } = {}) {
     if (!existsSync(this.keyPath())) await this.publicKey();
-    const r = await run("ssh", [...this.sshArgs(m), "--", "bash -s"], { input: script, timeout, onLine });
+    let r = await run("ssh", [...this.sshArgs(m), "--", "bash -s"], { input: script, timeout, onLine });
+    // couldn't connect straight there: through its agent, and remember that
+    if (r.code === 255 && !this.viaAgent(m) && this.agents?.online(m.id) && !r.out) {
+      r = await run("ssh", [...this.sshArgs(m, true), "--", "bash -s"], { input: script, timeout, onLine });
+      if (r.code !== 255) { try { this.patch(m.id, { via: "agent" }); } catch { /* forgotten */ } m.via = "agent"; }
+    }
     if (r.code === 124) fail(`${m.name} did not answer in time.`);
     if (r.code === 255 || (r.code === 127 && /ENOENT|not found/i.test(r.err))) {
       fail(sshWhy(r.err) || `Could not reach ${m.address}:${m.port}: ${r.err.split("\n").pop() || "no route"}`);
@@ -508,7 +619,10 @@ echo "Done. The machine now shows up under Burrow -> Machines."
     return r;
   }
   async copyTo(m, localPath, remotePath, timeout = 10 * 60000) {
-    const r = await run("scp", [...this.scpArgs(m), localPath, `${m.user}@${m.address}:${remotePath}`], { timeout });
+    let r = await run("scp", [...this.scpArgs(m), localPath, `${m.user}@${m.address}:${remotePath}`], { timeout });
+    if (r.code !== 0 && !this.viaAgent(m) && this.agents?.online(m.id)) {
+      r = await run("scp", [...this.scpArgs(m, true), localPath, `${m.user}@${m.address}:${remotePath}`], { timeout });
+    }
     if (r.code !== 0) fail(`Copying to ${m.name} failed: ${r.err.split("\n").pop() || r.out}`);
     return true;
   }
@@ -519,14 +633,15 @@ echo "Done. The machine now shows up under Burrow -> Machines."
     const tries = [m.address, ...(m.candidates || [])].filter((a, i, all) => a && all.indexOf(a) === i);
     let last = null;
     for (const address of tries) {
-      const r = await run("ssh", [...this.sshArgs({ ...m, address }), "--", "echo aegis-ok"], { timeout: 20000 });
+      const r = await run("ssh", [...this.sshArgs({ ...m, address }, false), "--", "echo aegis-ok"], { timeout: 20000 });
       if (r.code === 0 && r.out.includes("aegis-ok")) {
-        this.patch(id, { address, lastSeen: Date.now(), lastError: null, misses: 0 });
+        this.patch(id, { address, lastSeen: Date.now(), lastError: null, misses: 0, via: "direct" });
         await this.probe(id).catch(() => {});
         return this.get(id);
       }
       last = sshWhy(r.err) || r.err.split("\n").filter(Boolean).pop() || `exit ${r.code}`;
     }
+    if (await this.tryAgent(m)) { await this.probe(id).catch(() => {}); return this.get(id); }
     this.patch(id, { lastError: last, misses: MISSES_DOWN });
     fail(`Could not get in: ${last}`);
   }
@@ -563,10 +678,19 @@ echo "Done. The machine now shows up under Burrow -> Machines."
     try {
       const queue = this.list().filter((m) => !this.probing.has(m.id));
       const one = async (m) => {
-        const r = await run("ssh", [...this.sshArgs(m), "--", "echo aegis-ok"], { timeout: 20000 });
+        // straight there first (every 10 minutes even while it goes through its agent), else through the agent
+        const direct = m.via !== "agent" || Date.now() - (m.directTried || 0) > 600e3;
+        let r = direct ? await run("ssh", [...this.sshArgs(m, false), "--", "echo aegis-ok"], { timeout: 20000 }) : { code: 1, out: "", err: "" };
+        let via = "direct";
+        if (direct) this.patch(m.id, { directTried: Date.now() });
+        if (!(r.code === 0 && r.out.includes("aegis-ok")) && this.agents?.online(m.id)) {
+          r = await run("ssh", [...this.sshArgs(m, true), "--", "echo aegis-ok"], { timeout: 25000 });
+          via = "agent";
+        }
         let cur;
         try { cur = this.get(m.id); } catch { return; }                         // forgotten meanwhile
         if (r.code === 0 && r.out.includes("aegis-ok")) {
+          if (cur.via !== via) { this.patch(m.id, { via }); this.log("fleet:", m.name, via === "agent" ? "answers through its agent" : "answers directly"); }
           if (!isUp(cur)) this.log("fleet:", m.name, "answers again");
           this.patch(m.id, { lastSeen: Date.now(), lastError: null, misses: 0 });
         } else {
@@ -586,6 +710,16 @@ echo "Done. The machine now shows up under Burrow -> Machines."
       await Promise.all(workers);
     } finally { this._beating = false; }
   }
+  // It didn't answer directly: does it through its agent?
+  async tryAgent(m) {
+    if (!this.agents?.online(m.id)) return false;
+    const r = await run("ssh", [...this.sshArgs(m, true), "--", "echo aegis-ok"], { timeout: 25000 });
+    if (r.code !== 0 || !r.out.includes("aegis-ok")) return false;
+    this.patch(m.id, { via: "agent", lastSeen: Date.now(), lastError: null, misses: 0 });
+    this.log("fleet:", m.name, "answers through its agent");
+    return true;
+  }
+
   startBeat() {
     if (this.beatTimer) return;
     this.beatTimer = setInterval(() => this.beat().catch(() => {}), BEAT_MS);
@@ -606,7 +740,15 @@ echo "Done. The machine now shows up under Burrow -> Machines."
 f="$HOME/.ssh/authorized_keys"
 [ -f "$f" ] || exit 0
 grep -vxF ${sq(pub)} "$f" > "$f.aegis-tmp" && mv "$f.aegis-tmp" "$f" && chmod 600 "$f"
-echo removed`, { timeout: 25000 });
+echo removed
+# its agent goes too - a moment later, since this very session may run through it
+nohup sh -c 'sleep 3
+systemctl --user disable --now aegis-fleet-agent.service >/dev/null 2>&1
+rm -f "$HOME/.config/systemd/user/aegis-fleet-agent.service"
+[ -f "$HOME/.config/aegis-fleet/agent.pid" ] && kill "$(cat "$HOME/.config/aegis-fleet/agent.pid")" 2>/dev/null
+(crontab -l 2>/dev/null | grep -v aegis-fleet/agent.py | crontab -) 2>/dev/null
+for p in $(pgrep -u "$(id -u)" -f "python3 .*aegis-fleet/agent.py" 2>/dev/null); do [ "$p" = "$$" ] || kill "$p" 2>/dev/null; done
+rm -rf "$HOME/.config/aegis-fleet"' >/dev/null 2>&1 </dev/null &`, { timeout: 25000 });
         removed = r.out.includes("removed");
       } catch (e) { why = e.message; }
     }
@@ -633,16 +775,36 @@ echo removed`, { timeout: 25000 });
     return {
       id: m.id, name: m.name, hostname: m.hostname, address: m.address, port: m.port, user: m.user,
       os: m.os, arch: m.arch, standby: !!m.standby, addedAt: m.addedAt, lastSeen: m.lastSeen, lastError: m.lastError,
-      probedAt: m.probedAt, candidates: m.candidates || [], misses: m.misses || 0,
+      probedAt: m.probedAt, candidates: m.candidates || [], misses: m.misses || 0, via: m.via || "direct", agent: this.agents?.view(m.id) || null,
       termix: m.termix ? { hostId: m.termix.hostId ?? null, at: m.termix.at || null } : null,
       standbyState: m.standbyState ? { at: m.standbyState.at, url: m.standbyState.url, interval: m.standbyState.interval, misses: m.standbyState.misses } : null,
       up: isUp(m),
-      apps: (p?.apps || []).map((a) => ({ id: a.id, name: a.name, version: a.version, url: a.url })),
+      apps: (p?.apps || []).map((a) => ({ id: a.id, name: a.name, version: a.version, url: a.url, usage: a.usage || null })),
       specs: p ? { cores: p.cpu.cores, mem: p.mem.total, model: p.os.model || p.cpu.model, disk: p.disks[0] || null } : null,
       usage: p ? { load: p.cpu.load[0] ?? null, cores: p.cpu.cores, memUsed: p.mem.used, memTotal: p.mem.total,
                    tempC: p.cpu.tempC, uptime: p.host.uptime, disk: p.disks[0] || null } : null,
     };
   }
+  // This machine looked at the same way as a linked one (the probe, run here),
+  // so the hub's panel has the same specs, load and apps. Kept 20 s.
+  async probeSelf({ fresh = false } = {}) {
+    if (!fresh && this.self && Date.now() - this.self.at < 20000) return this.self.probe;
+    if (this.selfProbing) return this.selfProbing;
+    this.selfProbing = run("bash", ["-s"], { input: PROBE, timeout: 45000 }).then((r) => {
+      const probe = readProbe(r.out);
+      this.self = { at: Date.now(), probe };
+      return probe;
+    }).finally(() => { this.selfProbing = null; });
+    return this.selfProbing;
+  }
+  async selfDetail(fresh) {
+    const p = await this.probeSelf({ fresh });
+    const card = this.cardOf({ id: "self", name: this.hub().name, hostname: p.host.hostname || hostname(), address: "this machine", port: p.ssh.port,
+                               user: p.host.user, os: p.os.pretty, arch: p.os.arch, lastSeen: Date.now(), probedAt: this.self.at, probe: p,
+                               candidates: p.addresses });
+    return { ...card, up: true, hub: true, version: this.version, probe: p };
+  }
+
   // This machine, drawn in the middle of the graph.
   hub() {
     return { id: "self", name: this.settings.get("title") || "Aegis", hostname: hostname(), role: "hub",

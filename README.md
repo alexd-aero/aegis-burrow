@@ -203,19 +203,29 @@ Termix normally answers at the root of the dashboard's address (the home page st
 curl -fsSL "https://your-dashboard/__gate/fleet/join?t=…" | sh
 ```
 
+**One command is all it ever takes.** Besides the key, the script makes sure an SSH server runs there (installing one only when `sudo` works without a password), and — with Python 3, which nearly every Linux has — starts a small **agent** as a user service. The agent keeps one outgoing WebSocket open to this dashboard's own address (the same HTTPS a browser uses, signed with that machine's own key), and when this gate can't reach the machine's SSH directly — another network, behind NAT, a firewall — SSH runs through it instead, to that machine's own `127.0.0.1` and nothing else. Nothing is opened on either side; the panel says *through its agent* when that is the way in. Forgetting the machine takes its key off and removes the agent too (and an agent whose machine was forgotten removes itself).
+
 The link is good once, for half an hour, and the dashboard shows you the script before you run it. It appends **one** public key — Aegis makes itself an `ed25519` key the first time, kept in `data/fleet/` — to that user's `~/.ssh/authorized_keys`, then tells this dashboard the machine's name, the addresses it answers on and its SSH port. Nothing else leaves it, and it is never asked for a password. A machine whose `authorized_keys` already has the key can be added by hand instead, with any address that reaches it: a domain, a LAN or subnet address, a public address, a Tailscale name, a bare hostname.
 
 **Machines** then shows up under Burrow, drawn like a workflow editor (Bulwark's Patterns page, n8n): **this gate → your machines → what runs on them**, cards on a dotted canvas joined by lines that are green while a machine answers, red when it doesn't and gold for the standby. Hover to trace a line, drag to move, scroll to zoom, **Fit**, **Tidy up**, **Full screen** (`F`); a phone gets the same machines as a list. Every machine is checked in the background once a minute, and only shows as down after three misses in a row. Click a machine for:
 
 - **What it is made of**: system, model, cores, memory, disk, how long it has been up.
 - **How loaded it is**: processor, memory, disk and temperature, read live over the link.
-- **What runs on it**: Aegis × Burrow, Selkies Forge, Bulwark and Termix are recognised by name and version, with a link to open each; everything else it runs is there too: every container with its ports, every service, every disk and every address it answers on.
+- **What runs on it**: Aegis × Burrow, Selkies Forge, Bulwark and Termix are recognised by name and version, with **what each one uses right now** (processor and memory, from its container or its service) and a link to open each; everything else it runs is there too: every container with its ports and use, every service, every disk and every address it answers on.
+
+**This machine** (the hub in the middle) has the same panel — its specs, load, disks, containers, the apps on it with their use and a **Manage** link to each one's page here — and **Open Termix**. Click an **app** and you see every machine it runs on, what it uses there next to how loaded that machine is, and **Manage** / **Move**.
 - **Install an app on it** — the project's own published installer, run over the link, its output in front of you.
 - **Add to Termix** — adds it to Termix as a host (address, SSH port, user). It asks first, every time: Termix's own login is used once and never kept, and the machine signs in with this gate's key unless you give it a password instead.
 - **Terminal** — once it is in Termix, opens a new tab straight into a terminal session on it (Termix's `?view=terminal&hostId=…`).
 - **Move an app** — one app and its data to another machine, as a **copy** (both run it after) or a **move** (only the new one does; the old one keeps its data, stopped and no longer started at boot). The new machine gets the app first if it doesn't have it, and whatever it had is moved aside, never deleted. Click an app's card to see every machine it runs on and move it from there.
 - **Swap an app with another machine** — Selkies Forge on A and the one on B change places, data and all. Both are stopped first and started again after, and neither machine's old data is deleted: it is kept beside the new one.
 - **Forget** — takes the key back off the machine and drops it. Nothing installed on it is touched.
+
+### Moving the whole gate
+
+**Move this gate to another machine** (on the hub, or the Aegis × Burrow card) hands everything this dashboard is to a linked machine: the login, the domain and its tunnel, every tunnel, the addons and their settings, the certificates and the machines. The machine gets Aegis × Burrow first (its own installer) if it doesn't have it — or the one it has is stopped and its config and data put aside, never deleted. Paths are rewritten for the new home, this machine becomes one of the new gate's machines (so you can move back from there), and on its first start the new gate **starts every addon whatever it takes** (their services are installed there if they have to be). Only once it answers does this machine step aside: it then serves a notice saying where the gate went, and nothing else. `aegis resume-here` on the old machine undoes that.
+
+Apps that run beside the gate (Termix, Selkies Forge) stay where they are — move them with **Move an app**. A domain whose tunnel is run by a cloudflared service outside Aegis can't move with it (its traffic would keep arriving at the old machine); link the domain from Aegis itself first.
 
 ### The standby
 

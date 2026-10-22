@@ -34,10 +34,10 @@
 
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync, rmSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
          createCipheriv, createDecipheriv, createHash } from "node:crypto";
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
@@ -55,7 +55,8 @@ import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
-import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, transfer as fleetTransfer, toTermix,
+import { AgentHub } from "./fleet-agent.mjs";
+import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, transfer as fleetTransfer, moveGate as fleetMoveGate, toTermix,
          standbyOn, standbyOff, standbyRefresh, takeover, takeoverNotice } from "./fleet-ops.mjs";
 import { Pack } from "./pack.mjs";
 import { Updater } from "./updater.mjs";
@@ -78,6 +79,14 @@ const TICKET_TTL_MS = 60 * 1000;
 const SETUP_WINDOW_MS = 30 * 60 * 1000;
 const REVOKED_FILE = join(DATA, "revoked.json");
 const CHALLENGE_TTL_MS = 2 * 60 * 1000;
+
+// This gate moved to another machine (Machines → Move this gate): nothing
+// else starts here, only a notice on the old address (aegis/moved.mjs).
+if (settings.get("moved")) {
+  const { serveMoved } = await import("./moved.mjs");
+  serveMoved({ moved: settings.get("moved"), listen: LISTEN, tls: TLS, tlsOptions: () => tlsOptions(), log: (...a) => console.log(new Date().toISOString(), ...a) });
+  await new Promise(() => {});
+}
 const lockout = () => {
   const l = settings.get("lockout") || {};
   return { fails: Math.max(3, Math.min(50, Number(l.attempts) || 5)), windowMs: Math.max(1, Math.min(1440, Number(l.minutes) || 15)) * 60000 };
@@ -418,6 +427,11 @@ const fleet = new Fleet({
   dashboards: () => [...dashboards(null).map((d) => d.host), ...(serveo.host() ? [serveo.host()] : []),
                      ...(settings.get("extraHosts") || []), ...localAddrs, "localhost", "127.0.0.1"],
 });
+// linked machines' agents: the way in when SSH can't reach them directly (aegis/fleet-agent.mjs)
+const fleetAgents = new AgentHub({ fleet, log,
+  sock: join(process.env.XDG_RUNTIME_DIR || tmpdir(), `aegis-fleet-${process.getuid?.() ?? 0}-${createHash("sha256").update(HOME).digest("hex").slice(0, 10)}.sock`) });
+fleet.agents = fleetAgents;
+fleetAgents.listen();
 fleet.startBeat();
 const pack = new Pack({ settings, termix, log, tunnels, addon: { has: (id) => !!addons.load()[id]?.installed, install: (id, say) => installDefault(id, say) } });
 // Updates from GitHub, by hand or by itself (Settings → Updates)
@@ -1291,6 +1305,15 @@ function addonPrograms() {
   return out;
 }
 
+// Where each app on this machine is managed, inside this dashboard.
+function manageLinks() {
+  const out = { "aegis-burrow": "/__gate/settings" };
+  if (settings.get("termix")) out.termix = "/__gate/open/termix";
+  if (addons.load().bulwark?.installed) out.bulwark = "/__gate/bulwark/";
+  for (const i of listIntegrations()) if (i.kind === "selkies-forge") out["selkies-forge"] = "/__gate/tunnels#/forge";
+  return out;
+}
+
 // The apps on this machine, in the same shape as a linked machine's, so the
 // graph can draw this host like any other.
 function hereApps() {
@@ -1332,6 +1355,7 @@ async function handleFleet(req, res, path, url) {
       audit("machine: swap started", req, { app: body.app, a: body.a, b: body.b });
       return ok({ job });
     }
+    if (rest === "self" && req.method === "GET") return ok({ ...(await fleet.selfDetail(!!url.searchParams.get("fresh"))), manage: manageLinks() });
     if (rest.startsWith("jobs/")) return ok(fleet.job(rest.slice(5)).view(Number(url.searchParams.get("since")) || 0));
     if (rest.startsWith("apps/")) return ok({ app: rest.slice(5), where: fleet.whereIs(rest.slice(5)) });
 
@@ -1358,6 +1382,13 @@ async function handleFleet(req, res, path, url) {
       audit("machine: added to Termix", req, { machine: id, auth: body.auth === "password" ? "password" : "key" });
       return ok(r);
     }
+    if (what === "movegate" && req.method === "POST") {
+      if (!body.confirm) return sendJson(res, 400, { error: "Moving this gate hands everything to that machine. Confirm it first." });
+      const job = fleetMoveGate(fleet, id, { domain: settings.get("domain"), version: VERSION });
+      audit("machine: this gate moving", req, { machine: id });
+      standDownAfter(job.id);
+      return ok({ job });
+    }
     if (what === "standby" && req.method === "POST") {
       if (more === "refresh") return ok({ job: standbyRefresh(fleet, id) });
       if (body.on === false) {
@@ -1374,6 +1405,38 @@ async function handleFleet(req, res, path, url) {
     return sendJson(res, 400, { error: e.message });
   }
 }
+
+// Once the move is done (and only then), this process ends; its supervisor
+// starts it again in "moved" mode, serving just the notice.
+function standDownAfter(jid) {
+  const t = setInterval(() => {
+    let j; try { j = fleet.job(jid); } catch { clearInterval(t); return; }
+    if (j.state === "running") return;
+    clearInterval(t);
+    if (j.state === "done" && j.result?.standDown) { log("fleet: moved to another machine; standing down"); setTimeout(() => process.exit(0), 4000); }
+  }, 1000);
+}
+// Just moved in: every installed addon is started whatever it takes (their
+// services may not exist on this machine yet), once, and the bell says so.
+function settleMoveIn() {
+  const f = join(DATA, "moved-in.json");
+  if (!existsSync(f)) return;
+  let from = "another machine";
+  try { from = JSON.parse(readFileSync(f, "utf8")).from || from; } catch { /* fine */ }
+  rmSync(f, { force: true });
+  notify("fleet", { level: "info", key: "moved-in", title: `This gate moved here from ${from}`, body: "Its login, domain, tunnels, addons and machines came with it. Its addons are being started on this machine.", link: "/__gate/tunnels#/addons" });
+  (async () => {
+    for (const rec of Object.values(addons.load())) {
+      if (!rec.installed) continue;
+      try {
+        const j = addons.rescue(rec.id);
+        while (addons.job(j.id).state === "running") await new Promise((r) => setTimeout(r, 2000));
+        log(`moved in: ${rec.id}: ${addons.job(j.id).result?.verdict || addons.job(j.id).error}`);
+      } catch (e) { log(`moved in: ${rec.id}:`, e.message); }
+    }
+  })();
+}
+setTimeout(settleMoveIn, 15000).unref();
 
 // A clone that took over says so, loudly, on every start and while it keeps
 // trying to bring the other host back.
@@ -1714,6 +1777,8 @@ const server = TLS ? createHttpsServer(tlsOptions(), handler) : createHttpServer
 server.on("upgrade", (req, socket, head) => {
   frontClaim(req);
   const host = hostOf(req);
+  // a linked machine's agent (signed per machine; nothing else is answered there)
+  if (isDashHost(host) && fleet.enabled() && fleetAgents.handleUpgrade(req, socket, head)) return;
   const stop = shieldStop(req, new URL(req.url || "/", "http://x").pathname, host);
   if (req._guard) { req._guard.info.ws = true; observeDone(req, null, { status: stop ? stop.status : 101 }); }
   if (stop) { socket.end(`HTTP/1.1 ${stop.status} ${stop.status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`); return; }

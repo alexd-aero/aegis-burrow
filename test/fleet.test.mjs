@@ -372,3 +372,23 @@ test("a transfer refuses what it can't do before touching anything", () => {
   assert.throws(() => OPS.transfer(f, "termix", "m-1", "m-1"), /two different/);
   assert.throws(() => OPS.transfer(f, "termix", "m-1", "m-2", { mode: "teleport" }), /move or a copy/);
 });
+
+test("the link script installs the agent and an SSH server where it can, and parses", async () => {
+  const f = fleet();
+  f.setEnabled(true);
+  await f.publicKey();
+  const sc = f.joinScript("tok", "https://aegis.example.com");
+  assert.ok(shOk(sc), "the link script parses");
+  assert.match(sc, /aegis-fleet-agent\.service/);
+  assert.match(sc, /openssh-server/);
+  assert.match(sc, /AEGIS_AGENT_PY\n/);
+  assert.ok(sc.includes('def control():'), "the agent itself is in it");
+});
+
+test("the moved notice says where the gate went", async () => {
+  const { page } = await import("../aegis/moved.mjs");
+  const h = page({ to: "big-box <b>", at: Date.now() });
+  assert.match(h, /This gate moved/);
+  assert.match(h, /big-box &lt;b&gt;/);
+  assert.match(h, /aegis resume-here/);
+});
