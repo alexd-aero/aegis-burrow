@@ -341,3 +341,34 @@ test("the standby only counts the main gate itself, and never takes over a gate 
     watch: { url: "https://pi.example", host: "pi", name: "pi", sshPort: 22, user: "alex", interval: 30, misses: 4 } });
   assert.ok(setup.indexOf("left it as it is") < setup.indexOf("tar -C"), "a running clone is never unpacked over");
 });
+
+test("Termix opens straight into a host's terminal, and nothing else rides along", () => {
+  const q = (s) => F.termixQuery(new URLSearchParams(s));
+  assert.equal(q("view=terminal&hostId=7"), "?view=terminal&hostId=7");
+  assert.equal(q("view=terminal&hostId=7&next=//evil.example"), "?view=terminal&hostId=7");
+  assert.equal(q("view=javascript:alert(1)&hostId=7"), "");
+  assert.equal(q("view=terminal&hostId=7;rm"), "?view=terminal");
+  assert.equal(q("hostId=7"), "", "a host with no view means nothing");
+  assert.equal(q(""), "");
+});
+
+test("a machine's card carries what the panel needs: Termix's host id, the standby's state (no keys)", async () => {
+  const f = fleet();
+  f.setEnabled(true);
+  f.verify = async (id) => f.get(id);
+  const r = await f.addManual({ address: "10.0.0.5", user: "alex" });
+  f.patch(r.id, { termix: { hostId: 12, at: 1, auth: "key" }, standby: true, standbyState: { at: 2, url: "https://pi.example", interval: 30, misses: 4, key: "ssh-ed25519 AAAA secret" } });
+  const c = f.cardOf(f.get(r.id));
+  assert.deepEqual(c.termix, { hostId: 12, at: 1 });
+  assert.equal(c.standbyState.url, "https://pi.example");
+  assert.ok(!JSON.stringify(c).includes("AAAA"), "the standby's key is not handed to the page");
+});
+
+test("a transfer refuses what it can't do before touching anything", () => {
+  const f = fleet();
+  f.setEnabled(true);
+  assert.throws(() => OPS.transfer(f, "nope", "m-1", "m-2"), /does not know/);
+  assert.throws(() => OPS.transfer(f, "aegis-burrow", "m-1", "m-2"), /cannot be moved/);
+  assert.throws(() => OPS.transfer(f, "termix", "m-1", "m-1"), /two different/);
+  assert.throws(() => OPS.transfer(f, "termix", "m-1", "m-2", { mode: "teleport" }), /move or a copy/);
+});

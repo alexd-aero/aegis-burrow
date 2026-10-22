@@ -272,6 +272,16 @@ export const BEAT_MS = 60000;
 export const MISSES_DOWN = 3;
 export const isUp = (m, now = Date.now()) => !!m.lastSeen && (m.misses || 0) < MISSES_DOWN && now - m.lastSeen < (MISSES_DOWN + 2) * BEAT_MS;
 
+// The query Termix opens with: ?view=terminal&hostId=7 opens straight into a
+// terminal on that host (Termix's standalone views). Anything else is dropped.
+export function termixQuery(params) {
+  const q = new URLSearchParams();
+  const view = params.get("view"), hid = params.get("hostId");
+  if (/^(terminal|file-manager|server-stats|tunnels|docker)$/.test(view || "")) q.set("view", view);
+  if (q.has("view") && /^\d{1,9}$/.test(hid || "")) q.set("hostId", hid);
+  return q.toString() ? `?${q}` : "";
+}
+
 export class Fleet {
   // dir:   AEGIS_HOME/data/fleet  (the key, known_hosts, transfers)
   // file:  AEGIS_HOME/data/fleet.json (machines, pending links)
@@ -624,6 +634,8 @@ echo removed`, { timeout: 25000 });
       id: m.id, name: m.name, hostname: m.hostname, address: m.address, port: m.port, user: m.user,
       os: m.os, arch: m.arch, standby: !!m.standby, addedAt: m.addedAt, lastSeen: m.lastSeen, lastError: m.lastError,
       probedAt: m.probedAt, candidates: m.candidates || [], misses: m.misses || 0,
+      termix: m.termix ? { hostId: m.termix.hostId ?? null, at: m.termix.at || null } : null,
+      standbyState: m.standbyState ? { at: m.standbyState.at, url: m.standbyState.url, interval: m.standbyState.interval, misses: m.standbyState.misses } : null,
       up: isUp(m),
       apps: (p?.apps || []).map((a) => ({ id: a.id, name: a.name, version: a.version, url: a.url })),
       specs: p ? { cores: p.cpu.cores, mem: p.mem.total, model: p.os.model || p.cpu.model, disk: p.disks[0] || null } : null,
@@ -638,7 +650,7 @@ echo removed`, { timeout: 25000 });
   }
   detail(id) {
     const m = this.get(id);
-    return { ...this.cardOf(m), probe: m.probe, standbyState: m.standbyState || null, termix: m.termix || null };
+    return { ...this.cardOf(m), probe: m.probe };
   }
 
   // Where an app lives, across every machine: what the chooser offers.

@@ -27,6 +27,7 @@ import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ArchiveError, download, unpack, isArchive } from "./archive.mjs";
+import { rescue as rescueAddon, reports as rescueReports, report as rescueReport } from "./rescue.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -714,6 +715,15 @@ export class Addons {
       return { id, action: a.id, open_url: r.dir.open, warnings: r.dir.warn };
     });
   }
+
+  // Start it whatever it takes, and write down why when it won't (burrow/rescue.mjs).
+  rescue(id) {
+    const rec = this.get(id);
+    if (!rec.installed) fail(`Install ${rec.manifest.name} first.`);
+    return this.startJob(id, "rescue", `Starting ${rec.manifest.name}`, (job) => rescueAddon(this, this.get(id), job));
+  }
+  reports(id) { this.get(id); return rescueReports(this, id); }
+  report(id, file) { this.get(id); const t = rescueReport(this, id, file); if (t == null) fail("No such report."); return t; }
 
   job(jid) { const j = this.jobs.get(jid); if (!j) fail("No such job."); return j; }
 

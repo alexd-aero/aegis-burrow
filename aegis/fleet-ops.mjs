@@ -186,6 +186,74 @@ export function swap(fleet, appId, idA, idB) {
   });
 }
 
+// ------------------------------------------------------------------ moving
+// One app and its data from machine A to machine B, one way. "copy" leaves A
+// running as it was; "move" stops A and keeps it from starting by itself
+// (its data stays where it was - nothing is deleted). B gets the app first
+// if it doesn't have it, and whatever B had is moved aside, never deleted.
+export function transfer(fleet, appId, fromId, toId, { mode = "copy", programs = new Map() } = {}) {
+  const app = CATALOG[appId];
+  if (!app) fail("Aegis does not know that app.");
+  if (!app.swappable) fail(`${app.name} cannot be moved: ${app.note}`);
+  if (fromId === toId) fail("Pick two different machines.");
+  if (!["move", "copy"].includes(mode)) fail("A transfer is a move or a copy.");
+  const A = fleet.get(fromId), B = fleet.get(toId);
+  const dir = join(fleet.dir, "swap");
+  const verb = mode === "move" ? "Moving" : "Copying";
+  return fleet.start("transfer", `${verb} ${app.name} from ${A.name} to ${B.name}`, `${fromId}+${toId}`, async (job) => {
+    const tag = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const tar = join(dir, `${appId}-${fromId}-${tag}.tgz`);
+    await run("mkdir", ["-p", dir]);
+    try {
+      job.step(`Finding ${app.name} on ${A.name}`, 0.05);
+      const from = await locate(fleet, A, app);
+      job.log(`${A.name}: ${from.kind === "volume" ? `docker volume ${from.path}` : from.path}`);
+
+      job.step(`Making sure ${B.name} has ${app.name}`, 0.12);
+      let to = await locate(fleet, B, app).catch(() => null);
+      if (!to) {
+        if (!app.install) fail(`${app.name} is not on ${B.name}, and Aegis cannot install it there: ${app.note}`);
+        job.log(`${B.name} does not have it yet: installing it first.`);
+        const r = await fleet.ssh(B, `set -o pipefail 2>/dev/null || true\n${app.install}\n`, { timeout: 30 * 60000, onLine: (l) => job.log(`  ${l}`) });
+        if (r.code !== 0) fail(`installing ${app.name} on ${B.name} failed (exit ${r.code})`);
+        to = await locate(fleet, B, app);
+      }
+      job.log(`${B.name}: ${to.kind === "volume" ? `docker volume ${to.path}` : to.path}`);
+
+      job.step(`Stopping it on ${A.name} so its data is still`, 0.25);
+      job.log(`${A.name}:`);
+      await stopApp(fleet, A, app, from, job);
+      try {
+        job.step(`Packing ${A.name}'s data`, 0.35);
+        await pull(fleet, A, from, tar, job);
+        job.log(`  ${(statSync(tar).size / 1e6).toFixed(1)} MB packed`);
+      } finally {
+        if (mode === "copy") { job.log(`${A.name}: starting it again (a copy leaves it running)`); await startApp(fleet, A, app, from, job).catch((e) => job.log(`  ${e.message}`, "err")); }
+      }
+
+      job.step(`Putting it on ${B.name}`, 0.6);
+      job.log(`${B.name}:`);
+      await stopApp(fleet, B, app, to, job);
+      await push(fleet, B, to, tar, tag, job);
+      job.step(`Starting it on ${B.name}`, 0.85);
+      await startApp(fleet, B, app, to, job);
+
+      if (mode === "move") {
+        job.step(`Keeping ${A.name}'s copy from starting by itself`, 0.92);
+        const r = await fleet.ssh(A, from.kind === "volume"
+          ? `docker update --restart=no ${sq(from.container || "aegis-termix")} >/dev/null 2>&1 && echo "  the container ${from.container || "aegis-termix"} no longer starts by itself" || true`
+          : `${HELPERS}\nunit=${sq(from.unit || "")}\n[ -n "$unit" ] && { systemctl --user disable "$unit" 2>/dev/null || sudo -n systemctl disable "$unit" 2>/dev/null; } && echo "  $unit no longer starts at boot" || true`, { timeout: 60000 });
+        job.log(r.out || "  nothing to change");
+        job.log(`${A.name}'s data is still there, untouched: to go back, transfer it the other way.`, "muted");
+      }
+      for (const m of [A, B]) await fleet.probe(m.id, { fresh: true }).catch(() => {});
+      return { app: appId, from: fromId, to: toId, mode, tag };
+    } finally {
+      try { rmSync(tar, { force: true }); } catch { /* gone */ }
+    }
+  });
+}
+
 // Where the app keeps its data on that machine, and what runs it: a folder
 // and a service unit, or a Docker volume and its container.
 async function locate(fleet, m, app) {
@@ -302,7 +370,10 @@ export async function toTermix(fleet, termix, id, { username, password, auth = "
 
   const list = await call("/ssh/db/host");
   const already = Array.isArray(list.j) ? list.j.find((hst) => hst.ip === m.address && Number(hst.port) === Number(m.port) && hst.username === m.user) : null;
-  if (already) return { ok: true, existed: true, id: already.id, name: already.name || m.name, upstream: t.upstream };
+  if (already) {
+    fleet.patch(id, { termix: { at: Date.now(), hostId: already.id ?? null, auth: already.authType || null } });
+    return { ok: true, existed: true, id: already.id, name: already.name || m.name, upstream: t.upstream };
+  }
 
   const body = {
     name: m.name, ip: m.address, port: m.port, username: m.user, folder,

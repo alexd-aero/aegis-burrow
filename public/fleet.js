@@ -32,6 +32,9 @@ const I = {
   close: SVG('<path d="M6 6l12 12M18 6 6 18"/>'),
   fit: SVG('<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="12" cy="12" r="2.5"/>'),
   zin: SVG('<path d="M12 5v14M5 12h14"/>'), zout: SVG('<path d="M5 12h14"/>'),
+  tidy: SVG('<rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M10 7h4M17.5 10v4"/>'),
+  full: SVG('<path d="M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7"/>'),
+  move: SVG('<path d="M4 12h13M13 6l6 6-6 6"/><path d="M4 6v12"/>'),
 };
 const LOGOS = { "aegis-burrow": "/__gate/logos/aegis-burrow.svg", "selkies-forge": "/__gate/logos/forge.svg",
                bulwark: "/__gate/logos/bulwark.svg", termix: "/__gate/logos/termix.svg" };
@@ -39,21 +42,22 @@ const LOGOS = { "aegis-burrow": "/__gate/logos/aegis-burrow.svg", "selkies-forge
 const LOGO = new Proxy(LOGOS, { get: (o, id) => o[id] || (typeof id === "string" && /^[a-z0-9-]+:[a-z0-9-]+$/.test(id) ? `/__gate/api/addons/${id.split(":")[0]}/image` : undefined) });
 
 // The tab's own state. `data` is the last /__gate/api/fleet.
-export const FS = { data: null, sel: null, at: 0, link: null, pollTimer: null, fitKey: null,
-                    pan: { x: 0, y: 0, k: 1 }, moved: new Map() };
+// sel: {id, kind: "machine" | "app" | "hub"}; detail: id -> {at, d} (the full /fleet/<id>)
+export const FS = { data: null, sel: null, at: 0, link: null, pollTimer: null, fitKey: null, G: null,
+                    pan: { x: 0, y: 0, k: 1 }, moved: new Map(), detail: new Map() };
 
 let X = null;        // the bits tunnels.js lends us: api, toast, openModal, closeModal, render, jobRun
 export function init(host) { X = host; }
 
 export const machines = () => FS.data?.machines || [];
-const selected = () => machines().find((m) => m.id === FS.sel) || null;
+const selected = () => (FS.sel?.kind === "machine" && machines().find((m) => m.id === FS.sel.id)) || null;
 const catalog = () => FS.data?.catalog || [];
 const appName = (id) => catalog().find((c) => c.id === id)?.name || id;
 
 export async function load(fresh) {
   const d = await X.api("/__gate/api/fleet");
   FS.data = d; FS.at = Date.now();
-  if (FS.sel && !machines().some((m) => m.id === FS.sel)) FS.sel = null;
+  if (FS.sel?.kind === "machine" && !machines().some((m) => m.id === FS.sel.id)) FS.sel = null;
   if (fresh) FS.moved.clear();
   return d;
 }
@@ -110,134 +114,240 @@ function takeoverCard(t) {
 }
 
 // ------------------------------------------------------------------ the graph
-// This machine in the middle, the rest on a ring around it. Drag the canvas
-// to move, drag a card to place it, scroll to zoom.
-const NW = 230, NH = 92, GAP = 20, COL = 110;
+// Drawn the way a workflow editor draws one (Bulwark's Patterns page, n8n):
+// cards on a dotted canvas, read left to right, joined by connections.
+//
+//   This gate  ->  your machines  ->  what runs on them
+//
+// A machine's line is green while it answers, red when it doesn't, gold for
+// the standby. Hover a card or a line to trace it; click one and the panel
+// beside the canvas tells everything about it. Drag the canvas to move, drag
+// a card to place it, scroll (or pinch) to zoom; Fit, Tidy up, Full screen.
+const NW = 240, HUB_H = 88, M_H = 92, A_H = 58, ROW = 14, COL_GAP = 92;
+const STAGES = [["This gate", "the hub"], ["Your machines", "linked over SSH"], ["What runs on them", "apps and programs"]];
 
-// This machine in the middle, the rest in a column either side of it, so
-// nothing ever lands off the canvas however many there are.
-function layout(w, h) {
-  const list = machines();
-  const cx = w / 2 - NW / 2, cy = h / 2 - NH / 2;
-  const out = [{ id: "self", hub: true, x: cx, y: cy }];
-  const sides = [[], []];
-  list.forEach((m, i) => sides[i % 2].push(m));
-  sides.forEach((side, s) => {
-    const x = s === 0 ? cx + NW + COL : cx - NW - COL;
-    const span = side.length * NH + (side.length - 1) * GAP;
-    side.forEach((m, i) => {
-      const moved = FS.moved.get(m.id);
-      out.push({ id: m.id, m, x: moved ? moved.x : x, y: moved ? moved.y : cy + NH / 2 - span / 2 + i * (NH + GAP) });
-    });
+function model() {
+  const d = FS.data, list = machines();
+  const nodes = [{ id: "self", col: 0, type: "hub", h: HUB_H }];
+  const apps = new Map();
+  const addApp = (a, where) => {
+    const k = `app:${a.id}`;
+    const n = apps.get(k) || { id: k, col: 2, type: "app", h: A_H, appId: a.id, name: a.name, on: [] };
+    n.on.push({ where, version: a.version || null, url: a.url || null });
+    apps.set(k, n);
+  };
+  for (const a of d.here || []) addApp(a, "self");
+  for (const m of list) { nodes.push({ id: m.id, col: 1, type: "machine", h: M_H, m }); for (const a of m.apps || []) addApp(a, m.id); }
+  nodes.push(...[...apps.values()].sort((a, b) => b.on.length - a.on.length || a.name.localeCompare(b.name)));
+  const edges = [];
+  for (const m of list) edges.push({ a: "self", b: m.id, kind: m.standby ? "standby" : m.up ? "up" : m.lastError ? "down" : "idle" });
+  for (const n of apps.values()) for (const o of n.on) edges.push({ a: o.where, b: n.id, kind: "app", app: n.appId });
+  for (const e of edges) e.key = `${e.a}|${e.b}`;
+  return { nodes, edges, byId: new Map(nodes.map((n) => [n.id, n])) };
+}
+
+function layout(G, cw) {
+  // wide canvases spread the stages apart; narrow ones pull them in so the cards stay readable
+  const gap = Math.round(Math.max(COL_GAP, Math.min(320, (cw / 0.95 - 3 * NW - 80) / 2)));
+  const cols = [[], [], []];
+  for (const n of G.nodes) cols[n.col].push(n);
+  const hgt = cols.map((c) => c.reduce((s, n) => s + n.h + ROW, -ROW));
+  const H = Math.max(...hgt, HUB_H);
+  cols.forEach((c, i) => {
+    let y = (H - hgt[i]) / 2;
+    for (const n of c) {
+      const mv = FS.moved.get(n.id);
+      n.x = mv ? mv.x : i * (NW + gap); n.y = mv ? mv.y : y;
+      y += n.h + ROW;
+    }
   });
-  return out;
+  G.gap = gap; G.height = H;
 }
-// Tall enough for the longest column, never taller than the window likes.
-const canvasHeight = () => {
-  const rows = Math.ceil(machines().length / 2);
-  return Math.max(360, Math.min(640, rows * (NH + GAP) + 110));
-};
 
-// The canvas, and - for a narrow screen, where a canvas is no use - the same
-// machines as a plain list. CSS shows one or the other.
-function drawGraph(el, cards) {
-  if (!el) return;
-  const w = Math.max(640, el.clientWidth || 900), h = canvasHeight();
-  const nodes = layout(w, h);
-  if (cards) cards.innerHTML = nodes.map(nodeCard).join("");
-  const by = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  const edges = nodes.filter((n) => !n.hub).map((n) => {
-    const a = by.self, b = n;
-    const x1 = a.x + NW / 2, y1 = a.y + NH / 2, x2 = b.x + NW / 2, y2 = b.y + NH / 2;
-    const mx = (x1 + x2) / 2;
-    return `<path class="fl-edge ${n.m.up ? "on" : "off"}${n.m.standby ? " standby" : ""}" d="M${x1} ${y1} C${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`;
+const EDGE_C = { up: "var(--ok)", down: "var(--err)", idle: "var(--faint)", standby: "#f2c14e", app: "var(--blue)" };
+function edgePath(G, e) {
+  const a = G.byId.get(e.a), b = G.byId.get(e.b);
+  const x1 = a.x + NW, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+  const dx = Math.max(60, Math.abs(x2 - x1) * 0.5);
+  e.mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+  return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+}
+function edgesSvg(G) {
+  return G.edges.map((e) => {
+    const d = edgePath(G, e);
+    return `<g class="fw-edge ${e.kind}" data-key="${H(e.key)}" style="--c:${EDGE_C[e.kind]}"><path class="fw-line" d="${d}"/><path class="fw-flow" d="${d}"/><path class="fw-hit" d="${d}"/></g>`;
   }).join("");
-  el.innerHTML = `
-    <div class="fl-canvas" tabindex="0" style="height:${h}px" aria-label="Your machines. Drag to move, scroll to zoom.">
-      <div class="fl-world">
-        <svg class="fl-edges" width="${w * 2}" height="${h * 2}" aria-hidden="true">${edges}</svg>
-        <div class="fl-nodes">${nodes.map(nodeCard).join("")}</div>
-      </div>
-      <div class="fl-tools" role="toolbar" aria-label="Canvas">
-        <button type="button" data-fl="in" title="Zoom in" aria-label="Zoom in">${I.zin}</button>
-        <button type="button" data-fl="out" title="Zoom out" aria-label="Zoom out">${I.zout}</button>
-        <button type="button" data-fl="fit" title="Fit" aria-label="Fit">${I.fit}</button>
-        <span class="fl-zoom">100%</span>
-      </div>
-      ${machines().length ? '<div class="fl-hint">drag to move \u00b7 scroll to zoom \u00b7 click a machine</div>'
-        : `<div class="fl-none"><p>Only this machine so far.</p>
-             <button class="btn sm primary" data-act="fl-link">${I.plus} Link one</button></div>`}
-    </div>`;
-  wireCanvas(el, by);
-  // Fit the first time, and whenever the shape of the thing changes - but
-  // never under someone who has just dragged or zoomed it themselves.
-  const key = `${nodes.length}:${el.clientWidth}:${[...FS.moved.keys()].sort().join()}`;
-  if (FS.fitKey !== key) { FS.fitKey = key; fit(el, nodes); }
-  applyPan(el);
 }
 
-// Everything in view, centred, never magnified past life size.
-function fit(el, nodes) {
-  const canvas = el.querySelector(".fl-canvas");
-  const cw = canvas.clientWidth || 900, ch = canvas.clientHeight || 420;
-  const x0 = Math.min(...nodes.map((n) => n.x)), x1 = Math.max(...nodes.map((n) => n.x)) + NW;
-  const y0 = Math.min(...nodes.map((n) => n.y)), y1 = Math.max(...nodes.map((n) => n.y)) + NH;
-  const k = Math.max(0.4, Math.min(1, (cw - 34) / (x1 - x0), (ch - 34) / (y1 - y0)));
-  FS.pan = { k, x: (cw - (x1 - x0) * k) / 2 - x0 * k, y: (ch - (y1 - y0) * k) / 2 - y0 * k };
-}
-
-function nodeCard(n) {
-  if (n.hub) {
+const cpuOf = (m) => { const u = m.usage || {}; return u.load != null && u.cores ? Math.min(100, Math.round((u.load / u.cores) * 100)) : null; };
+const stateOf = (m) => m.up ? (m.misses ? ["warn", "slow to answer"] : ["ok", "reachable"]) : m.lastError ? ["err", "not answering"] : ["idle", "not checked yet"];
+function nodeHtml(n) {
+  const c = n.type === "machine" ? EDGE_C[n.m.standby ? "standby" : n.m.up ? "up" : n.m.lastError ? "down" : "idle"] : n.type === "app" ? "var(--blue)" : "var(--ok)";
+  const at = `data-id="${H(n.id)}" tabindex="0" role="button" style="left:${n.x}px;top:${n.y}px;height:${n.h}px;--c:${c}"`;
+  if (n.type === "hub") {
     const d = FS.data;
-    return `<article class="fl-node hub" data-id="self" style="left:${n.x}px;top:${n.y}px">
-      <div class="fl-ico">${I.hub}</div>
-      <div class="fl-body"><b>${H(d.hub.name)}</b><span class="fl-sub">this machine · ${H(d.hub.hostname)}</span>
-        <div class="fl-apps">${(d.here || []).map(chip).join("")}</div></div>
-    </article>`;
+    return `<div class="fw-node hub" ${at} aria-label="This machine">
+      <i class="fw-port out"></i><span class="fw-ic">${I.hub}</span>
+      <span class="fw-body"><b class="fw-title">${H(d.hub.name)}</b><span class="fw-sub">this machine · ${H(d.hub.hostname)}</span>
+        <span class="fw-stats"><span><b>${machines().length}</b> linked</span><span><b>${machines().filter((m) => m.up).length}</b> up</span>${d.hub.version ? `<span>v${H(d.hub.version)}</span>` : ""}</span></span>
+    </div>`;
   }
-  const m = n.m;
-  const u = m.usage || {};
-  const cpu = u.load != null && u.cores ? Math.min(100, Math.round((u.load / u.cores) * 100)) : null;
-  return `<article class="fl-node${FS.sel === m.id ? " on" : ""}${m.up ? "" : " down"}" data-id="${H(m.id)}" data-act="fl-pick" tabindex="0" role="link" style="left:${n.x}px;top:${n.y}px">
+  if (n.type === "machine") {
+    const m = n.m, u = m.usage || {}, [dot, said] = stateOf(m);
+    return `<div class="fw-node machine ${m.up ? "up" : "down"}${m.standby ? " standby" : ""}" ${at} aria-label="${H(m.name)}: ${said}">
+      <i class="fw-port in"></i><i class="fw-port out"></i><span class="fw-ic">${I.machine}</span>
+      <span class="fw-body"><b class="fw-title">${H(m.name)}${m.standby ? '<em class="fw-tag gold">standby</em>' : ""}</b>
+        <span class="fw-sub"><i class="dot ${dot}"></i>${said} · ${H(m.address)}</span>
+        ${m.specs ? `<span class="fw-meters">${meter("cpu", cpuOf(m))}${meter("ram", pct(u.memUsed, u.memTotal))}${meter("disk", u.disk ? pct(u.disk.used, u.disk.total) : null)}</span>`
+          : '<span class="fw-sub faint">not looked at yet</span>'}</span>
+    </div>`;
+  }
+  const many = n.on.length > 1;
+  return `<div class="fw-node app" ${at} aria-label="${H(n.name)} on ${n.on.length}">
+    <i class="fw-port in"></i><span class="fw-ic">${LOGO[n.appId] ? `<img src="${LOGO[n.appId]}" alt="">` : I.box}</span>
+    <span class="fw-body"><b class="fw-title">${H(n.name)}</b>
+      <span class="fw-stats"><span><b>${n.on.length}</b> ${n.on.length === 1 ? "machine" : "machines"}</span>${many ? '<span class="fw-tag">on several</span>' : ""}${n.on.some((o) => o.url) ? `<span>${I.ext}</span>` : ""}</span></span>
+  </div>`;
+}
+const meter = (label, v) => `<span class="fl-meter ${v != null && v > 85 ? "hot" : ""}" title="${label} ${v == null ? "unknown" : v + "%"}"><i style="width:${v || 0}%"></i><em>${label}</em></span>`;
+const chip = (a) => `<span class="fl-chip" title="${H(a.name)}${a.version ? " " + H(a.version) : ""}">${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : ""}${H(a.name)}</span>`;
+
+// The narrow-screen list: the same machines as plain cards.
+function listCard(m) {
+  const [dot, said] = stateOf(m), u = m.usage || {};
+  return `<article class="fl-node${FS.sel?.id === m.id ? " on" : ""}${m.up ? "" : " down"}" data-act="fl-pick" data-kind="machine" data-id="${H(m.id)}" tabindex="0" role="link">
     <div class="fl-ico">${I.machine}</div>
-    <div class="fl-body">
-      <b>${H(m.name)}${m.standby ? `<span class="fl-tag">standby</span>` : ""}</b>
-      <span class="fl-sub">${H(m.address)}${m.port !== 22 ? ":" + m.port : ""} · <i class="dot ${m.up ? "ok" : m.lastError ? "err" : "idle"}"></i>${m.up ? "reachable" : m.lastError ? "unreachable" : "not checked"}</span>
-      ${m.specs ? `<div class="fl-meters">${meter("cpu", cpu)}${meter("ram", pct(u.memUsed, u.memTotal))}${meter("disk", u.disk ? pct(u.disk.used, u.disk.total) : null)}</div>` : ""}
-      <div class="fl-apps">${(m.apps || []).map(chip).join("") || '<span class="fl-chip muted">nothing known yet</span>'}</div>
-    </div>
+    <div class="fl-body"><b>${H(m.name)}${m.standby ? `<span class="fl-tag">standby</span>` : ""}</b>
+      <span class="fl-sub">${H(m.address)} · <i class="dot ${dot}"></i>${said}</span>
+      ${m.specs ? `<div class="fl-meters">${meter("cpu", cpuOf(m))}${meter("ram", pct(u.memUsed, u.memTotal))}${meter("disk", u.disk ? pct(u.disk.used, u.disk.total) : null)}</div>` : ""}
+      <div class="fl-apps">${(m.apps || []).map(chip).join("") || '<span class="fl-chip muted">nothing known yet</span>'}</div></div>
   </article>`;
 }
-const chip = (a) => `<span class="fl-chip" title="${H(a.name)}${a.version ? " " + H(a.version) : ""}">${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : ""}${H(a.name)}</span>`;
-const meter = (label, v) => `<span class="fl-meter ${v != null && v > 85 ? "hot" : ""}" title="${label} ${v == null ? "unknown" : v + "%"}"><i style="width:${v || 0}%"></i><em>${label}</em></span>`;
 
+function drawGraph(el, cards) {
+  if (!el) return;
+  const G = model();
+  FS.G = G;
+  if (cards) cards.innerHTML = machines().map(listCard).join("") || '<p class="muted small">Only this machine so far.</p>';
+  el.innerHTML = `
+    <div class="fw-canvas" tabindex="0" aria-label="Your machines. Drag to move, scroll to zoom.">
+      <div class="fw-world"><svg class="fw-edges" width="10" height="10" aria-hidden="true"></svg><div class="fw-labels"></div><div class="fw-nodes"></div></div>
+      <div class="fw-controls" role="toolbar" aria-label="Canvas">
+        <button type="button" data-fl="in" title="Zoom in" aria-label="Zoom in">${I.zin}</button>
+        <button type="button" data-fl="out" title="Zoom out" aria-label="Zoom out">${I.zout}</button>
+        <button type="button" data-fl="fit" title="Fit to view" aria-label="Fit to view">${I.fit}</button>
+        <button type="button" data-fl="tidy" title="Tidy up" aria-label="Tidy up">${I.tidy}</button>
+        <button type="button" data-fl="full" title="Full screen (F)" aria-label="Full screen">${I.full}</button>
+        <span class="fw-zoom">100%</span>
+      </div>
+      <div class="fw-legend"><span><i style="--c:var(--ok)"></i>answers</span><span><i style="--c:var(--err)"></i>not answering</span><span><i style="--c:#f2c14e"></i>standby</span><span><i style="--c:var(--blue)"></i>runs</span></div>
+      ${machines().length ? '<div class="fw-hint">drag to move · scroll to zoom · <kbd>F</kbd> full screen · click a card</div>'
+        : `<div class="fw-none"><p>Only this machine so far.</p><button class="btn sm primary" data-act="fl-link">${I.plus} Link one</button></div>`}
+      <div class="fw-tip" hidden></div>
+    </div>`;
+  const canvas = el.querySelector(".fw-canvas");
+  layout(G, canvas.clientWidth || 900);
+  paint(el, G);
+  wireCanvas(el, G);
+  const key = `${G.nodes.length}:${G.edges.length}:${Math.round((canvas.clientWidth || 0) / 50)}`;
+  if (FS.fitKey !== key) { FS.fitKey = key; fit(el, G); }
+  applyPan(el);
+}
+function paint(el, G) {
+  el.querySelector(".fw-nodes").innerHTML = G.nodes.map(nodeHtml).join("");
+  el.querySelector(".fw-labels").innerHTML = STAGES.map(([t, s], i) => `<div class="fw-stage" style="left:${i * (NW + G.gap)}px;top:-58px;width:${NW}px"><b>${i + 1}</b><span>${t}<em>${s}</em></span></div>`).join("");
+  el.querySelector(".fw-edges").innerHTML = edgesSvg(G);
+  lightUp(el, G);
+}
+function moveEdges(el, G, id) {
+  for (const e of G.edges) if (e.a === id || e.b === id) {
+    const d = edgePath(G, e);
+    el.querySelectorAll(`.fw-edge[data-key="${CSS.escape(e.key)}"] path`).forEach((p) => p.setAttribute("d", d));
+  }
+}
+// a card and its lines (and the cards at their ends) stay lit; the rest steps back
+function lightUp(el, G, hover = null) {
+  const t = hover || (FS.sel ? { node: FS.sel.id } : null);
+  const nodes = new Set(), edges = new Set();
+  if (t?.node) {
+    nodes.add(t.node);
+    for (const e of G.edges) if (e.a === t.node || e.b === t.node) { edges.add(e.key); nodes.add(e.a); nodes.add(e.b); }
+  } else if (t?.edge) { const e = G.edges.find((x) => x.key === t.edge); if (e) { edges.add(e.key); nodes.add(e.a); nodes.add(e.b); } }
+  const canvas = el.querySelector(".fw-canvas");
+  canvas.classList.toggle("dim", !!t);
+  for (const n of el.querySelectorAll(".fw-node")) { n.classList.toggle("lit", nodes.has(n.dataset.id)); n.classList.toggle("sel", FS.sel?.id === n.dataset.id); }
+  for (const g of el.querySelectorAll(".fw-edge")) g.classList.toggle("lit", edges.has(g.dataset.key));
+}
+
+function fit(el, G) {
+  const canvas = el.querySelector(".fw-canvas");
+  const cw = canvas.clientWidth || 900, ch = canvas.clientHeight || 520;
+  const x0 = Math.min(...G.nodes.map((n) => n.x)), x1 = Math.max(...G.nodes.map((n) => n.x)) + NW;
+  const y0 = Math.min(...G.nodes.map((n) => n.y)) - 64, y1 = Math.max(...G.nodes.map((n) => n.y + n.h));
+  const k = Math.max(0.35, Math.min(1.1, (cw - 60) / (x1 - x0), (ch - 80) / (y1 - y0)));
+  FS.pan = { k, x: (cw - (x1 - x0) * k) / 2 - x0 * k, y: (ch - 30 - (y1 - y0) * k) / 2 - y0 * k };
+}
 function applyPan(el) {
-  const world = el.querySelector(".fl-world");
+  const world = el.querySelector(".fw-world");
   if (!world) return;
   world.style.transform = `translate(${FS.pan.x}px, ${FS.pan.y}px) scale(${FS.pan.k})`;
-  const z = el.querySelector(".fl-zoom");
+  const z = el.querySelector(".fw-zoom");
   if (z) z.textContent = Math.round(FS.pan.k * 100) + "%";
 }
 
-function wireCanvas(el, by) {
-  const canvas = el.querySelector(".fl-canvas");
+function tipFor(G, t) {
+  if (t.edge) {
+    const e = G.edges.find((x) => x.key === t.edge), a = G.byId.get(e.a), b = G.byId.get(e.b);
+    const nm = (n) => n.type === "hub" ? FS.data.hub.name : n.type === "machine" ? n.m.name : n.name;
+    return e.kind === "app" ? `<b>${H(nm(b))}</b><span>runs on ${H(nm(a))}</span>`
+      : `<b>${H(nm(b))}</b><span>${{ up: "answers over SSH", down: "not answering", idle: "not checked yet", standby: "keeps a copy of this gate" }[e.kind]}</span>`;
+  }
+  const n = G.byId.get(t.node);
+  if (n.type === "machine") { const m = n.m; return `<b>${H(m.name)}</b><span>${H(m.os || "")}</span><em>last seen ${ago(m.lastSeen)}</em>`; }
+  if (n.type === "app") return `<b>${H(n.name)}</b><span>on ${n.on.map((o) => o.where === "self" ? "this machine" : (G.byId.get(o.where)?.m.name || "?")).map(H).join(", ")}</span>`;
+  return `<b>${H(FS.data.hub.name)}</b><span>this machine, the hub</span>`;
+}
+
+function wireCanvas(el, G) {
+  const canvas = el.querySelector(".fw-canvas"), tip = el.querySelector(".fw-tip");
   let drag = null;
+  const pick = (target) => {
+    const n = G.byId.get(target);
+    if (!n) return;
+    FS.sel = FS.sel?.id === n.id ? null : { id: n.id, kind: n.type };
+    lightUp(el, G);
+    paintPanel();
+    if (FS.sel?.kind === "machine") loadDetail(FS.sel.id);
+  };
   canvas.addEventListener("pointerdown", (e) => {
-    const node = e.target.closest(".fl-node:not(.hub)");
-    const t = e.target.closest("[data-fl]");
-    if (t) return;
-    drag = { x: e.clientX, y: e.clientY, node: node || null, moved: false,
-             from: node ? { ...(by[node.dataset.id] || { x: 0, y: 0 }) } : { ...FS.pan } };
+    if (e.target.closest("[data-fl], .fw-controls, .fw-none")) return;
+    const node = e.target.closest(".fw-node");
+    drag = { x: e.clientX, y: e.clientY, node, moved: false, from: node ? { x: G.byId.get(node.dataset.id).x, y: G.byId.get(node.dataset.id).y } : { ...FS.pan } };
     canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add("panning");
   });
   canvas.addEventListener("pointermove", (e) => {
-    if (!drag) return;
+    if (!drag) {
+      const hit = e.target.closest(".fw-node") ? { node: e.target.closest(".fw-node").dataset.id } : e.target.closest(".fw-edge") ? { edge: e.target.closest(".fw-edge").dataset.key } : null;
+      lightUp(el, G, hit);
+      if (hit) {
+        const r = canvas.getBoundingClientRect();
+        tip.innerHTML = tipFor(G, hit); tip.hidden = false;
+        tip.style.left = Math.min(r.width - 260, e.clientX - r.left + 14) + "px"; tip.style.top = (e.clientY - r.top + 14) + "px";
+      } else tip.hidden = true;
+      return;
+    }
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    tip.hidden = true;
     if (drag.node) {
-      const x = drag.from.x + dx / FS.pan.k, y = drag.from.y + dy / FS.pan.k;
-      FS.moved.set(drag.node.dataset.id, { x, y });
-      drag.node.style.left = x + "px"; drag.node.style.top = y + "px";
+      const n = G.byId.get(drag.node.dataset.id);
+      n.x = drag.from.x + dx / FS.pan.k; n.y = drag.from.y + dy / FS.pan.k;
+      FS.moved.set(n.id, { x: n.x, y: n.y });
+      drag.node.style.left = n.x + "px"; drag.node.style.top = n.y + "px";
+      drag.node.classList.add("dragging");
+      moveEdges(el, G, n.id);
     } else {
       FS.pan.x = drag.from.x + dx; FS.pan.y = drag.from.y + dy;
       FS.fitKey = "held";
@@ -245,93 +355,190 @@ function wireCanvas(el, by) {
     }
   });
   const stop = (e) => {
-    if (drag?.node && drag.moved) drawGraph(el);
-    drag = null;
-    try { canvas.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
+    if (!drag) return;
+    const d = drag; drag = null;
+    canvas.classList.remove("panning");
+    d.node?.classList.remove("dragging");
+    try { canvas.releasePointerCapture(e.pointerId); } catch { /* gone */ }
+    if (!d.moved) {
+      if (d.node) pick(d.node.dataset.id);
+      else { const ed = e.target.closest?.(".fw-edge"); if (ed) pick(ed.dataset.key.split("|")[1]); else if (FS.sel) { FS.sel = null; lightUp(el, G); paintPanel(); } }
+    }
   };
   canvas.addEventListener("pointerup", stop);
   canvas.addEventListener("pointercancel", stop);
+  canvas.addEventListener("pointerleave", () => { if (!drag) { tip.hidden = true; lightUp(el, G); } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    const k = Math.max(0.4, Math.min(2, FS.pan.k * (e.deltaY < 0 ? 1.1 : 0.9)));
-    FS.pan.k = k; FS.fitKey = "held"; applyPan(el);
+    const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    const k = Math.max(0.35, Math.min(2.2, FS.pan.k * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))));
+    FS.pan.x = px - ((px - FS.pan.x) * k) / FS.pan.k; FS.pan.y = py - ((py - FS.pan.y) * k) / FS.pan.k; FS.pan.k = k;
+    FS.fitKey = "held"; applyPan(el);
   }, { passive: false });
-  canvas.addEventListener("click", (e) => {
+  canvas.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.closest(".fw-node")) pick(e.target.closest(".fw-node").dataset.id);
+    if (e.key === "f" || e.key === "F") toggleFull(el);
+    if (e.key === "Escape" && FS.sel) { FS.sel = null; lightUp(el, G); paintPanel(); }
+  });
+  canvas.querySelector(".fw-controls").addEventListener("click", (e) => {
     const t = e.target.closest("[data-fl]");
     if (!t) return;
-    if (t.dataset.fl === "in") { FS.pan.k = Math.min(2, FS.pan.k * 1.2); FS.fitKey = "held"; }
-    else if (t.dataset.fl === "out") { FS.pan.k = Math.max(0.4, FS.pan.k / 1.2); FS.fitKey = "held"; }
-    else { FS.moved.clear(); FS.fitKey = null; drawGraph(el); return; }
+    const zoom = (f) => { const cw = canvas.clientWidth / 2, ch = canvas.clientHeight / 2, k = Math.max(0.35, Math.min(2.2, FS.pan.k * f));
+      FS.pan.x = cw - ((cw - FS.pan.x) * k) / FS.pan.k; FS.pan.y = ch - ((ch - FS.pan.y) * k) / FS.pan.k; FS.pan.k = k; FS.fitKey = "held"; };
+    if (t.dataset.fl === "in") zoom(1.2);
+    else if (t.dataset.fl === "out") zoom(1 / 1.2);
+    else if (t.dataset.fl === "fit") fit(el, G);
+    else if (t.dataset.fl === "tidy") { FS.moved.clear(); layout(G, canvas.clientWidth); paint(el, G); fit(el, G); }
+    else if (t.dataset.fl === "full") { toggleFull(el); return; }
     applyPan(el);
   });
 }
+function toggleFull(el) {
+  const wrap = el.closest(".fl-wrap") || el;
+  const on = !wrap.classList.contains("full");
+  wrap.classList.toggle("full", on);
+  document.documentElement.classList.toggle("fl-noscroll", on);
+  FS.fitKey = null;
+  drawGraph(el);
+}
 
 // ------------------------------------------------------------------ the panel
-function panel() {
-  const m = selected();
-  if (!m) {
-    return `<aside class="fl-panel card lit">
-      <h2>Pick a machine</h2>
-      <p class="muted">Pick one to see its specs, how loaded it is and what runs on it — and to install an app on it,
-         open it in Termix, swap an app with another machine, or make it the standby for this one.</p>
-      ${machines().length > 1 ? `<button class="btn sm" data-act="fl-swap">${I.swap} Swap an app between two machines</button>` : ""}
-      <div class="fl-key">
-        <span><i class="dot ok"></i>reachable</span><span><i class="dot err"></i>unreachable</span><span class="fl-tag">standby</span>
-      </div>
-    </aside>`;
-  }
-  const u = m.usage || {}, s = m.specs || {};
-  const cpu = u.load != null && u.cores ? Math.min(100, Math.round((u.load / u.cores) * 100)) : null;
-  return `<aside class="fl-panel card lit">
-    <div class="fl-head">
-      <div><h2>${H(m.name)}</h2>
-        <p class="mono small">${H(m.user)}@${H(m.address)}${m.port !== 22 ? ":" + m.port : ""}</p></div>
-      <button class="iconbtn" data-act="fl-close" aria-label="Close">${I.close}</button>
+// Machines' full detail (the probe: containers, services, every disk, every
+// address) is only in /fleet/<id>; it is fetched when one is picked.
+async function loadDetail(id, fresh) {
+  const have = FS.detail.get(id);
+  if (!fresh && have && Date.now() - have.at < 20000) return;
+  try { FS.detail.set(id, { at: Date.now(), d: await X.api(`/__gate/api/fleet/${id}`) }); }
+  catch { return; }
+  if (FS.sel?.id === id) paintPanel();
+}
+function paintPanel() {
+  const p = document.getElementById("flPanel");
+  if (p) p.innerHTML = panelHtml();
+}
+function panel() { return `<aside class="fl-panel card lit" id="flPanel" aria-live="polite">${panelHtml()}</aside>`; }
+
+function panelHtml() {
+  const s = FS.sel;
+  if (s?.kind === "machine" && selected()) return machinePanel(selected());
+  if (s?.kind === "app" && FS.G?.byId.get(s.id)) return appPanel(FS.G.byId.get(s.id));
+  if (s?.kind === "hub") return hubPanel();
+  return `<div class="fp-head" style="--c:var(--ok)"><span class="fp-kind">machines</span><h2>Pick a card</h2></div>
+    <p class="muted">Click a machine to see everything about it: its hardware, how loaded it is, every disk and address, its
+       containers and services, and what you can do to it from here. Click an app to see where it runs and move it.</p>
+    <div class="fp-acts">
+      <button class="btn sm primary" data-act="fl-link">${I.plus} Link a machine</button>
+      ${machines().length > 1 ? `<button class="btn sm" data-act="fl-transfer">${I.move} Move an app</button><button class="btn sm" data-act="fl-swap">${I.swap} Swap an app</button>` : ""}
     </div>
-    ${m.lastError ? `<div class="fl-warn"><b>Cannot reach it.</b> ${H(m.lastError)}</div>` : ""}
-    <div class="fl-facts">
-      <div><span>status</span><b><i class="dot ${m.up ? "ok" : "err"}"></i>${m.up ? "reachable" : "not answering"}</b></div>
-      <div><span>last seen</span><b>${ago(m.lastSeen)}</b></div>
-      <div><span>system</span><b>${H(m.os || "–")}</b></div>
-      <div><span>machine</span><b>${H(s.model || m.arch || "–")}</b></div>
-      <div><span>cores</span><b>${s.cores ?? "–"}</b></div>
-      <div><span>memory</span><b>${fmtB(s.mem)}</b></div>
-      <div><span>disk</span><b>${s.disk ? `${fmtB(s.disk.total)}` : "–"}</b></div>
-      <div><span>up for</span><b>${dur(u.uptime)}</b></div>
+    <div class="fl-key"><span><i class="dot ok"></i>answers</span><span><i class="dot warn"></i>slow to answer</span><span><i class="dot err"></i>not answering</span><span class="fl-tag">standby</span></div>`;
+}
+
+function hubPanel() {
+  const d = FS.data, sb = machines().filter((m) => m.standby);
+  return `<div class="fp-head" style="--c:var(--ok)"><span class="fp-kind">the hub</span><h2>${H(d.hub.name)}</h2>
+      <p class="mono small">${H(d.hub.hostname)}${d.hub.version ? ` · Aegis × Burrow ${H(d.hub.version)}` : ""}</p>
+      <button class="fp-x" data-act="fl-close" aria-label="Close">${I.close}</button></div>
+    <p class="muted small">This machine runs the gate. Every other machine is reached from here with one SSH key that never leaves it.</p>
+    <h3>Runs here</h3>
+    <ul class="fl-applist">${(d.here || []).map((a) => `<li>${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : I.box}<b>${H(a.name)}</b><span class="mono small">${H(a.version || "")}</span></li>`).join("")}</ul>
+    <h3>Standby</h3>
+    <p class="small ${sb.length ? "" : "muted"}">${sb.length ? `${sb.map((m) => H(m.name)).join(", ")} keeps a copy of this gate and takes over if it stops answering.` : "No machine keeps a copy of this gate. Pick one and choose “Make it the standby”."}</p>
+    <div class="fp-acts"><button class="btn sm primary" data-act="fl-link">${I.plus} Link a machine</button><button class="btn sm" data-act="fl-manual">Add by hand</button></div>`;
+}
+
+function appPanel(n) {
+  const where = n.on.map((o) => ({ ...o, m: o.where === "self" ? null : machines().find((x) => x.id === o.where) }));
+  const c = catalog().find((x) => x.id === n.appId);
+  const others = machines().filter((m) => !n.on.some((o) => o.where === m.id));
+  return `<div class="fp-head" style="--c:var(--blue)"><span class="fp-kind">app</span>
+      <h2>${LOGO[n.appId] ? `<img class="fp-logo" src="${LOGO[n.appId]}" alt="">` : ""}${H(n.name)}</h2>
+      <p class="small muted">on ${n.on.length} ${n.on.length === 1 ? "machine" : "machines"}${c?.note ? ` · ${H(c.note)}` : ""}</p>
+      <button class="fp-x" data-act="fl-close" aria-label="Close">${I.close}</button></div>
+    <h3>Where it runs</h3>
+    <ul class="fl-applist">${where.map((o) => `<li>
+        <span class="fl-ico sm">${o.m ? I.machine : I.hub}</span>
+        <span class="grow"><b>${o.m ? H(o.m.name) : "This machine"}</b>${o.version ? ` <span class="mono small">${H(o.version)}</span>` : ""}
+          ${o.m ? `<small class="faint">${H(o.m.address)} · ${stateOf(o.m)[1]}</small>` : ""}</span>
+        ${o.url ? `<a class="btn sm ghost" href="${H(o.url)}" target="_blank" rel="noopener">${I.ext} Open</a>` : ""}
+        ${o.m && c?.swappable && machines().length > 1 ? `<button class="btn sm" data-act="fl-transfer" data-app="${H(n.appId)}" data-from="${H(o.m.id)}">${I.move} Move</button>` : ""}
+      </li>`).join("")}</ul>
+    ${c?.swappable ? "" : `<p class="small muted">${H(c?.note || "Aegis can't move this one between machines.")}</p>`}
+    <div class="fp-acts">
+      ${c?.installable && others.length ? `<button class="btn sm" data-act="fl-install-app" data-app="${H(n.appId)}">${I.box} Install it on another machine</button>` : ""}
+      ${c?.swappable && n.on.filter((o) => o.where !== "self").length > 1 ? `<button class="btn sm" data-act="fl-swap" data-app="${H(n.appId)}">${I.swap} Swap two copies</button>` : ""}
+    </div>`;
+}
+
+function machinePanel(m) {
+  const det = FS.detail.get(m.id)?.d || {}, p = det.probe || null;
+  const u = m.usage || {}, s = m.specs || {}, [dot, said] = stateOf(m);
+  const cpu = cpuOf(m);
+  const tx = det.termix || m.termix || null, hasTermix = !!FS.data.termix;
+  const fact = (k, v) => `<div><span>${k}</span><b title="${H(v ?? "–")}">${H(v ?? "–")}</b></div>`;
+  return `<div class="fp-head" style="--c:${EDGE_C[m.standby ? "standby" : m.up ? "up" : m.lastError ? "down" : "idle"]}">
+      <span class="fp-kind">machine${m.standby ? " · standby" : ""}</span>
+      <h2>${H(m.name)}</h2>
+      <p class="mono small">${H(m.user)}@${H(m.address)}${m.port !== 22 ? ":" + m.port : ""}</p>
+      <span class="pill ${dot === "idle" ? "" : dot}"><i class="dot ${dot}"></i>${said}${m.lastSeen ? ` · ${ago(m.lastSeen)}` : ""}</span>
+      <button class="fp-x" data-act="fl-close" aria-label="Close">${I.close}</button></div>
+    ${m.lastError && !m.up ? `<div class="fl-warn"><b>Cannot reach it.</b> ${H(m.lastError)}</div>` : ""}
+    <div class="fp-acts main">
+      ${hasTermix && tx?.hostId != null ? `<button class="btn sm primary" data-act="fl-terminal">${I.term} Terminal</button>` : ""}
+      ${hasTermix ? `<button class="btn sm${tx ? " ghost" : " primary"}" data-act="fl-termix">${I.term} ${tx ? "In Termix ✓" : "Add to Termix"}</button>` : ""}
+      <button class="btn sm" data-act="fl-probe">${I.refresh} Look again</button>
     </div>
     <div class="fl-bars">
-      ${bar("Processor", cpu, u.load != null ? `load ${u.load} on ${u.cores || "?"} cores` : "not checked")}
+      ${bar("Processor", cpu, u.load != null ? `load ${(p?.cpu?.load || [u.load]).map((x) => Number(x).toFixed(2)).join(" · ")} on ${u.cores || "?"} cores` : "not checked")}
       ${bar("Memory", pct(u.memUsed, u.memTotal), `${fmtB(u.memUsed)} of ${fmtB(u.memTotal)}`)}
-      ${bar("Disk", u.disk ? pct(u.disk.used, u.disk.total) : null, u.disk ? `${fmtB(u.disk.used)} of ${fmtB(u.disk.total)}` : "not checked")}
+      ${bar("Disk", u.disk ? pct(u.disk.used, u.disk.total) : null, u.disk ? `${fmtB(u.disk.used)} of ${fmtB(u.disk.total)} on ${H(u.disk.mount || "/")}` : "not checked")}
       ${u.tempC ? bar("Temperature", Math.min(100, Math.round((u.tempC / 85) * 100)), `${u.tempC} °C`) : ""}
     </div>
+    <h3>The machine</h3>
+    <div class="fl-facts">
+      ${fact("system", m.os || p?.os?.pretty)}${fact("kernel", p?.os?.kernel)}
+      ${fact("hardware", s.model || m.arch)}${fact("processor", p?.cpu?.model)}
+      ${fact("cores", s.cores)}${fact("memory", s.mem ? fmtB(s.mem) : null)}
+      ${fact("architecture", m.arch || p?.os?.arch)}${fact("virtual", p?.os?.virt || "no")}
+      ${fact("hostname", m.hostname || p?.host?.hostname)}${fact("up for", dur(u.uptime))}
+      ${fact("ssh port", p?.ssh?.port || m.port)}${fact("signs in as", p?.host?.user || m.user)}
+    </div>
     <h3>What runs on it</h3>
-    ${(m.apps || []).length ? `<ul class="fl-applist">${m.apps.map((a) => `<li>
-        ${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : I.box}
-        <b>${H(a.name)}</b><span class="mono small">${H(a.version || "")}</span>
+    ${(m.apps || []).length ? `<ul class="fl-applist">${m.apps.map((a) => {
+      const c = catalog().find((x) => x.id === a.id);
+      return `<li>${LOGO[a.id] ? `<img src="${LOGO[a.id]}" alt="">` : I.box}
+        <span class="grow"><b>${H(a.name)}</b> <span class="mono small">${H(a.version || "")}</span></span>
         ${a.url ? `<a class="btn sm ghost" href="${H(a.url)}" target="_blank" rel="noopener">${I.ext} Open</a>` : ""}
-      </li>`).join("")}</ul>`
-      : `<p class="muted">Nothing Aegis knows by name${m.probedAt ? "" : " — it has not been looked at yet"}.</p>`}
-    <div class="fl-acts">
-      <button class="btn sm" data-act="fl-probe">${I.refresh} Look again</button>
+        ${c?.swappable && machines().length > 1 ? `<button class="btn sm ghost" data-act="fl-transfer" data-app="${H(a.id)}" data-from="${H(m.id)}" title="Move or copy it to another machine">${I.move}</button>` : ""}
+      </li>`; }).join("")}</ul>`
+      : `<p class="muted small">Nothing Aegis knows by name${m.probedAt ? "" : " — it has not been looked at yet"}.</p>`}
+    <div class="fp-acts">
       <button class="btn sm" data-act="fl-install">${I.box} Install an app</button>
-      ${FS.data.termix ? `<button class="btn sm" data-act="fl-termix">${I.term} Open in Termix</button>` : ""}
-      ${machines().length > 1 ? `<button class="btn sm" data-act="fl-swap">${I.swap} Swap an app</button>` : ""}
+      ${machines().length > 1 ? `<button class="btn sm" data-act="fl-transfer" data-from="${H(m.id)}">${I.move} Move an app</button><button class="btn sm" data-act="fl-swap">${I.swap} Swap</button>` : ""}
+    </div>
+    ${p ? `
+    ${p.disks?.length ? `<h3>Disks</h3><div class="fl-bars">${p.disks.map((dk) => bar(H(dk.mount), pct(dk.used, dk.total), `${fmtB(dk.used)} used · ${fmtB(dk.free)} free of ${fmtB(dk.total)}`)).join("")}</div>` : ""}
+    <h3>Network</h3>
+    <ul class="fp-addr">${[...new Set([m.address, ...(m.candidates || []), ...(p.addresses || [])])].filter(Boolean).map((a) => `<li><span class="mono">${H(a)}</span>${a === m.address ? '<span class="fl-tag">used</span>' : ""}
+      <button class="iconbtn sm" data-act="fl-copy" data-text="${H(a)}" aria-label="Copy">${I.copy}</button></li>`).join("")}</ul>
+    ${p.ssh?.listening?.length ? `<p class="small muted">Listening on ${p.ssh.listening.slice(0, 24).map((x) => `<span class="mono">${x}</span>`).join(", ")}${p.ssh.listening.length > 24 ? " …" : ""}</p>` : ""}
+    ${p.docker ? `<details class="fl-more" ${p.docker.length && p.docker.length < 8 ? "open" : ""}><summary>${p.docker.length} ${p.docker.length === 1 ? "container" : "containers"} running</summary>
+      <ul class="fl-raw">${p.docker.map((c) => `<li><b>${H(c.name)}</b> <span class="mono small">${H(c.image)}</span><br><span class="muted small">${H(c.status)}${c.ports ? ` · ${H(c.ports)}` : ""}</span></li>`).join("") || '<li class="muted">none</li>'}</ul></details>`
+      : '<p class="small muted">No Docker there (or this user may not use it).</p>'}
+    ${p.units?.length ? `<details class="fl-more"><summary>${p.units.length} services running</summary>
+      <ul class="fl-raw">${p.units.map((x) => `<li class="mono small">${H(x)}</li>`).join("")}</ul></details>` : ""}`
+    : `<p class="fl-wait small"><span class="spin"></span> loading everything it knows about it…</p>`}
+    <h3>Keep it safe</h3>
+    <div class="fp-acts">
       <button class="btn sm ${m.standby ? "" : "ghost"}" data-act="fl-standby">${I.shield} ${m.standby ? "Standby is on" : "Make it the standby"}</button>
       <button class="btn sm danger ghost" data-act="fl-forget">${I.trash} Forget</button>
     </div>
     ${m.standby ? `<p class="fl-note">${I.shield} This machine keeps a copy of this gate${m.standbyState?.at ? `, last refreshed ${ago(m.standbyState.at)}` : ""}.
-       If this host stops answering at <span class="mono">${H(m.standbyState?.url || "")}</span> it starts that copy, says what went wrong, and
-       tries to start this one again. <button class="link" data-act="fl-standby-refresh">Refresh the copy now</button></p>` : ""}
-    ${m.probe?.docker?.length ? `<details class="fl-more"><summary>${m.probe.docker.length} containers</summary>
-      <ul class="fl-raw">${m.probe.docker.map((c) => `<li><b>${H(c.name)}</b> <span class="mono small">${H(c.image)}</span> <span class="muted">${H(c.status)}</span></li>`).join("")}</ul></details>` : ""}
-    ${m.probe?.units?.length ? `<details class="fl-more"><summary>${m.probe.units.length} services running</summary>
-      <ul class="fl-raw">${m.probe.units.map((u2) => `<li class="mono small">${H(u2)}</li>`).join("")}</ul></details>` : ""}
-    <p class="fl-foot muted">Linked ${ago(m.addedAt)} · looked at ${ago(m.probedAt)}${(m.candidates || []).length > 1 ? ` · also answers on ${H(m.candidates.filter((c) => c !== m.address).slice(0, 3).join(", "))}` : ""}</p>
-  </aside>`;
+       If this host stops answering at <span class="mono">${H(m.standbyState?.url || "")}</span> and is not just slow, it starts that copy and tries to start this one again.
+       <button class="link" data-act="fl-standby-refresh">Refresh the copy now</button></p>` : ""}
+    <p class="fl-foot muted">Linked ${ago(m.addedAt)} · looked at ${ago(m.probedAt)}</p>`;
 }
 const bar = (label, v, sub) => `<div class="fl-bar${v != null && v > 85 ? " hot" : ""}">
-  <span>${label}</span><i><b style="width:${v || 0}%"></b></i><em>${v == null ? "–" : v + "%"}</em><small>${H(sub)}</small></div>`;
+  <span>${label}</span><i><b style="width:${v || 0}%"></b></i><em>${v == null ? "–" : v + "%"}</em><small>${sub}</small></div>`;
 
 // ------------------------------------------------------------------ doing things
 export async function click(el, act) {
@@ -340,21 +547,31 @@ export async function click(el, act) {
     try { await navigator.clipboard.writeText(el.dataset.text); X.toast("Copied"); } catch { X.toast("Copy it by hand"); }
     return true;
   }
-  if (act === "fl-pick") { FS.sel = el.dataset.id === FS.sel ? null : el.dataset.id; X.render(); return true; }
+  if (act === "fl-pick") {
+    FS.sel = FS.sel?.id === el.dataset.id ? null : { id: el.dataset.id, kind: el.dataset.kind || "machine" };
+    X.render();
+    if (FS.sel?.kind === "machine") loadDetail(FS.sel.id);
+    // a narrow screen shows the panel below the list: take the reader to it
+    if (FS.sel && window.innerWidth <= 980) document.getElementById("flPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return true;
+  }
   if (act === "fl-close") { FS.sel = null; X.render(); return true; }
   if (act === "fl-link") { linkForm(); return true; }
   if (act === "fl-manual") { manualForm(); return true; }
-  if (act === "fl-swap") { swapForm(); return true; }
+  if (act === "fl-swap") { swapForm(el.dataset.app); return true; }
+  if (act === "fl-transfer") { transferForm(el.dataset.app, el.dataset.from || m?.id); return true; }
+  if (act === "fl-install-app") { installAppForm(el.dataset.app); return true; }
   if (!m) return false;
   if (act === "fl-probe") {
     el.disabled = true;
     try { await X.api(`/__gate/api/fleet/${m.id}/probe`, { method: "POST", body: "{}" }); X.toast("Looked again"); }
     catch (e) { X.toast(e.message); }
-    await load(); X.render();
+    await load(); FS.detail.delete(m.id); X.render(); loadDetail(m.id, true);
     return true;
   }
   if (act === "fl-install") { installForm(m); return true; }
   if (act === "fl-termix") { termixForm(m); return true; }
+  if (act === "fl-terminal") { openTerminal(m); return true; }
   if (act === "fl-standby") { m.standby ? standbyOffForm(m) : standbyForm(m); return true; }
   if (act === "fl-standby-refresh") { await job(`/__gate/api/fleet/${m.id}/standby/refresh`, {}); return true; }
   if (act === "fl-forget") { forgetForm(m); return true; }
@@ -401,7 +618,7 @@ function pollForLink(mo, was) {
     if (machines().length > was) {
       clearInterval(FS.pollTimer);
       const fresh = machines()[machines().length - 1];
-      FS.sel = fresh.id;
+      FS.sel = { id: fresh.id, kind: "machine" };
       const w = mo.querySelector("#flWait");
       if (w) w.innerHTML = `<b class="ok-msg">${H(fresh.name)} is linked.</b> Looking at what it runs…`;
       setTimeout(() => { X.closeModal(); X.render(); }, 1400);
@@ -427,7 +644,7 @@ function manualForm() {
         const r = await X.api("/__gate/api/fleet/add", { method: "POST", body: JSON.stringify({
           address: mo.querySelector("#flAddr").value.trim(), user: mo.querySelector("#flUser").value.trim(),
           port: Number(mo.querySelector("#flPort").value) || 22, name: mo.querySelector("#flName").value.trim() }) });
-        FS.sel = r.id; X.closeModal(); X.toast("Linked"); await load(); X.render();
+        FS.sel = { id: r.id, kind: "machine" }; X.closeModal(); X.toast("Linked"); await load(); X.render();
       } catch (e) { mo.querySelector("#flErr").textContent = e.message; b.disabled = false; b.textContent = "Add it"; }
     });
   });
@@ -454,16 +671,16 @@ function installForm(m) {
   });
 }
 
-function swapForm() {
+function swapForm(pre) {
   const swappable = catalog().filter((c) => c.swappable);
   const opts = (sel) => machines().map((m) => `<option value="${H(m.id)}" ${m.id === sel ? "selected" : ""}>${H(m.name)}</option>`).join("");
   X.openModal(`<h2>Swap an app between two machines</h2>
     <p>Each machine's copy of the app and all of its data change places. Both are stopped first and started again
        after; neither machine's old data is deleted — it is kept beside the new one.</p>
-    <label class="fld"><span>App</span><select id="flApp">${swappable.map((c) => `<option value="${H(c.id)}">${H(c.name)}</option>`).join("")}</select></label>
+    <label class="fld"><span>App</span><select id="flApp">${swappable.map((c) => `<option value="${H(c.id)}" ${c.id === pre ? "selected" : ""}>${H(c.name)}</option>`).join("")}</select></label>
     <div class="row2">
-      <label class="fld"><span>This machine</span><select id="flA">${opts(FS.sel || machines()[0]?.id)}</select></label>
-      <label class="fld"><span>swaps with</span><select id="flB">${opts(machines().find((m) => m.id !== (FS.sel || machines()[0]?.id))?.id)}</select></label>
+      <label class="fld"><span>This machine</span><select id="flA">${opts(selected()?.id || machines()[0]?.id)}</select></label>
+      <label class="fld"><span>swaps with</span><select id="flB">${opts(machines().find((m) => m.id !== (selected()?.id || machines()[0]?.id))?.id)}</select></label>
     </div>
     <label class="row fl-confirm"><input type="checkbox" id="flOk"><span>I understand both apps stop while their data changes places.</span></label>
     <div class="err-msg" id="flErr"></div>
@@ -490,9 +707,10 @@ function termixForm(m) {
       <option value="key">With this gate's own key (nothing new to type)</option>
       <option value="password">With that machine's password</option></select></label>
     <label class="fld" id="flPwWrap" hidden><span>That machine's password</span><input id="flHp" type="password" autocomplete="off"></label>
-    <label class="row fl-confirm"><input type="checkbox" id="flOk"><span>Add it to Termix.</span></label>
+    <label class="row fl-confirm"><input type="checkbox" id="flOk"><span>Add it to Termix${m.termix ? " (it is there already: this only refreshes what Aegis knows)" : ""}.</span></label>
+    <label class="row fl-confirm"><input type="checkbox" id="flOpen" checked><span>Then open a terminal on it in a new tab.</span></label>
     <div class="err-msg" id="flErr"></div>
-    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo">Add and open</button></div>`, (mo) => {
+    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo">Add to Termix</button></div>`, (mo) => {
     mo.querySelector("#flAuth").addEventListener("change", (e) => {
       mo.querySelector("#flPwWrap").hidden = e.target.value !== "password";
     });
@@ -506,10 +724,71 @@ function termixForm(m) {
           auth: mo.querySelector("#flAuth").value, hostPassword: mo.querySelector("#flHp").value, confirm: true }) });
         X.closeModal();
         X.toast(r.existed ? `${m.name} was already in Termix` : `${m.name} added to Termix`);
-        window.open("/__gate/open/termix", "_blank", "noopener");
-        await load(); X.render();
-      } catch (e) { mo.querySelector("#flErr").textContent = e.message; b.disabled = false; b.textContent = "Add and open"; }
+        if (mo.querySelector("#flOpen")?.checked) openTerminal({ ...m, termix: { hostId: r.id } });
+        await load(); FS.detail.delete(m.id); X.render(); loadDetail(m.id, true);
+      } catch (e) { mo.querySelector("#flErr").textContent = e.message; b.disabled = false; b.textContent = "Add to Termix"; }
     });
+  });
+}
+
+// Termix opens straight into a terminal on that host (its ?view=terminal&hostId=).
+// The new tab is opened before anything is awaited, so no popup blocker minds.
+function openTerminal(m) {
+  const id = m.termix?.hostId;
+  const url = id != null ? `/__gate/open/termix?view=terminal&hostId=${encodeURIComponent(id)}` : "/__gate/open/termix";
+  window.open(url, "_blank", "noopener");
+}
+
+// One app and its data, from one machine to another: a copy, or a move.
+function transferForm(appId, fromId) {
+  const movable = catalog().filter((c) => c.swappable);
+  if (!movable.length) { X.toast("Nothing Aegis knows can be moved between machines yet."); return; }
+  const has = (mid, app) => machines().find((x) => x.id === mid)?.apps?.some((a) => a.id === app);
+  const app0 = appId && movable.some((c) => c.id === appId) ? appId : (movable.find((c) => has(fromId, c.id)) || movable[0]).id;
+  const from0 = fromId && has(fromId, app0) ? fromId : (machines().find((x) => has(x.id, app0)) || machines()[0])?.id;
+  const opts = (sel, skip) => machines().filter((x) => x.id !== skip).map((x) => `<option value="${H(x.id)}" ${x.id === sel ? "selected" : ""}>${H(x.name)}${x.up ? "" : " (not answering)"}</option>`).join("");
+  X.openModal(`<h2>${I.move} Move an app to another machine</h2>
+    <p>Its data goes with it. The app is stopped on the first machine while its data is read, so what arrives is complete.
+       Whatever the second machine had is moved aside there, never deleted.</p>
+    <label class="fld"><span>App</span><select id="flApp">${movable.map((c) => `<option value="${H(c.id)}" ${c.id === app0 ? "selected" : ""}>${H(c.name)}</option>`).join("")}</select></label>
+    <div class="row2">
+      <label class="fld"><span>From</span><select id="flFrom">${opts(from0)}</select></label>
+      <label class="fld"><span>To</span><select id="flTo">${opts(machines().find((x) => x.id !== from0)?.id, null)}</select></label>
+    </div>
+    <div class="fl-modes" role="radiogroup">
+      <label class="fl-mode"><input type="radio" name="flMode" value="copy" checked><span><b>Copy</b><small>Both machines run it afterwards; the first one starts again as soon as its data is read.</small></span></label>
+      <label class="fl-mode"><input type="radio" name="flMode" value="move"><span><b>Move</b><small>Only the second runs it afterwards. The first keeps its data, stopped and no longer started at boot.</small></span></label>
+    </div>
+    <p class="small muted" id="flHint"></p>
+    <label class="row fl-confirm"><input type="checkbox" id="flOk"><span>Stop it for as long as its data takes to copy.</span></label>
+    <div class="err-msg" id="flErr"></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo">${I.move} Start</button></div>`, (mo) => {
+    const hint = () => {
+      const app = mo.querySelector("#flApp").value, f = mo.querySelector("#flFrom").value, t = mo.querySelector("#flTo").value;
+      const name = (id) => machines().find((x) => x.id === id)?.name || "?";
+      mo.querySelector("#flHint").textContent = !has(f, app) ? `${name(f)} doesn't have ${appName(app)} as far as Aegis knows - look at it again first if it does.`
+        : has(t, app) ? `${name(t)} already has it: its copy and data are moved aside and replaced.` : `${name(t)} doesn't have it yet: Aegis installs it there first.`;
+    };
+    for (const id of ["#flApp", "#flFrom", "#flTo"]) mo.querySelector(id).addEventListener("change", hint);
+    hint();
+    mo.querySelector("#flGo").addEventListener("click", () => {
+      const from = mo.querySelector("#flFrom").value, to = mo.querySelector("#flTo").value;
+      if (from === to) { mo.querySelector("#flErr").textContent = "Pick two different machines."; return; }
+      if (!mo.querySelector("#flOk").checked) { mo.querySelector("#flErr").textContent = "Tick the box first."; return; }
+      job("/__gate/api/fleet/transfer", { app: mo.querySelector("#flApp").value, from, to, mode: mo.querySelector('input[name="flMode"]:checked').value, confirm: true });
+    });
+  });
+}
+
+// "Install it on another machine", from an app's card.
+function installAppForm(appId) {
+  const c = catalog().find((x) => x.id === appId);
+  const free = machines().filter((x) => !(x.apps || []).some((a) => a.id === appId));
+  if (!c || !free.length) { X.toast("Every machine has it already."); return; }
+  X.openModal(`<h2>Install ${H(c.name)}</h2><p>${H(c.note || "")}</p>
+    <label class="fld"><span>On</span><select id="flOn">${free.map((x) => `<option value="${H(x.id)}">${H(x.name)}${x.up ? "" : " (not answering)"}</option>`).join("")}</select></label>
+    <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="flGo">${I.box} Install it</button></div>`, (mo) => {
+    mo.querySelector("#flGo").addEventListener("click", () => job(`/__gate/api/fleet/${mo.querySelector("#flOn").value}/install`, { app: appId }));
   });
 }
 

@@ -20,6 +20,8 @@ const flag = (cc) => /^[A-Z]{2}$/.test(cc || "") && cc !== "XX" && cc !== "T1" ?
 const displayName = (t) => t.name || t.title || (t.site ? t.site.url.replace(/^https:\/\//, "") : `tunnel-${t.port}`);
 
 const ICON = {
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
@@ -566,6 +568,13 @@ function adState(a) {
   if (st.state === "error") return `<span class="pill err" title="${h(st.detail || "")}"><i class="dot err"></i>error</span>`;
   return '<span class="pill ok"><i class="dot ok"></i>installed</span>';
 }
+// Stopped or in error: say why on the card itself, not in a tooltip.
+function adTrouble(a) {
+  const st = a.status || {};
+  if (!a.installed || a.busy || !["stopped", "error"].includes(st.state)) return "";
+  return `<div class="adc-trouble ${st.state}"><b>${st.state === "error" ? "Its status check failed" : "It is not running"}</b>${st.detail ? `<span class="mono">${h(st.detail)}</span>` : ""}
+    <span class="faint">Start it tries every way it can be started and writes down why if none works.</span></div>`;
+}
 const shortSrc = (s) => String(s || "").replace(/^https:\/\/(www\.)?(github\.com\/)?/, "").replace(/^\/home\/[^/]+/, "~");
 // "is made for Burrow, not …" is about the addon; the rest are about this machine
 const problemText = (ps) => ps.map((p) => (/^is made for/.test(p) ? "It " : "This machine ") + p).join(". ") + ".";
@@ -581,6 +590,7 @@ function adCard(a) {
     </div>
     <p class="adc-desc">${h(a.description || "No description.")}</p>
     ${a.problems.length ? `<div class="note-err small">${h(problemText(a.problems))}</div>` : ""}
+    ${adTrouble(a)}
     ${a.installed && w ? `<div class="dl">${w.burrow && w.burrow.url ? `<div class="dl-row"><span class="dl-k">Burrow</span><a class="mono" href="${h(w.burrow.url)}" target="_blank" rel="noopener">${h(w.burrow.url.replace(/^https:\/\//, ""))}</a></div>` : ""}
       <div class="dl-row"><span class="dl-k">Local</span><span class="mono">${h(w.local)}</span></div></div>` : ""}
     <div class="t-actions">
@@ -589,9 +599,11 @@ function adCard(a) {
       ${a.installed && w ? (w.burrow ? `<button class="btn sm ghost" data-act="ad-share" data-on="0" data-id="${h(a.id)}">Unpublish</button>`
         : `<button class="btn sm" data-act="ad-share" data-on="1" data-id="${h(a.id)}">${ICON.tunnel} Publish</button>`) : ""}
       ${upd ? `<button class="btn sm ok" data-act="ad-update" data-id="${h(a.id)}">${ICON.up} Update</button>` : ""}
+      ${a.installed && !a.busy && ["stopped", "error"].includes(a.status?.state) ? `<button class="btn sm warn" data-act="ad-rescue" data-id="${h(a.id)}">${ICON.play} Start it</button>` : ""}
       <span class="grow"></span>
       <details class="more"><summary class="btn sm ghost icon" aria-label="More">⋯</summary><div class="more-menu">
         ${a.installed ? a.actions.map((x) => `<button data-act="ad-action" data-id="${h(a.id)}" data-action="${h(x.id)}" data-confirm="${h(x.confirm || "")}">${h(x.label)}</button>`).join("") : ""}
+        ${a.installed ? `<button data-act="ad-rescue" data-id="${h(a.id)}">Start it and write a report</button><button data-act="ad-reports" data-id="${h(a.id)}">Start reports</button>` : ""}
         <button data-act="ad-check" data-id="${h(a.id)}">Check for updates</button>
         ${a.settings.length ? `<button data-act="ad-install" data-id="${h(a.id)}">Settings and reinstall</button>` : ""}
         ${a.links.map((l) => `<a href="${h(l.url)}" target="_blank" rel="noopener">${h(l.label)}</a>`).join("")}
@@ -712,8 +724,16 @@ function jobFollow(job, pollUrl, after, cancellable) {
       if (v.state !== "running") {
         done = true;
         S.modal.querySelector(".jbar").classList.add(v.state === "done" ? "ok" : "bad");
-        const open = v.result && v.result.open_url;
-        S.modal.querySelector("#jobA").innerHTML = `${open ? `<a class="btn" href="${h(open)}" target="_blank" rel="noopener">${ICON.ext} Open</a>` : ""}<button class="btn primary" data-act="close">Close</button>`;
+        const open = v.result && v.result.open_url, rep = v.result && v.result.file && v.aid;
+        const failed = v.state !== "done" || (v.result && v.result.ok === false);
+        if (rep) S.modal.querySelector("#jobP").textContent = v.result.verdict || S.modal.querySelector("#jobP").textContent;
+        if (rep && v.result.ok === false) S.modal.querySelector(".jbar").className = "jbar bad";
+        S.modal.querySelector("#jobA").innerHTML = `${rep ? `<button class="btn" data-act="ad-report" data-id="${h(v.aid)}" data-file="${h(v.result.file)}">${ICON.doc} Full report</button>
+            <button class="btn" data-act="ad-report-copy" data-id="${h(v.aid)}" data-file="${h(v.result.file)}">${ICON.copy} Copy</button>
+            <a class="btn" href="/__gate/api/addons/${h(v.aid)}/report?file=${encodeURIComponent(v.result.file)}&download=1" download>${ICON.download} Download</a>`
+          : failed ? `<button class="btn" data-act="job-copy">${ICON.copy} Copy the log</button>` : ""}
+          ${!rep && failed && v.aid && v.kind !== "uninstall" ? `<button class="btn warn" data-act="ad-rescue" data-id="${h(v.aid)}">${ICON.play} Start it and write a report</button>` : ""}
+          ${open ? `<a class="btn" href="${h(open)}" target="_blank" rel="noopener">${ICON.ext} Open</a>` : ""}<button class="btn primary" data-act="close">Close</button>`;
         after?.(v);
         return;
       }
@@ -722,6 +742,44 @@ function jobFollow(job, pollUrl, after, cancellable) {
   };
   tick();
 }
+// ---- start reports (burrow/rescue.mjs)
+async function fetchReport(id, file) {
+  const r = await fetch(`/__gate/api/addons/${encodeURIComponent(id)}/report?file=${encodeURIComponent(file)}`, { credentials: "same-origin" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+async function copyText(text, said) {
+  try { await navigator.clipboard.writeText(text); toast(said); }
+  catch {                                           // no clipboard API (plain http): select it instead
+    const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.append(ta); ta.select(); try { document.execCommand("copy"); toast(said); } catch { toast("Select it and copy by hand"); } ta.remove();
+  }
+}
+async function showReport(id, file) {
+  let text;
+  try { text = await fetchReport(id, file); } catch (e) { toast(e.message); return; }
+  const first = text.split("\n").find((l) => l && !l.startsWith("#")) || "";
+  openModal(`<h2 class="rep-h">${ICON.doc} Start report</h2><p class="muted small mono">${h(file)}</p>
+    <p class="rep-verdict${/would not start/.test(first) ? " bad" : ""}">${h(first)}</p>
+    <pre class="jlog rep">${h(text)}</pre>
+    <div class="modal-actions"><button class="btn" data-act="ad-report-copy" data-id="${h(id)}" data-file="${h(file)}">${ICON.copy} Copy</button>
+      <a class="btn" href="/__gate/api/addons/${h(id)}/report?file=${encodeURIComponent(file)}&download=1" download>${ICON.download} Download</a>
+      <button class="btn warn" data-act="ad-rescue" data-id="${h(id)}">${ICON.play} Run it again</button>
+      <button class="btn primary" data-act="close">Close</button></div>`);
+  S.modal.querySelector(".modal").classList.add("wide");
+}
+async function reportList(id) {
+  const a = (S.addons || []).find((x) => x.id === id);
+  let list = [];
+  try { list = (await api(`/__gate/api/addons/${id}/reports`)).reports; } catch (e) { toast(e.message); return; }
+  openModal(`<h2>${h(a ? a.name : id)}: start reports</h2>
+    ${list.length ? `<ul class="upd-list">${list.map((r) => `<li class="row"><span class="mono small grow">${h(r.file)}</span><span class="faint small">${fmtAgo(r.at)}</span>
+        <button class="btn sm" data-act="ad-report" data-id="${h(id)}" data-file="${h(r.file)}">Open</button></li>`).join("")}</ul>`
+      : `<p class="muted">None yet. "Start it and write a report" makes one; the last ${5} are kept.</p>`}
+    <div class="modal-actions"><button class="btn warn" data-act="ad-rescue" data-id="${h(id)}">${ICON.play} Start it and write a report</button><button class="btn primary" data-act="close">Close</button></div>`);
+}
+const fmtAgo = (t) => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; };
+
 async function checkUpdates(id) {
   const a = (S.addons || []).find((x) => x.id === id);
   openModal(`<h2>${h(a ? a.name : id)}</h2><p>Asking its repository for newer commits…</p><div class="skel-row"></div>`);
@@ -1398,6 +1456,11 @@ document.addEventListener("click", async (e) => {
     else if (act === "ad-add") addAddon(el.dataset.src, el);
     else if (act === "ad-install") installForm(el.dataset.id);
     else if (act === "ad-update") jobRun(el.dataset.id, "update", {});
+    else if (act === "ad-rescue") { closeModal(); jobRun(el.dataset.id, "rescue", {}); }
+    else if (act === "ad-report") showReport(el.dataset.id, el.dataset.file);
+    else if (act === "ad-reports") reportList(el.dataset.id);
+    else if (act === "ad-report-copy") { const t = await fetchReport(el.dataset.id, el.dataset.file); copyText(t, "Report copied"); }
+    else if (act === "job-copy") copyText([...S.modal.querySelectorAll("#jobL div")].map((d) => d.textContent).join("\n"), "Log copied");
     else if (addonUpdClick(el, render, afterAddonUpdate)) { /* the update card */ }
     else if (act === "ad-check") checkUpdates(el.dataset.id);
     else if (act === "down-start" || act === "down-leave") {

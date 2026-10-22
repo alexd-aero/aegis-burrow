@@ -54,8 +54,8 @@ import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
-import { Fleet, isUp as machineUp, FleetError } from "./fleet.mjs";
-import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, toTermix,
+import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
+import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, transfer as fleetTransfer, toTermix,
          standbyOn, standbyOff, standbyRefresh, takeover, takeoverNotice } from "./fleet-ops.mjs";
 import { Pack } from "./pack.mjs";
 import { Updater } from "./updater.mjs";
@@ -892,8 +892,9 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/open/termix") {
     if (!settings.get("termix")) return send(res, 302, "", { Location: "/__gate/settings#termix" });
     const tm = mounts().find((m) => m.id === "termix");
-    if (tm) return send(res, 302, "", { Location: tm.prefix + "/" });
-    return send(res, 302, "", { Location: "/", "Set-Cookie": `${goName(req)}=termix; ${cookieAttrs(req, 30).replace("SameSite=Lax", "SameSite=Strict")}` });
+    const qs = termixQuery(url.searchParams);           // ?view=terminal&hostId=7: straight into that host's terminal
+    if (tm) return send(res, 302, "", { Location: tm.prefix + "/" + qs });
+    return send(res, 302, "", { Location: "/" + qs, "Set-Cookie": `${goName(req)}=termix; ${cookieAttrs(req, 30).replace("SameSite=Lax", "SameSite=Strict")}` });
   }
   if (path === "/__gate/tunnels") return page(res, "tunnels.html");
   const xu = /^\/__gate\/x\/([a-z0-9][a-z0-9-]{1,39})\/ui\.js$/.exec(path);
@@ -1206,9 +1207,15 @@ async function handleAddons(req, res, path, url) {
       if (j[2] && req.method === "POST") { job.cancel(); return ok(job.view(1e9)); }
       return ok(job.view(Number(url.searchParams.get("since")) || 0));
     }
-    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share|down|autorestart)$/.exec(path);
+    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share|down|autorestart|rescue|reports|report)$/.exec(path);
     if (m) {
       const [, id, op] = m;
+      if (op === "reports") return ok({ reports: addons.reports(id) });
+      if (op === "report") {
+        const file = String(url.searchParams.get("file") || ""), text = addons.report(id, file);
+        return send(res, 200, text, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store",
+          ...(url.searchParams.get("download") ? { "Content-Disposition": `attachment; filename="${id}-${file}"` } : {}) });
+      }
       if (op === "image") { const im = addons.image(id, url.searchParams.get("path")); return send(res, 200, im.body, { "Content-Type": im.type, "Cache-Control": "private, max-age=86400", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" }); }
       if (req.method !== "POST") return sendJson(res, 405, { error: "POST" });
       const b = await readJsonBody(req);
@@ -1221,6 +1228,7 @@ async function handleAddons(req, res, path, url) {
       if (op === "uninstall") return ok({ job: addons.uninstall(id, b.keep_data !== false) });
       if (op === "remove") return ok(addons.remove(id));
       if (op === "action") return ok({ job: addons.action(id, b.action) });
+      if (op === "rescue") { audit("addon: start it whatever it takes", req, { addon: id }); return ok({ job: addons.rescue(id) }); }
       if (op === "check") return ok(await addons.checkUpdates(id));
       if (op === "share") return ok({ tunnel: await addons.share(id, b.on !== false, b.access === "public" ? "public" : "login") });
       // it stopped on its own: start it again (maybe always), or leave it off
@@ -1311,6 +1319,12 @@ async function handleFleet(req, res, path, url) {
       const r = await fleet.addManual(body);
       audit("machine: linked by hand", req, { machine: r.id, address: String(body.address || "").slice(0, 80) });
       return ok({ ...r, machines: fleet.view().machines });
+    }
+    if (rest === "transfer" && req.method === "POST") {
+      if (!body.confirm) return sendJson(res, 400, { error: "A transfer stops the app while its data is copied. Confirm it first." });
+      const job = fleetTransfer(fleet, String(body.app || ""), String(body.from || ""), String(body.to || ""), { mode: body.mode === "move" ? "move" : "copy" });
+      audit("machine: transfer started", req, { app: body.app, from: body.from, to: body.to, mode: body.mode });
+      return ok({ job });
     }
     if (rest === "swap" && req.method === "POST") {
       if (!body.confirm) return sendJson(res, 400, { error: "A swap stops both apps and moves their data. Confirm it first." });
