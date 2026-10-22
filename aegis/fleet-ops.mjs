@@ -422,6 +422,13 @@ WantedBy=default.target
 `;
   return `set -eu
 D="$HOME/.aegis-standby"
+# the clone is running (it took over): never unpack a new copy under it
+if [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null && [ -f "$D/id_ed25519.pub" ]; then
+  rm -f ${sq(remote)}
+  echo "  the clone here is running (it took over): left it as it is"
+  echo "standby-key=$(cat "$D/id_ed25519.pub")"
+  exit 0
+fi
 mkdir -p "$D/home"
 rm -rf "$D/home.old" 2>/dev/null || true
 [ -d "$D/home/app" ] && cp -a "$D/home" "$D/home.old" || true
@@ -482,7 +489,14 @@ LOG="$D/watch.log"
 say() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
 tcp() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" >/dev/null 2>&1; }
-web() { curl -skS -o /dev/null --max-time 8 "$MAIN_URL" >/dev/null 2>&1; }
+# The main gate itself, not just anything on its address: once the clone runs
+# it shares the domain, and its own answer must not count as the main being back.
+web() {
+  local b
+  b=$(curl -skS --max-time 8 "$(printf %s "$MAIN_URL" | sed "s:/*$::")/__gate/health" 2>/dev/null) || return 1
+  case "$b" in *'"standby":true'*) return 1 ;; *'"ok":true'*) return 0 ;; esac
+  return 1
+}
 
 node_bin() { command -v node 2>/dev/null || echo "$CLONE/node/bin/node"; }
 
@@ -496,7 +510,7 @@ JSON
 
 start_clone() {
   [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null && return 0
-  ( cd "$CLONE" && AEGIS_HOME="$CLONE" nohup "$(node_bin)" "$CLONE/app/aegis/server.mjs" >> "$D/clone.log" 2>&1 & echo $! > "$D/clone.pid" )
+  ( cd "$CLONE" && AEGIS_HOME="$CLONE" AEGIS_STANDBY=1 AEGIS_NO_DEFAULT_ADDONS=1 nohup "$(node_bin)" "$CLONE/app/aegis/server.mjs" >> "$D/clone.log" 2>&1 & echo $! > "$D/clone.pid" )
   say "took over: started the clone (pid $(cat "$D/clone.pid"))"
 }
 stop_clone() {
@@ -511,6 +525,12 @@ revive() {   # only when the other machine is up at all
   ssh -i "$D/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
       -o UserKnownHostsFile="$D/known_hosts" -o ConnectTimeout=8 -p "$MAIN_SSH_PORT" \
       "$MAIN_USER@$MAIN_HOST" 'bash -s' < "$D/revive.sh" >> "$D/revive.log" 2>&1
+}
+revive_out() {   # the same, and say what the restart script said
+  local n
+  n=$(wc -l < "$D/revive.log" 2>/dev/null || echo 0)
+  revive || true
+  tail -n +"$((n+1))" "$D/revive.log" 2>/dev/null
 }
 
 miss=0; back=0; taken=0; tries=0; why=""
@@ -532,6 +552,16 @@ while true; do
       why="$MAIN_NAME stopped answering at $MAIN_URL ($miss checks in a row, $INTERVAL""s apart)"
       say "$why"
       if tcp "$MAIN_HOST" "$MAIN_SSH_PORT"; then reach=true; else reach=false; fi
+      # The machine is up: start Aegis there first. If its gate still answers
+      # on that machine, it is slow or its way in is down, not gone - a second
+      # copy with the same keys and domain would only fight it. Stay out.
+      if [ "$reach" = true ]; then
+        out=$(revive_out)
+        case "$out" in
+          *"already up"*) say "its gate still answers on $MAIN_NAME itself: not taking over"; miss=0; sleep "$INTERVAL"; continue ;;
+          *revived*) say "started it again on $MAIN_NAME: not taking over"; miss=0; sleep "$INTERVAL"; continue ;;
+        esac
+      fi
       report "$why" "$reach" 0
       start_clone
       taken=1

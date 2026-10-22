@@ -308,3 +308,36 @@ test("an addon's program installs like an app: its own steps over our link, then
   assert.deepEqual(F.readProbe(raw).apps.map((a) => [a.id, a.name, a.url, a.program]), [["helper:thing", "Thing", "https://thing.example/", true]]);
   assert.ok(shOk(F.PROBE), "the probe, with the programs folder");
 });
+
+test("a machine is only down after several missed checks in a row, not after a quiet five minutes", async () => {
+  const now = Date.now();
+  assert.equal(F.isUp({ lastSeen: now - 30000, misses: 0 }, now), true);
+  assert.equal(F.isUp({ lastSeen: now - 30000, misses: F.MISSES_DOWN - 1 }, now), true, "one slow answer is not down");
+  assert.equal(F.isUp({ lastSeen: now - 30000, misses: F.MISSES_DOWN }, now), false);
+  assert.equal(F.isUp({ lastSeen: null }, now), false);
+
+  const f = fleet();
+  f.setEnabled(true);
+  f.verify = async (id) => f.get(id);
+  const r = await f.addManual({ address: "10.0.0.9", user: "alex" });
+  f.patch(r.id, { lastSeen: now });
+  // the heartbeat's ssh fails (nothing at 10.0.0.9 in a test): misses add up, lastSeen is kept
+  f.sshArgs = () => ["-o", "ConnectTimeout=1", "-o", "BatchMode=yes", "-p", "1", "nobody@127.0.0.1"];
+  await f.beat();
+  assert.equal(f.get(r.id).misses, 1);
+  assert.equal(f.get(r.id).lastSeen, now, "a miss never wipes when it was last seen");
+  assert.equal(f.cardOf(f.get(r.id)).up, true);
+  await f.beat(); await f.beat();
+  assert.equal(f.cardOf(f.get(r.id)).up, false);
+  assert.ok(f.get(r.id).lastError);
+});
+
+test("the standby only counts the main gate itself, and never takes over a gate that still answers", () => {
+  assert.match(OPS.WATCH, /__gate\/health/);
+  assert.match(OPS.WATCH, /"standby":true/, "the clone's own answer is not the main being back");
+  assert.match(OPS.WATCH, /already up"\*\) say .*not taking over/);
+  assert.match(OPS.WATCH, /AEGIS_STANDBY=1/);
+  const setup = OPS.standbySetup({ remote: "/tmp/c.tgz", hasSystemd: true,
+    watch: { url: "https://pi.example", host: "pi", name: "pi", sshPort: 22, user: "alex", interval: 30, misses: 4 } });
+  assert.ok(setup.indexOf("left it as it is") < setup.indexOf("tar -C"), "a running clone is never unpacked over");
+});

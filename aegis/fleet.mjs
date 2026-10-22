@@ -265,6 +265,13 @@ function foundApps(files, docker, units, home) {
 }
 
 // ------------------------------------------------------------------ the fleet
+// How often every linked machine is looked at in the background (one quick
+// SSH "echo"), and how many misses in a row make it "not answering". One slow
+// answer under load is not a machine going down.
+export const BEAT_MS = 60000;
+export const MISSES_DOWN = 3;
+export const isUp = (m, now = Date.now()) => !!m.lastSeen && (m.misses || 0) < MISSES_DOWN && now - m.lastSeen < (MISSES_DOWN + 2) * BEAT_MS;
+
 export class Fleet {
   // dir:   AEGIS_HOME/data/fleet  (the key, known_hosts, transfers)
   // file:  AEGIS_HOME/data/fleet.json (machines, pending links)
@@ -504,13 +511,13 @@ echo "Done. The machine now shows up under Burrow -> Machines."
     for (const address of tries) {
       const r = await run("ssh", [...this.sshArgs({ ...m, address }), "--", "echo aegis-ok"], { timeout: 20000 });
       if (r.code === 0 && r.out.includes("aegis-ok")) {
-        this.patch(id, { address, lastSeen: Date.now(), lastError: null });
+        this.patch(id, { address, lastSeen: Date.now(), lastError: null, misses: 0 });
         await this.probe(id).catch(() => {});
         return this.get(id);
       }
       last = sshWhy(r.err) || r.err.split("\n").filter(Boolean).pop() || `exit ${r.code}`;
     }
-    this.patch(id, { lastError: last, lastSeen: null });
+    this.patch(id, { lastError: last, misses: MISSES_DOWN });
     fail(`Could not get in: ${last}`);
   }
 
@@ -522,19 +529,60 @@ echo "Done. The machine now shows up under Burrow -> Machines."
       const r = await this.ssh(m, PROBE, { timeout: 60000 });
       if (r.code !== 0 && !r.out.includes("==end==")) fail(r.err.split("\n").pop() || `the probe failed (exit ${r.code})`);
       const probe = readProbe(r.out);
-      const patch = { probe, probedAt: Date.now(), lastSeen: Date.now(), lastError: null,
+      const patch = { probe, probedAt: Date.now(), lastSeen: Date.now(), lastError: null, misses: 0,
                       hostname: probe.host.hostname || m.hostname, os: probe.os.pretty || m.os, arch: probe.os.arch || m.arch };
       // keep every address it answers on, so a changed LAN address still finds it
       const cands = [...new Set([m.address, ...probe.addresses.map(normAddr), ...(m.candidates || [])])].filter(Boolean).slice(0, 16);
       patch.candidates = cands;
       return this.patch(id, patch);
     })().catch((e) => {
-      this.patch(id, { lastError: e.message, lastSeen: null });
+      // a probe that times out on a busy machine is not the machine going away:
+      // the heartbeat decides whether it answers
+      try { this.patch(id, { lastError: e.message }); } catch { /* forgotten meanwhile */ }
       throw e;
     }).finally(() => this.probing.delete(id));
     this.probing.set(id, work);
     return work;
   }
+
+  // One cheap "are you there" per machine, a few at a time. A machine is only
+  // marked down after MISSES_DOWN of these fail in a row.
+  async beat({ at = 4 } = {}) {
+    if (!this.enabled() || this._beating) return;
+    this._beating = true;
+    try {
+      const queue = this.list().filter((m) => !this.probing.has(m.id));
+      const one = async (m) => {
+        const r = await run("ssh", [...this.sshArgs(m), "--", "echo aegis-ok"], { timeout: 20000 });
+        let cur;
+        try { cur = this.get(m.id); } catch { return; }                         // forgotten meanwhile
+        if (r.code === 0 && r.out.includes("aegis-ok")) {
+          if (!isUp(cur)) this.log("fleet:", m.name, "answers again");
+          this.patch(m.id, { lastSeen: Date.now(), lastError: null, misses: 0 });
+        } else {
+          const misses = (cur.misses || 0) + 1;
+          const why = sshWhy(r.err) || r.err.split("\n").filter(Boolean).pop() || `exit ${r.code}`;
+          this.patch(m.id, { misses, ...(misses >= MISSES_DOWN ? { lastError: why } : {}) });
+          if (misses === MISSES_DOWN) {
+            this.log("fleet:", m.name, "stopped answering:", why);
+            this.notify("fleet", { level: "warn", key: `down-${m.id}`, title: `${m.name} is not answering`,
+                                   body: `${MISSES_DOWN} checks in a row got no answer over SSH (${why}).`, link: "/__gate/tunnels#/machines" });
+          }
+        }
+      };
+      const workers = Array.from({ length: Math.min(at, queue.length) }, async () => {
+        for (let m; (m = queue.shift());) await one(m).catch((e) => this.log("fleet: beat", m.name, e.message));
+      });
+      await Promise.all(workers);
+    } finally { this._beating = false; }
+  }
+  startBeat() {
+    if (this.beatTimer) return;
+    this.beatTimer = setInterval(() => this.beat().catch(() => {}), BEAT_MS);
+    this.beatTimer.unref?.();
+    setTimeout(() => this.beat().catch(() => {}), 5000).unref?.();
+  }
+  stopBeat() { clearInterval(this.beatTimer); this.beatTimer = null; }
 
   // ---------------- leaving
   // Takes our key off the machine when it still answers, then drops it.
@@ -575,8 +623,8 @@ echo removed`, { timeout: 25000 });
     return {
       id: m.id, name: m.name, hostname: m.hostname, address: m.address, port: m.port, user: m.user,
       os: m.os, arch: m.arch, standby: !!m.standby, addedAt: m.addedAt, lastSeen: m.lastSeen, lastError: m.lastError,
-      probedAt: m.probedAt, candidates: m.candidates || [],
-      up: !!m.lastSeen && Date.now() - m.lastSeen < 5 * 60000,
+      probedAt: m.probedAt, candidates: m.candidates || [], misses: m.misses || 0,
+      up: isUp(m),
       apps: (p?.apps || []).map((a) => ({ id: a.id, name: a.name, version: a.version, url: a.url })),
       specs: p ? { cores: p.cpu.cores, mem: p.mem.total, model: p.os.model || p.cpu.model, disk: p.disks[0] || null } : null,
       usage: p ? { load: p.cpu.load[0] ?? null, cores: p.cpu.cores, memUsed: p.mem.used, memTotal: p.mem.total,
@@ -599,7 +647,7 @@ echo removed`, { timeout: 25000 });
     for (const m of this.list()) {
       const a = (m.probe?.apps || []).find((x) => x.id === appId);
       if (a) out.push({ machine: m.id, name: m.name, address: m.address, url: a.url, version: a.version,
-                        up: !!m.lastSeen && Date.now() - m.lastSeen < 5 * 60000 });
+                        up: isUp(m) });
     }
     return out;
   }

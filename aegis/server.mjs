@@ -54,7 +54,7 @@ import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
-import { Fleet, FleetError } from "./fleet.mjs";
+import { Fleet, isUp as machineUp, FleetError } from "./fleet.mjs";
 import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, toTermix,
          standbyOn, standbyOff, standbyRefresh, takeover, takeoverNotice } from "./fleet-ops.mjs";
 import { Pack } from "./pack.mjs";
@@ -418,6 +418,7 @@ const fleet = new Fleet({
   dashboards: () => [...dashboards(null).map((d) => d.host), ...(serveo.host() ? [serveo.host()] : []),
                      ...(settings.get("extraHosts") || []), ...localAddrs, "localhost", "127.0.0.1"],
 });
+fleet.startBeat();
 const pack = new Pack({ settings, termix, log, tunnels, addon: { has: (id) => !!addons.load()[id]?.installed, install: (id, say) => installDefault(id, say) } });
 // Updates from GitHub, by hand or by itself (Settings → Updates)
 const updater = new Updater({ settings, log, exit: () => { burrow.stop(); serveo.stop(); process.exit(0); } });
@@ -745,7 +746,7 @@ function setupAllowed(req, token) {
 
 async function handleGate(req, res, path, url, host, isMain) {
   const hasDomain = !!mainHost();
-  if (path === "/__gate/health") return sendJson(res, 200, { ok: true, app: "aegis-burrow", version: VERSION, burrow: burrow.on });
+  if (path === "/__gate/health") return sendJson(res, 200, { ok: true, app: "aegis-burrow", version: VERSION, burrow: burrow.on, standby: process.env.AEGIS_STANDBY === "1" });
   const asset = path.slice("/__gate/".length);
   if (FILES[asset] && !asset.endsWith(".html")) {
     return send(res, 200, FILES[asset], { "Content-Type": TYPES[extname(asset)], "Cache-Control": "no-cache" });
@@ -1253,11 +1254,11 @@ function fleetSummary() {
   for (const m of list) {
     for (const a of (m.probe?.apps || [])) {
       (apps[a.id] ||= []).push({ machine: m.id, name: m.name, address: m.address, url: a.url,
-                                 version: a.version, up: !!m.lastSeen && now - m.lastSeen < 5 * 60000 });
+                                 version: a.version, up: machineUp(m, now) });
     }
   }
   return { enabled: true, machines: list.length, standby: list.filter((m) => m.standby).length,
-           unreachable: list.filter((m) => m.lastError).length, apps, takeover: takeover() };
+           unreachable: list.filter((m) => !machineUp(m, now)).length, apps, takeover: takeover() };
 }
 
 function fleetListing() {
