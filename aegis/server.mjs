@@ -799,6 +799,7 @@ async function handleGate(req, res, path, url, host, isMain) {
       audit("relay registered", req, { relay: relayLink.state.vps?.host });
       // the installer waits for this: can this machine really reach the agent over the locked-down SSH user?
       const v = await verifyRelay();
+      if (v.ok) setTimeout(() => relayMachine({ bringUp: true }).catch(() => {}), 3000);      // and into Machines, the same go
       return sendJson(res, 200, { ...r, linked: v.ok, error: v.error });
     }
     catch (e) { return sendJson(res, 400, { error: e.message }); }
@@ -1366,7 +1367,9 @@ async function handleFleet(req, res, path, url) {
     if (!what && req.method === "GET") return ok(fleet.detail(id));
     if (!what && req.method === "PATCH") return ok(fleet.rename(id, body.name) && fleet.detail(id));
     if (!what && req.method === "DELETE") {
+      const role = fleet.get(id).role;
       const r = await fleet.forget(id, url.searchParams.get("keep-key") !== "1");
+      if (role === "relay" && relayLink.machine()?.id === id) relayLink.setMachine({ declined: true });      // it stays out until the relay is set up again
       audit("machine: forgotten", req, { machine: id, keyRemoved: r.removed });
       return ok({ ...r, machines: fleet.view().machines });
     }
@@ -1887,6 +1890,7 @@ function edgeListen() {
 const relayLink = new RelayLink({ dataDir: DATA, log });
 const RELAY_LINK_PORT = Number(process.env.AEGIS_RELAY_LINK_PORT || EDGE.relayLinkPort || 4302);
 const relayRefused = new Map();
+let relayMachineBusy = false;            // linking the VPS into Machines (relayMachine below)
 function relayAdmit(req) {
   const host = hostOf(req);
   for (const k of ["cf-connecting-ip", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-aegis-front-host", "x-aegis-front-ip", "x-aegis-front-key"]) delete req.headers[k];
@@ -1953,7 +1957,7 @@ tunnels.beforeVps = async (naming) => {
   if (!relayLink.agent?.cert) throw new Error(`${v.host} has no certificate yet. Nothing was moved.`);
 };
 function superviseRelay() {
-  if (relayLink.verifying) return;
+  if (relayLink.verifying || relayMachineBusy) return;
   const want = relayWanted();
   if (want && !relayServer.listening) relayServer.listen(RELAY_LINK_PORT, "127.0.0.1", () => relayLink.start(RELAY_LINK_PORT));
   else if (want && !relayLink.running()) relayLink.start(RELAY_LINK_PORT);
@@ -1970,7 +1974,53 @@ async function relayUp() {
   else if (relayLink.outdated() === "reinstall" && burrow.domains.wantsRelay()) log(`relay: the agent on ${relayLink.state.vps.host} is ${relayLink.agent.version}; other domains need ${AGENT_VERSION}: run the install command once more`);
   if (tunnels.edge.cur) await relayLink.pushCert(tunnels.edge.cur).catch((e) => log("relay: couldn't push the certificate:", e.message));
   await burrow.domains.pushAll();
+  await relayMachine();
 }
+// The VPS is a machine too. Its agent (1.4+) runs the usual link script there as
+// root, so it shows up in Machines with no second command, whether it was added
+// for the wildcard tunnels or for anything else. Forgetting it in Machines keeps
+// it out; a failure is tried again after six hours. bringUp: start the link for
+// it when the tunnels don't use it (it goes off again after).
+async function relayMachine({ bringUp = false } = {}) {
+  const v = relayLink.state.vps, had = relayLink.machine();
+  if (relayMachineBusy || !relayLink.configured() || !v || !mainHost()) return;
+  if (had?.declined || (had?.failedAt && Date.now() - had.failedAt < 6 * 3600e3)) return;
+  if (had?.id && fleet.list().some((m) => m.id === had.id)) return;
+  if ((settings.get("fleet") || {}).enabled === false) return;          // Machines switched off on purpose
+  const known = fleet.list().find((m) => m.role === "relay" || m.address === v.host || (m.candidates || []).includes(v.host));
+  if (known) { relayLink.setMachine({ id: known.id }); return; }
+  if (relayLink.link.state !== "up" && !bringUp) return;
+  relayMachineBusy = true;
+  const started = Date.now();
+  try {
+    if (relayLink.link.state !== "up") {
+      await relayListen();
+      if (!(await relayLink.verify(RELAY_LINK_PORT, 30000)).ok) return;
+    }
+    if (relayLink.outdated() === "update") await relayLink.updateAgent();
+    if (!relayLink.can("fleet")) { log(`relay: the agent on ${v.host} is ${relayLink.agent?.version || "unknown"}; it needs ${AGENT_VERSION} to show up in Machines by itself: run its install command once more`); relayLink.setMachine({ failedAt: Date.now(), error: "agent too old" }); return; }
+    if (!fleet.enabled()) fleet.setEnabled(true);
+    const inv = await fleet.invite({ base: `https://${mainHost()}`, role: "relay", prefer: v.host });
+    log(`relay: linking ${v.host} into Machines`);
+    const r = await relayLink.linkMachine(fleet.rootJoinScript(inv.token, inv.base));
+    const m = fleet.list().find((x) => x.role === "relay" && x.addedAt >= started);
+    if (m) {
+      relayLink.setMachine({ id: m.id });
+      log(`relay: ${v.host} is in Machines as ${m.name} (${m.user})`);
+    } else {
+      fleet.dropPending(inv.token);
+      const why = String(r.out || "").trim().split("\n").filter(Boolean).slice(-2).join(" / ").slice(0, 300) || `exit ${r.code}`;
+      relayLink.setMachine({ failedAt: Date.now(), error: why });
+      log(`relay: ${v.host} couldn't link into Machines: ${why}`);
+      notify("fleet", { level: "warn", key: "relay-machine", title: "Your VPS isn't in Machines yet",
+                        body: `${v.host} ran the link script but didn't come back: ${why}. Aegis tries again in six hours, or use Link a machine.`, link: "/__gate/tunnels#/machines" });
+    }
+  } catch (e) {
+    relayLink.setMachine({ failedAt: Date.now(), error: e.message });
+    log(`relay: couldn't link ${v.host} into Machines:`, e.message);
+  } finally { relayMachineBusy = false; superviseRelay(); }
+}
+setTimeout(() => relayMachine({ bringUp: true }).catch(() => {}), 90000).unref();
 relayLink.onUp = () => { relayUp().catch(() => {}); };
 setInterval(() => { if (relayLink.link.state === "up") relayLink.control("GET", "/status").then((s) => { relayLink.agent = { ...s, at: Date.now() }; return relayUp(); }).catch(() => {}); }, 3600e3).unref();
 // other domains through your VPS (burrow/domains.mjs): the link, its address, its agent

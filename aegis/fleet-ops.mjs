@@ -832,7 +832,7 @@ async function revokeStandbyKey(mid) {
 f="$HOME/.ssh/authorized_keys"
 [ -f "$f" ] || { echo none; exit 0; }
 grep -qF "aegis-standby:${mid}" "$f" || { echo none; exit 0; }
-grep -v "aegis-standby:${mid}" "$f" > "$f.aegis-tmp" && mv "$f.aegis-tmp" "$f" && chmod 600 "$f"
+{ grep -v "aegis-standby:${mid}" "$f" || true; } > "$f.aegis-tmp" && mv "$f.aegis-tmp" "$f" && chmod 600 "$f"
 echo removed`, timeout: 15000 });
   return r.out.includes("removed");
 }

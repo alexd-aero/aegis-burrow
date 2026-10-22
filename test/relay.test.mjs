@@ -260,3 +260,30 @@ test("Caddy with sites imported by name: the old import line becomes the agent's
     assert.equal(readFileSync(cf, "utf8"), `import ${sites}/*\n`);
   } finally { agent.close(); }
 });
+
+test("agent 1.4: the gate links the VPS into Machines through it, signed, with a link script only", async () => {
+  const key = randomBytes(32), dir = tmp(), ctl = await free(), hp = await free();
+  const cfg = { key: key.toString("base64url"), suffix: ".tunnel.example.com", upstreamPort: 1, controlPort: ctl, httpPort: hp, mode: "caddy",
+                certDir: join(dir, "certs"), caddySite: join(dir, "caddy", "aegis-relay.caddy"), reload: false };
+  const agent = startAgent(cfg, { log: () => {} });
+  try {
+    await new Promise((r) => setTimeout(r, 100));
+    const link = new RelayLink({ dataDir: tmp(), log: () => {} });
+    link.state = { ...link.state, key: key.toString("base64url"), vps: { host: "203.0.113.7", port: 22 }, installed: { at: 1 } };
+    link.localCtl = ctl; link.link = { state: "up" };
+    link.agent = await link.control("GET", "/status");
+    assert.ok(link.can("fleet"));
+    assert.equal((await get(ctl, "/fleet/link", {}, "POST", JSON.stringify({ script: "#!/bin/sh\necho x" }))).status, 401);
+    await assert.rejects(() => link.linkMachine("rm -rf /"), /link script/);
+    const r = await link.linkMachine("#!/bin/sh\necho linked \"$AEGIS_FROM_RELAY\" \"$HOME\"\nexit 0\n");
+    assert.equal(r.ok, true);
+    assert.match(r.out, /linked 1 \/root/);
+    const bad = await link.linkMachine("#!/bin/sh\necho nope >&2\nexit 3\n");
+    assert.equal(bad.ok, false); assert.equal(bad.code, 3); assert.match(bad.out, /nope/);
+    // what became of it is kept per VPS
+    link.setMachine({ id: "m-0123456789" });
+    assert.deepEqual(link.machine(), { host: "203.0.113.7", id: "m-0123456789" });
+    link.state.vps = { host: "203.0.113.8", port: 22 };
+    assert.equal(link.machine(), null);
+  } finally { agent.close(); }
+});

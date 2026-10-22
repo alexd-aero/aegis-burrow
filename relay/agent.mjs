@@ -17,7 +17,11 @@
 // the list is kept in zones.json next to the config). Only names one level under
 // those zones are served; everything else gets 421. Your Aegis can also send a
 // newer agent (POST /update, signed): it is checked with `node --check`, takes
-// this file's place, and systemd starts it again.
+// this file's place, and systemd starts it again. And it can link this server
+// into your Aegis's Machines (POST /fleet/link, signed): the same link script
+// any machine runs, run here as root, so a VPS added for the tunnels is a
+// machine like any other without a second command (agent 1.4+). Neither gives
+// your Aegis more than /update already did.
 //
 // Public tunnels are checked here first (POST /edge from your Aegis: which names
 // are public, which addresses a scan cleared or are yours, which are banned):
@@ -38,8 +42,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 
-export const VERSION = "1.3.0";
-export const FEATURES = ["zones", "update", "edge"];
+export const VERSION = "1.4.0";
+export const FEATURES = ["zones", "update", "edge", "fleet"];
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
 
@@ -347,6 +351,20 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
         log(`updated to ${String(version || "?").slice(0, 20)}; restarting`);
         reply(200, { ok: true, from: VERSION, to: version || null });
         if (cfg.exitOnUpdate !== false) setTimeout(() => process.exit(0), 300);
+      });
+    }
+    // into your Aegis's Machines: its link script, as root ({script}; -> {code, out})
+    if (req.method === "POST" && req.url === "/fleet/link") {
+      return body(512 * 1024, ({ script }) => {
+        if (typeof script !== "string" || !script.startsWith("#!/bin/sh")) return reply(400, { error: "that isn't a link script" });
+        const env = { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME: "/root", LANG: "C.UTF-8", AEGIS_FROM_RELAY: "1" };
+        const child = execFile("sh", ["-s"], { env, cwd: "/", timeout: 280000, maxBuffer: 4 * 1024 * 1024 }, (e, out, err) => {
+          const text = `${out || ""}${err || ""}`.slice(-6000);
+          log(`linked into Machines: ${e ? "failed (" + (e.code ?? e.signal) + ")" : "done"}`);
+          reply(200, { ok: !e, code: e ? e.code ?? -1 : 0, out: text });
+        });
+        child.stdin.on("error", () => {});
+        child.stdin.end(script);
       });
     }
     reply(404, { error: "not found" });

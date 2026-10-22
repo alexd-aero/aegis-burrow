@@ -30,6 +30,8 @@ def remove_myself():
     # the gate forgot this machine: stop starting, and go
     d = os.path.expanduser("~/.config/aegis-fleet")
     os.system("systemctl --user disable aegis-fleet-agent.service >/dev/null 2>&1; rm -f ~/.config/systemd/user/aegis-fleet-agent.service")
+    if os.getuid() == 0:
+        os.system("systemctl disable aegis-fleet-agent.service >/dev/null 2>&1; rm -f /etc/systemd/system/aegis-fleet-agent.service; systemctl daemon-reload >/dev/null 2>&1")
     os.system("(crontab -l 2>/dev/null | grep -v aegis-fleet/agent.py | crontab -) 2>/dev/null")
     for f in ("agent.json", "agent.py", "agent.pid"):
         try: os.remove(os.path.join(d, f))

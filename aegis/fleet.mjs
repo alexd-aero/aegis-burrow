@@ -22,7 +22,7 @@
 // interpolated into a command line.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
@@ -332,6 +332,15 @@ export function termixQuery(params) {
   return q.toString() ? `?${q}` : "";
 }
 
+// The agent as a system service (a machine linked as root, or as a user by a
+// root script): sysunit USER DIR. It stops starting once DIR/agent.json is gone.
+const SYSUNIT = String.raw`    sysunit() {
+      printf '[Unit]\nDescription=Aegis x Burrow machine agent (keeps this machine reachable from its gate)\nAfter=network-online.target\nWants=network-online.target\nConditionPathExists=%s/agent.json\n\n[Service]\nUser=%s\nExecStart=%s %s/agent.py\nRestart=always\nRestartSec=5\nStandardOutput=append:%s/agent.log\nStandardError=append:%s/agent.log\n\n[Install]\nWantedBy=multi-user.target\n' "$2" "$1" "$(command -v python3)" "$2" "$2" "$2" > /etc/systemd/system/aegis-fleet-agent.service
+      systemctl daemon-reload
+      systemctl enable aegis-fleet-agent.service >/dev/null 2>&1 || true
+      systemctl restart aegis-fleet-agent.service
+    }`;
+
 export class Fleet {
   // dir:   AEGIS_HOME/data/fleet  (the key, known_hosts, transfers)
   // file:  AEGIS_HOME/data/fleet.json (machines, pending links)
@@ -388,7 +397,9 @@ export class Fleet {
   // ---------------- linking a machine
   // The command is run on the other machine. It is good once, for half an
   // hour, and only tells us what the machine itself reports.
-  async invite({ base, label }) {
+  // role "relay": the VPS that carries the tunnels (it links itself; see server.mjs);
+  // prefer: the address to try first.
+  async invite({ base, label, role, prefer }) {
     this.need();
     if (this.list().length >= MAX_MACHINES) fail(`That is already ${MAX_MACHINES} machines.`);
     const url = this.baseUrl(base);
@@ -397,7 +408,8 @@ export class Fleet {
     const now = Date.now();
     db.pending = Object.fromEntries(Object.entries(db.pending || {}).filter(([, p]) => p.expires > now).slice(-8));
     const token = randomBytes(24).toString("base64url");
-    db.pending[token] = { created: now, expires: now + TOKEN_TTL_MS, label: String(label || "").slice(0, 60) || null, base: url };
+    db.pending[token] = { created: now, expires: now + TOKEN_TTL_MS, label: String(label || "").slice(0, 60) || null, base: url,
+                          ...(role ? { role: String(role).slice(0, 20) } : {}), ...(prefer ? { prefer: normAddr(prefer) } : {}) };
     this.save(db);
     return { token, expires: now + TOKEN_TTL_MS, base: url, publicKey: pub,
              command: `curl -fsSL ${JSON.stringify(`${url}/__gate/fleet/join?t=${token}`)} | sh`,
@@ -514,7 +526,13 @@ if [ -n "$AID" ] && command -v python3 >/dev/null 2>&1; then
 ${AGENT_PY}AEGIS_AGENT_PY
   printf '{"base":"%s","id":"%s","key":"%s","ssh_port":%s}\n' ${JSON.stringify(agentBase)} "$AID" "$AKEY" "$PORT" > "$D/agent.json"
   chmod 600 "$D/agent.json"; chmod 700 "$D/agent.py"
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ]; then
+${SYSUNIT}
+    sysunit root "$D"
+    echo "  agent running (a system service)"
+  elif [ -n "\${AEGIS_AGENT_UNIT:-}" ]; then
+    echo "  agent ready (its system service starts next)"
+  elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p "$HOME/.config/systemd/user"
     printf '[Unit]\nDescription=Aegis x Burrow machine agent (keeps this machine reachable from its gate)\nAfter=network-online.target\n\n[Service]\nExecStart=%s %s/agent.py\nRestart=always\nRestartSec=5\nStandardOutput=append:%s/agent.log\nStandardError=append:%s/agent.log\n\n[Install]\nWantedBy=default.target\n' "$(command -v python3)" "$D" "$D" "$D" > "$HOME/.config/systemd/user/aegis-fleet-agent.service"
     systemctl --user daemon-reload
@@ -535,6 +553,46 @@ echo "Done. The machine now shows up under Burrow -> Machines."
 `;
   }
 
+  // The same, for a script that runs as root (the relay agent on a VPS, or
+  // the relay installer): it links root when sshd lets root in with a key,
+  // else the admin user who ran sudo (or the first in sudo/wheel), and runs the
+  // agent as a system service as that user.
+  rootJoinScript(token, base) {
+    const inner = this.joinScript(token, base);
+    return `#!/bin/sh
+# Links this server to the Aegis x Burrow dashboard at ${base}, run as root:
+# as root when its SSH server lets root in with a key, otherwise as its admin
+# user. What runs as that user is the usual link script, below as it is.
+set -eu
+[ "$(id -u)" = 0 ] || { echo "run it as root" >&2; exit 1; }
+U=root
+PRL=$(sshd -T 2>/dev/null | awk 'tolower($1)=="permitrootlogin"{print $2; exit}' || true)
+case "\${PRL:-}" in no|forced-commands-only)
+  U=""
+  if [ -n "\${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then U=$SUDO_USER; fi
+  [ -n "$U" ] || U=$(getent group sudo wheel admin 2>/dev/null | cut -d: -f4 | tr ',' '\\n' | grep -v '^$' | head -1 || true)
+  [ -n "$U" ] || { echo "  root may not log in over SSH here, and there is no admin user to link instead" >&2; exit 1; }
+  echo "  root may not log in over SSH here: linking $U instead" ;;
+esac
+H=$(getent passwd "$U" | cut -d: -f6)
+T=$(mktemp); trap 'rm -f "$T"' EXIT
+cat > "$T" <<'AEGIS_JOIN'
+${inner}AEGIS_JOIN
+chmod 644 "$T"
+if [ "$U" = root ]; then HOME="$H" sh "$T"
+else
+  S=""; [ -d /run/systemd/system ] && S=system
+  runuser -u "$U" -- env HOME="$H" AEGIS_AGENT_UNIT="$S" sh "$T"
+  D="$H/.config/aegis-fleet"
+  if [ -f "$D/agent.json" ] && [ -d /run/systemd/system ]; then
+${SYSUNIT}
+    sysunit "$U" "$D"
+    echo "  agent running (a system service, as $U)"
+  fi
+fi
+`;
+  }
+
   // The machine called back. Register it, then prove we can get in.
   async claim(token, facts, ip) {
     this.need();
@@ -545,25 +603,37 @@ echo "Done. The machine now shows up under Burrow -> Machines."
     const port = Math.max(1, Math.min(65535, Math.round(Number(facts.port) || 22)));
     if (!USER_RE.test(user)) fail("That machine did not say which user to use.");
     const addrs = String(facts.addresses || "").split(/[\s,]+/).map(normAddr).filter((a) => usable(a, host)).slice(0, 12);
-    const candidates = [...new Set([...addrs, normAddr(ip), normAddr(host)].filter((a) => usable(a, host)))];
+    const candidates = [...new Set([p.prefer, ...addrs, normAddr(ip), normAddr(host)].filter((a) => a && usable(a, host)))];
     if (!candidates.length) fail("That machine gave no address we could use.");
     this.dropPending(token);
 
     const db = this.load();
     const id = "m-" + randomUUID().replace(/-/g, "").slice(0, 10);
     const m = {
-      id, name: p.label || host || candidates[0], hostname: host,
+      id, name: p.role === "relay" ? `${host || p.prefer || candidates[0]} (VPS)` : p.label || host || candidates[0], hostname: host,
       address: candidates[0], candidates, port, user,
       os: String(facts.os || "").slice(0, 80), arch: String(facts.arch || "").slice(0, 20),
       addedAt: Date.now(), addedFrom: ip || null, lastSeen: null, lastError: null,
-      standby: false, probe: null, probedAt: null, agentKey: newAgentKey(),
+      standby: false, probe: null, probedAt: null, agentKey: newAgentKey(), ...(p.role ? { role: p.role } : {}),
     };
     db.machines.push(m);
     this.save(db);
     this.log("fleet: claimed", id, host, candidates.join(","));
+    // it just proved itself with the one-time token: a host key kept for one of
+    // its addresses belongs to whatever had it before (a reinstalled VPS, a reused LAN address)
+    await this.dropHostKeys(candidates, port);
     // Try every address it gave us and keep the first that answers.
     this.verify(id).catch((e) => this.log("fleet: verify", id, e.message));
-    return { ok: true, id, name: m.name, agent: { id, key: m.agentKey } };
+    return { ok: true, id, name: m.name, role: m.role || null, agent: { id, key: m.agentKey } };
+  }
+
+  async dropHostKeys(addrs, port = 22) {
+    const file = join(this.dir, "known_hosts");
+    if (!existsSync(file)) return;
+    for (const a of new Set(addrs.filter(Boolean))) {
+      for (const h of port === 22 ? [a] : [a, `[${a}]:${port}`]) await run("ssh-keygen", ["-R", h, "-f", file], { timeout: 10000 }).catch(() => {});
+    }
+    try { rmSync(`${file}.old`, { force: true }); } catch { /* none */ }
   }
 
   // Add one by hand: the key has to be there already (the command above, or
@@ -739,10 +809,11 @@ echo "Done. The machine now shows up under Burrow -> Machines."
         const r = await this.ssh(m, `set -eu
 f="$HOME/.ssh/authorized_keys"
 [ -f "$f" ] || exit 0
-grep -vxF ${sq(pub)} "$f" > "$f.aegis-tmp" && mv "$f.aegis-tmp" "$f" && chmod 600 "$f"
-echo removed
+{ grep -vxF ${sq(pub)} "$f" || true; } > "$f.aegis-tmp" && mv "$f.aegis-tmp" "$f" && chmod 600 "$f"
+grep -qxF ${sq(pub)} "$f" || echo removed
 # its agent goes too - a moment later, since this very session may run through it
 nohup sh -c 'sleep 3
+[ "$(id -u)" = 0 ] && { systemctl disable --now aegis-fleet-agent.service; rm -f /etc/systemd/system/aegis-fleet-agent.service; systemctl daemon-reload; } >/dev/null 2>&1
 systemctl --user disable --now aegis-fleet-agent.service >/dev/null 2>&1
 rm -f "$HOME/.config/systemd/user/aegis-fleet-agent.service"
 [ -f "$HOME/.config/aegis-fleet/agent.pid" ] && kill "$(cat "$HOME/.config/aegis-fleet/agent.pid")" 2>/dev/null
@@ -755,6 +826,7 @@ rm -rf "$HOME/.config/aegis-fleet"' >/dev/null 2>&1 </dev/null &`, { timeout: 25
     const db = this.load();
     db.machines = db.machines.filter((x) => x.id !== id);
     this.save(db);
+    await this.dropHostKeys([m.address, ...(m.candidates || [])], m.port);
     this.log("fleet: forgot", id, removed ? "(key removed)" : "(key left in place)");
     return { ok: true, removed, why };
   }
@@ -775,7 +847,7 @@ rm -rf "$HOME/.config/aegis-fleet"' >/dev/null 2>&1 </dev/null &`, { timeout: 25
     return {
       id: m.id, name: m.name, hostname: m.hostname, address: m.address, port: m.port, user: m.user,
       os: m.os, arch: m.arch, standby: !!m.standby, addedAt: m.addedAt, lastSeen: m.lastSeen, lastError: m.lastError,
-      probedAt: m.probedAt, candidates: m.candidates || [], misses: m.misses || 0, via: m.via || "direct", agent: this.agents?.view(m.id) || null,
+      probedAt: m.probedAt, candidates: m.candidates || [], role: m.role || null, misses: m.misses || 0, via: m.via || "direct", agent: this.agents?.view(m.id) || null,
       termix: m.termix ? { hostId: m.termix.hostId ?? null, at: m.termix.at || null } : null,
       standbyState: m.standbyState ? { at: m.standbyState.at, url: m.standbyState.url, interval: m.standbyState.interval, misses: m.standbyState.misses } : null,
       up: isUp(m),

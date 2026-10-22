@@ -26,6 +26,9 @@
 //              them, or they're yours) or not (banned) is mirrored there, in
 //              full once and then what changed; someone new gets a "checking"
 //              page there while the agent asks this machine to scan them
+//   machines   the VPS is linked into Machines too (agent 1.4+, POST /fleet/link):
+//              the gate hands the agent the usual link script and it runs it as
+//              root, once; forgetting it in Machines keeps it out (state.machine).
 //   updates    an agent older than this Aegis's (relay/agent.mjs) is sent the
 //              new one over the link (1.1 and later take it by themselves; 1.0
 //              needs the install command once more).
@@ -112,13 +115,14 @@ export class RelayLink {
     this.state.vps = { host, port };
     this.state.installed = { at: Date.now(), version: String(version || "").slice(0, 20), mode: mode === "tls" ? "tls" : "caddy", hostKey: `${hk[0]} ${hk[1].slice(0, 16)}…` };
     this.state.token = null;
+    this.state.machine = null;                // set up again: it may join Machines again
     this.save();
     this.log(`relay: ${host} registered (agent ${this.state.installed.version}, ${this.state.installed.mode})`);
     return { ok: true };
   }
   forget() {
     this.stop();
-    this.state = { ...this.state, key: null, vps: null, installed: null, token: null };
+    this.state = { ...this.state, key: null, vps: null, installed: null, token: null, machine: null };
     try { writeFileSync(this.knownHosts, ""); } catch { /* none */ }
     this.save();
   }
@@ -196,11 +200,11 @@ export class RelayLink {
   running() { return !this.stopped; }
 
   // ------------------------------------------------------------ talking to the agent
-  control(method, path, body) {
+  control(method, path, body, timeout = 10000) {
     return new Promise((resolve, reject) => {
       if (!this.localCtl || !this.configured()) return reject(new Error("no link"));
       const data = body ? JSON.stringify(body) : null;
-      const r = httpRequest({ host: "127.0.0.1", port: this.localCtl, method, path, timeout: 10000,
+      const r = httpRequest({ host: "127.0.0.1", port: this.localCtl, method, path, timeout,
         headers: { "x-aegis-relay": sign(this.keyBuf(), { host: "agent", ip: "-", method, url: path }), ...(data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
         let b = ""; res.on("data", (d) => { b += d; }); res.on("end", () => { try { const j = JSON.parse(b); res.statusCode < 400 ? resolve(j) : reject(new Error(j.error || `HTTP ${res.statusCode}`)); } catch { reject(new Error(`HTTP ${res.statusCode}`)); } });
       });
@@ -257,6 +261,14 @@ export class RelayLink {
       return r;
     } catch (e) { if (/full/.test(e.message)) return full(); throw e; }
   }
+  // the VPS into Machines: its agent runs the link script as root (-> {ok, code, out})
+  async linkMachine(script) {
+    if (this.link.state !== "up" || !this.can("fleet")) throw new Error(`the agent on ${this.state.vps?.host} is ${this.agent?.version || "not linked"}: it needs 1.4 for this`);
+    return this.control("POST", "/fleet/link", { script }, 300000);
+  }
+  // what became of it in Machines, for this VPS only: {host, id} | {host, declined} | {host, failedAt, error}
+  machine() { const m = this.state.machine; return m && m.host === this.state.vps?.host ? m : null; }
+  setMachine(m) { this.state.machine = m ? { host: this.state.vps?.host, ...m } : null; this.save(); }
   can(feature) { return !!this.agent?.features?.includes(feature); }
   // what the agent is missing: null, "update" (it takes one), or "reinstall" (1.0: the command once more)
   outdated() {
@@ -292,7 +304,7 @@ export class RelayLink {
              agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, zones: this.agent.zones || null, features: this.agent.features || [],
                                    stats: this.agent.stats, at: this.agent.at, outdated: this.outdated() } : null,
              pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION,
-             checked: this.checked };
+             checked: this.checked, machine: this.machine() };
   }
 }
 
@@ -428,6 +440,7 @@ if [ "$(field linked)" = "true" ]; then
   trap - EXIT
   echo; printf '  \\033[32m✓ Linked.\\033[0m Your Aegis reached this server over SSH and the agent answered.\\n'
   say 'Back in Settings → Domain, "Move every tunnel to the VPS" is ready.'
+  say 'This server also shows up in Burrow → Machines in a minute (its specs, apps, a terminal).'
   echo
 else
   STEP="checking the link"

@@ -392,3 +392,21 @@ test("the moved notice says where the gate went", async () => {
   assert.match(h, /big-box &lt;b&gt;/);
   assert.match(h, /aegis resume-here/);
 });
+
+test("a VPS links itself as root: the usual script inside, the agent as a system service, the VPS's own address first", async () => {
+  const f = fleet();
+  f.verify = async (id) => f.get(id);
+  const inv = await f.invite({ base: "https://pi.example", role: "relay", prefer: "203.0.113.50" });
+  const sc = f.rootJoinScript(inv.token, inv.base);
+  assert.ok(shOk(sc), "the root script parses");
+  assert.ok(sc.includes(f.joinScript(inv.token, inv.base)), "the usual link script is in it as it is");
+  assert.match(sc, /permitrootlogin/);
+  assert.match(sc, /runuser -u "\$U"/);
+  assert.match(sc, /ConditionPathExists=%s\/agent\.json/);
+  const r = await f.claim(inv.token, { hostname: "vps1", user: "root", port: 22, addresses: "10.0.0.5" }, "198.51.100.4");
+  const m = f.get(r.id);
+  assert.equal(m.role, "relay");
+  assert.equal(m.name, "vps1 (VPS)");
+  assert.equal(m.candidates[0], "203.0.113.50");
+  assert.equal(f.cardOf(m).role, "relay");
+});
