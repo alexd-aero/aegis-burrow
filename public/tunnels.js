@@ -627,13 +627,16 @@ function foundRow(e) {
 function renderAddons() {
   const list = S.addons, sc = S.scan;
   const found = sc ? sc.addons.filter((e) => !e.registered) : [];
+  // what's being typed survives the repaint every few seconds (as on the Shield tab)
+  const was = document.getElementById("adSrc");
+  const keep = was && { value: was.value, focused: document.activeElement === was, from: was.selectionStart, to: was.selectionEnd, err: document.getElementById("adErr")?.textContent || "" };
   app.innerHTML = `
     <div class="head"><div><h1>Burrow</h1><p>Addons: apps that install beside Burrow. The same format as Selkies Forge's, so one addon works in both unless it says otherwise.</p></div></div>
     ${subtabs()}
     <section class="card panel addbar">
       <form class="row" id="adForm" autocomplete="off">
         <input class="input grow" id="adSrc" spellcheck="false" placeholder="https://github.com/owner/repo  ·  …/tree/main/a/folder  ·  a GitLab link  ·  https://…/addon.zip" aria-label="Addon repository link">
-        <button class="btn primary" id="adGo">Add</button>
+        <button class="btn primary" id="adGo"${S.adding ? " disabled" : ""}>${S.adding ? '<span class="spin sm"></span> Fetching…' : "Add"}</button>
       </form>
       <div class="faint small" style="margin-top:8px">Addons run as you on this machine, like anything you install. Powered by the <a class="link" href="https://github.com/alexd-aero/weft" target="_blank" rel="noopener">Weft Architecture</a> · <a class="link" href="https://github.com/alexd-aero/weft#-the-examples" target="_blank" rel="noopener">examples →</a></div>
       <div id="adErr" class="err-msg"></div>
@@ -646,19 +649,37 @@ function renderAddons() {
     ${!list ? '<p class="muted">Loading…</p>' : list.length ? `<div class="grid">${list.map(adCard).join("")}</div>` : `
       <div class="card lit empty"><div class="big">${ICON.box}</div><h2>No addons yet</h2>
         <p>Paste a repository link above, or add one the scan found.</p></div>`}`;
+  if (keep) {
+    const i = $("#adSrc");
+    i.value = keep.value;
+    $("#adErr").textContent = keep.err;
+    if (keep.focused) { i.focus({ preventScroll: true }); try { i.setSelectionRange(keep.from, keep.to); } catch {} }
+  }
   const form = $("#adForm");
   form.addEventListener("submit", (e) => { e.preventDefault(); addAddon($("#adSrc").value, $("#adGo")); });
 }
 async function addAddon(src, btn) {
   if (!String(src || "").trim()) return;
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin sm"></span> Fetching…'; }
+  // the bar's button is redrawn by the repaint, so its busy state lives in S
+  const bar = !btn || btn.id === "adGo";
+  const busy = (on) => {
+    if (bar) S.adding = on;
+    const b = bar ? $("#adGo") : btn;
+    if (!b) return;
+    b.disabled = on;
+    if (on) b.innerHTML = '<span class="spin sm"></span> Fetching…'; else b.textContent = bar ? "Add" : b.dataset.label || "Add";
+  };
+  if (!bar && btn && !btn.dataset.label) btn.dataset.label = btn.textContent;
+  busy(true);
+  const err = $("#adErr"); if (err) err.textContent = "";
   try {
     const r = await api("/__gate/api/addons/add", { method: "POST", body: JSON.stringify({ source: src }) });
     toast(`Added ${r.addon.name}`);
+    const i = $("#adSrc"); if (bar && i && i.value.trim() === String(src).trim()) i.value = "";
     S.scan = null; await refresh();
     if (r.addon.detected && r.addon.detected.found && !r.addon.problems.length) installForm(r.addon.id);
   } catch (e) { const el = $("#adErr"); if (el) el.textContent = e.message; else toast(e.message); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = btn.id === "adGo" ? "Add" : "Add"; } }
+  finally { busy(false); }
 }
 function installForm(id) {
   const a = (S.addons || []).find((x) => x.id === id);
