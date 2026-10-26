@@ -141,6 +141,10 @@ export class Burrow {
       }
       return ok(await T.create(spec));
     }
+    // another Aegis × Burrow link: who may open it, so whether it can be cloned ({url})
+    if (path === "/tunnels/clone-check" && method === "POST") {
+      try { return ok(await T.inspectLink((await readJson()).url)); } catch (e) { return { status: 400, json: { error: e.message } }; }
+    }
     if (path === "/ports" && method === "GET") return ok({ ports: await T.ports() });
     // a DNS record per tunnel, or one wildcard *.<prefix>.<zone> for all of them
     if (path === "/tunnels/naming" && method === "GET") return ok(T.namingInfo());

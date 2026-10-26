@@ -62,6 +62,10 @@
 // It has no port, so its key is a number above 65535 (70001…), and it is never
 // public (a public copy would be the Pages site itself).
 //
+// A clone (t.kind "clone") is another Aegis × Burrow link served on a name of
+// ours (clone.mjs): public, or with a password of its own (a clone key stands
+// in for it), never one behind its owner's login. Its key is above 65535 too.
+//
 // Everything a tunnel does is counted here: requests, bytes, status codes,
 // latency, WebSockets, and every client that used it.
 
@@ -76,6 +80,7 @@ import { join } from "node:path";
 import { isIP } from "node:net";
 import { Edge } from "./edge.mjs";
 import { WorkerFront } from "./workerfront.mjs";
+import { inspectClone, cloneKey, CLONE_HEADER } from "./clone.mjs";
 
 const MINUTES = 120;            // per-minute history kept
 const SECONDS = 90;             // per-second history for the live chart
@@ -237,6 +242,7 @@ export class TunnelManager {
   constructor({ dataDir, domain, quick, forbiddenPorts, log, naming, edge, onNaming }) {
     this.dataDir = dataDir;
     this.retired = new Map();               // port -> {lock, at}: passwords of tunnels removed lately, for a hand-over
+    this.cloneApi = { inspect: inspectClone, key: cloneKey };   // clone.mjs (tests fake it)
     try { this.naming = cleanNaming(naming, { saved: true }); } catch { this.naming = cleanNaming(null, { saved: true }); }
     this.onNaming = onNaming || null;       // (naming) => keep it (state.json)
     this.edge = new Edge({ dataDir, log: log || console.log, cfApi: (...a) => this.cfApi(...a), ...(edge || {}) });
@@ -469,6 +475,7 @@ export class TunnelManager {
 
   async create(spec) {
     if (spec.site) return this.createSite(spec);
+    if (spec.clone) return this.createClone(spec);
     const port = Number(spec.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Pick a port from 1 to 65535.");
     if (this.forbidden.has(port)) throw new Error("That is Aegis itself.");
@@ -492,12 +499,18 @@ export class TunnelManager {
     return this.add(t);
   }
 
+  // a site's or a clone's key: the first free one above 65535
+  freeKey() {
+    let port = SITE_BASE + 1;
+    while (this.tunnels.has(port)) port++;
+    if (port > 99999) throw new Error("That's a lot of sites and clones. Remove one first.");
+    return port;
+  }
+
   // Secure reverse tunneling: a Pages site on a subdomain of ours, behind a password.
   async createSite(spec) {
     const site = parseSite(spec.site);
-    let port = SITE_BASE + 1;
-    while (this.tunnels.has(port)) port++;
-    if (port > 99999) throw new Error("That's a lot of sites. Remove one first.");
+    const port = this.freeKey();
     if (this.domain && !spec.sub) throw new Error("Give the site an address of its own, like docs.");
     const sub = await this.checkSub(port, spec.sub);
     const { access, lock } = this.checkAccess({ kind: "site" }, spec);
@@ -505,6 +518,38 @@ export class TunnelManager {
     return this.add({
       sub, port, kind: "site", site, targetHost: site.host, targetPort: 443, scheme: "https",
       name: String(spec.name || "").slice(0, 60) || `${site.host}${site.base.slice(0, -1)}`,
+      access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
+      ...cleanMeta(spec.app, spec.meta),
+    });
+  }
+
+  // Who may open another Aegis × Burrow link, and so whether it can be cloned.
+  async inspectLink(url) {
+    const info = await this.cloneApi.inspect(url);
+    if (this.matchHost(info.host) !== null) throw new Error("That link is one of your own tunnels already.");
+    return info;
+  }
+
+  // Another Aegis × Burrow link on a name of ours. It opens to the same people as
+  // the original unless asked otherwise: public stays public, a password link
+  // gets the same password (or the login), never public.
+  async createClone(spec) {
+    const info = await this.inspectLink(spec.clone);
+    if (info.access === "login") throw new Error(`${info.host} is behind its owner's Aegis login, so it can't be cloned. A public link, or one with a password of its own, can.`);
+    if (info.access === "password" && !spec.sourcePassword) throw new Error(`${info.host} has a password of its own: type it to clone the link.`);
+    if (this.domain && !spec.sub) throw new Error("Give the clone an address of its own, like radio.");
+    const port = this.freeKey();
+    const sub = await this.checkSub(port, spec.sub);
+    const want = spec.access ? accessOf(spec.access) : info.access;
+    const own = { ...spec, access: want };
+    if (want === "password" && !spec.password && !spec.lockFrom && spec.sourcePassword) own.password = spec.sourcePassword;
+    const { access, lock } = this.checkAccess({ kind: "clone", clone: { access: info.access } }, own);
+    let key = null;
+    if (info.access === "password") key = await this.cloneApi.key(info.host, spec.sourcePassword);
+    return this.add({
+      sub, port, kind: "clone", targetHost: info.host, targetPort: 443, scheme: "https",
+      clone: { host: info.host, url: info.url, access: info.access, key, name: info.name, aegis: info.aegis, at: now(), lost: null },
+      name: String(spec.name || "").slice(0, 60) || info.name || info.host,
       access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
       ...cleanMeta(spec.app, spec.meta),
     });
@@ -519,7 +564,7 @@ export class TunnelManager {
     this.save();
     this.refreshFavicon(port, true);
     this.healthOne(port);
-    this.log("tunnels: created", port, "->", t.site ? t.site.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, t.access);
+    this.log("tunnels: created", port, "->", t.site ? t.site.url : t.clone ? `clone of ${t.clone.url}` : `${t.scheme}://${t.targetHost}:${t.targetPort}`, t.access);
     return this.summary(t);
   }
 
@@ -529,6 +574,7 @@ export class TunnelManager {
     const lock = patch.password ? makeLock(patch.password)
       : patch.lockFrom != null && patch.lockFrom !== "" ? this.handOver(patch.lockFrom) : t?.lock || null;
     if (t?.kind === "site" && access === "public") throw new Error("A site behind Burrow is behind a password: the login, or one of its own.");
+    if (t?.kind === "clone" && t.clone.access === "password" && access === "public") throw new Error("The original has a password, so its clone can't be public: your login, or a password.");
     if (access === "password" && !lock) throw new Error("Set a password for this tunnel.");
     return { access, lock };
   }
@@ -536,7 +582,7 @@ export class TunnelManager {
   async update(port, patch) {
     const t = this.get(port);
     if (!t) throw new Error("No such tunnel.");
-    if (t.kind === "site" && "sub" in patch && this.domain && !patch.sub) throw new Error("A site needs an address of its own.");
+    if ((t.kind === "site" || t.kind === "clone") && "sub" in patch && this.domain && !patch.sub) throw new Error(`A ${t.kind} needs an address of its own.`);
     if ("enabled" in patch) {
       t.enabled = !!patch.enabled;
       if (!t.enabled) this.kick(port, null);
@@ -553,6 +599,9 @@ export class TunnelManager {
         const site = parseSite(patch.site);
         if (site.url !== t.site.url) { await this.checkSite(site); t.site = site; t.targetHost = site.host; this.refreshFavicon(port, true); }
       }
+    } else if (t.kind === "clone") {
+      // the original's password again (it changed, and the old clone key with it)
+      if (patch.sourcePassword) { t.clone.key = await this.cloneApi.key(t.clone.host, patch.sourcePassword); t.clone.lost = null; this.refreshFavicon(port, true); }
     } else {
     if ("preserveHost" in patch) t.preserveHost = !!patch.preserveHost;
     if ("scheme" in patch && ["http", "https"].includes(patch.scheme)) t.scheme = patch.scheme;
@@ -940,7 +989,8 @@ export class TunnelManager {
       port: t.port, url: this.urlFor(t.port), host: this.hostFor(t.port), mode: this.mode,
       quick: quick ? { state: quick.state, error: quick.error } : null,
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
-      target: t.site ? t.site.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
+      clone: t.clone ? { url: t.clone.url, host: t.clone.host, access: t.clone.access, name: t.clone.name, lost: t.clone.lost || null } : null,
+      target: t.site ? t.site.url : t.clone ? t.clone.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
@@ -1044,9 +1094,51 @@ export class TunnelManager {
     return h;
   }
 
+  // a clone: the original's own name, its clone key, and nothing about the visitor
+  cloneHeaders(t, req) {
+    const h = {};
+    for (const [k, v] of Object.entries(req.headers)) if (!/^(cf-|x-forwarded-|x-real-ip$|true-client-ip$|cdn-loop$|x-burrow-clone$)/i.test(k)) h[k] = v;
+    h.host = t.clone.host;
+    const pub = `https://${String(req.headers.host || "").toLowerCase()}`, up = `https://${t.clone.host}`;
+    if (h.origin && h.origin.toLowerCase() === pub) h.origin = up;
+    if (h.referer && (h.referer.toLowerCase() + "/").startsWith(pub + "/")) h.referer = up + h.referer.slice(pub.length);
+    if (t.clone.key) h[CLONE_HEADER] = t.clone.key;
+    return h;
+  }
+  // the original's absolute redirects and cookies, made ours
+  cloneLocation(t, loc) {
+    try {
+      const u = new URL(loc, `https://${t.clone.host}/`);
+      return u.hostname === t.clone.host && (u.port === "" || u.port === "443") ? u.pathname + u.search + u.hash : loc;
+    } catch { return loc; }
+  }
+  cloneCookies(t, list) {
+    const host = t.clone.host;
+    return [].concat(list).map((c) => String(c).replace(/;\s*domain=\.?([^;]*)/ig, (all, d) => (host === d.toLowerCase() || host.endsWith("." + d.toLowerCase()) ? "" : all)));
+  }
+  // The original's gate turned the clone away: its password changed (the key with
+  // it), or it went behind its owner's login. Noted on the tunnel for the dashboard.
+  cloneLost(t, why) {
+    if (t.clone.lost?.why === why) return;
+    t.clone.lost = { why, at: now() };
+    this.log("tunnels:", t.port, "the original", t.clone.host, "turned its clone away:", why);
+    this.save();
+  }
+  cloneBack(t) { if (t.clone.lost) { t.clone.lost = null; this.save(); } }
+  lostPage(t) {
+    const why = t.clone.lost?.why === "login" ? "is behind its owner's Aegis login now, so it can't be cloned any more"
+      : "has a new password. Whoever runs this clone can type it under Burrow to bring it back";
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Not available</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030304;color:#e8eaed;font:14px/1.5 system-ui,sans-serif}
+.c{max-width:440px;padding:28px}h1{font-size:18px;margin:0 0 8px}p{color:#9aa0a6;margin:0}</style></head>
+<body><div class="c"><h1>This clone is cut off</h1><p>The link it copies ${why}.</p></div></body></html>`;
+  }
+
   upstreamHeaders(t, req, extra) {
     if (t.kind === "site") return this.siteHeaders(t, req);
+    if (t.kind === "clone") return this.cloneHeaders(t, req);
     const h = { ...req.headers, ...extra };
+    delete h[CLONE_HEADER];
     if (!t.preserveHost) {
       h.host = `${t.targetHost}:${t.targetPort}`;
       // Apps compare Origin/Referer with Host (CSRF and WebSocket checks), so
@@ -1080,13 +1172,29 @@ export class TunnelManager {
     const headers = this.upstreamHeaders(t, req, {});
     const cookie = stripCookie(headers.cookie);
     if (cookie) headers.cookie = cookie; else delete headers.cookie;
-    const site = t.kind === "site";
+    const site = t.kind === "site", clone = t.kind === "clone";
     const mod = t.scheme === "https" ? httpsRequest : httpRequest;
     const up = mod({ host: t.targetHost, port: t.targetPort, method: req.method, path: site ? this.sitePath(t, req.url) : req.url, headers,
-                     agent: site ? siteAgent : t.scheme === "https" ? httpsAgent : httpAgent, timeout: 120000 }, (upRes) => {
+                     agent: site || clone ? siteAgent : t.scheme === "https" ? httpsAgent : httpAgent, timeout: 120000 }, (upRes) => {
       status = upRes.statusCode;
+      if (clone) {
+        const locked = upRes.headers["x-burrow-gate"];
+        if (locked === "password" || locked === "login") {
+          this.cloneLost(t, locked);
+          upRes.resume(); status = 502;
+          res.writeHead(502, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(this.lostPage(t));
+          return finish("original turned the clone away");
+        }
+        this.cloneBack(t);
+      }
       const out = { ...upRes.headers };
       if (site && out.location) out.location = this.siteLocation(t, out.location);
+      if (clone) {
+        if (out.location) out.location = this.cloneLocation(t, out.location);
+        if (out["set-cookie"]) out["set-cookie"] = this.cloneCookies(t, out["set-cookie"]);
+        delete out["strict-transport-security"];    // ours to say, not the original's
+      }
       res.writeHead(upRes.statusCode, out);
       upRes.on("data", (d) => { outB += d.length; });
       upRes.pipe(res);
@@ -1117,8 +1225,9 @@ export class TunnelManager {
     if (cookie) headers.cookie = cookie; else delete headers.cookie;
     const mod = t.scheme === "https" ? httpsRequest : httpRequest;
     const started = now();
+    const clone = t.kind === "clone";      // out on the internet: its certificate is checked
     const up = mod({ host: t.targetHost, port: t.targetPort, method: req.method, path: req.url, headers,
-                     rejectUnauthorized: false });
+                     rejectUnauthorized: clone, ...(clone ? { servername: t.clone.host } : {}) });
     up.on("upgrade", (upRes, upSocket, upHead) => {
       const lines = [`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`];
       for (let i = 0; i < upRes.rawHeaders.length; i += 2) lines.push(`${upRes.rawHeaders[i]}: ${upRes.rawHeaders[i + 1]}`);
@@ -1190,10 +1299,11 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
   fetchTarget(t, path, limit) {
     return new Promise((resolve) => {
       const mod = t.scheme === "https" ? httpsRequest : httpRequest;
-      const site = t.kind === "site";
+      const site = t.kind === "site", clone = t.kind === "clone";
       const req = mod({ host: t.targetHost, port: t.targetPort, path: site ? this.sitePath(t, path) : path, method: "GET", timeout: 5000,
-                        rejectUnauthorized: site, agent: site ? siteAgent : undefined,
-                        headers: { host: site ? t.site.host : (t.preserveHost && this.hostFor(t.port)) || `${t.targetHost}:${t.targetPort}`,
+                        rejectUnauthorized: site || clone, agent: site || clone ? siteAgent : undefined,
+                        headers: { host: site ? t.site.host : clone ? t.clone.host : (t.preserveHost && this.hostFor(t.port)) || `${t.targetHost}:${t.targetPort}`,
+                                   ...(clone && t.clone.key ? { [CLONE_HEADER]: t.clone.key } : {}),
                                    "user-agent": "aegis/1 (favicon)", accept: "*/*" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && limit > 0) {
           res.resume();

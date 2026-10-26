@@ -73,6 +73,7 @@ const PLAIN_COOKIE = "aegis";                                      // the same t
 const GO = "aegis-go";                                             // one-shot: "the next / is Termix"
 const DEVICE = "aegis-dev";                                         // the device key (aegis/devices.mjs; AEAD label too)
 const UNLOCK = "aegis-unlock";                                     // a tunnel's own password was entered (AEAD label too)
+const CLONE = "aegis-clone";                                       // a clone key: another gate had the password (AEAD label)
 // Configurable under Settings → Sign-in (data/state.json).
 const sessionTtl = () => Math.max(1, Math.min(365, Number(settings.get("sessionDays")) || 30)) * 864e5;
 const SESSION_RENEW_MS = 24 * 60 * 60 * 1000;
@@ -650,8 +651,15 @@ function unlocked(req, t) {
   const s = t.lock && unseal(parseCookies(req.headers.cookie)[unlockName(req)] || "", UNLOCK);
   return !!(s && s.p === t.port && s.h === hostOf(req) && s.e === t.lock.epoch && s.exp > Date.now());
 }
-// anyone (public), the Aegis login (login, and password too), or its own password
-const mayOpen = (req, t) => t.access === "public" || isAuthed(req) || (t.access === "password" && unlocked(req, t));
+// Another Aegis × Burrow that had the password clones the tunnel (burrow/clone.mjs):
+// its key rides on every request it passes on, and dies with this password.
+function cloneKeyOk(req, t) {
+  const k = req.headers["x-burrow-clone"];
+  const s = t.lock && typeof k === "string" && k.length < 600 && unseal(k, CLONE);
+  return !!(s && s.p === t.port && s.h === hostOf(req) && s.e === t.lock.epoch);
+}
+// anyone (public), the Aegis login (login, and password too), or its own password (or a clone's key for it)
+const mayOpen = (req, t) => t.access === "public" || isAuthed(req) || (t.access === "password" && (unlocked(req, t) || cloneKeyOk(req, t)));
 
 function unlockPage(res, t, host) {
   const html = FILES["unlock.html"].toString().replaceAll("{{name}}", esc(t.name || t.site?.host || `tunnel-${t.port}`))
@@ -673,6 +681,32 @@ async function unlockRoute(t, req, res, url, host) {
   if (!checkLock(t.lock, f.password)) { recordFail(ip); log("unlock wrong password", ip, host); audit("tunnel password wrong", req); return sendJson(res, 401, { error: "Wrong password." }); }
   fails.delete(ip); log("unlock ok", ip, host); audit("tunnel unlocked", req);
   return sendJson(res, 200, { ok: true, next: safeNext(f.next, "/") }, { "Set-Cookie": unlockCookie(req, t) });
+}
+
+// Who may open this link, for another gate that wants to clone it. A link behind
+// the Aegis login answers too ("login", and nothing more), so the other side can say why not.
+function burrowInfo(t, res, host) {
+  if (!t.enabled) return sendJson(res, 404, { burrow: 1, error: "paused" });
+  if (t.access === "login") return sendJson(res, 200, { burrow: 1, aegis: VERSION, access: "login" });
+  sendJson(res, 200, { burrow: 1, aegis: VERSION, access: t.access, name: t.name || tunnels.runtime(t.port).title || host });
+}
+
+// A clone key for the tunnel's password: the same throttle and sealing as the unlock page.
+async function cloneRoute(t, req, res, host) {
+  if (req.method !== "POST") return send(res, 405, "");
+  const ip = clientIp(req);
+  if (tooManyFails(ip)) { log("clone throttled", ip, host); return sendJson(res, 429, { error: "Too many attempts. Try again in 15 minutes." }); }
+  let f;
+  try { f = await unwrapSealed(await readJsonBody(req)); }
+  catch { recordFail(ip); return sendJson(res, 400, { error: "Secure handshake failed." }); }
+  if (!checkLock(t.lock, f.password)) { recordFail(ip); log("clone wrong password", ip, host); audit("tunnel password wrong (clone)", req); return sendJson(res, 401, { error: "Wrong password." }); }
+  fails.delete(ip); log("cloned", host, "by", ip); audit("tunnel cloned", req, { tunnel: t.port });
+  try {
+    notify("aegis", { level: "info", key: `cloned-${t.port}`, title: `${t.name || host} was cloned`,
+      body: `Someone with its password cloned it onto their own Aegis × Burrow. A clone opens it the way the password does. Change its password to cut every clone off.`,
+      link: "/__gate/tunnels", items: [{ label: ip, sub: host }] });
+  } catch { /* the bell is a courtesy */ }
+  return sendJson(res, 200, { key: seal({ p: t.port, h: host, e: t.lock.epoch, at: Date.now() }, CLONE) });
 }
 
 // ---------- single sign-on tickets (dashboard -> tunnel host) ----------
@@ -1121,10 +1155,12 @@ async function handleApi(req, res, path, url) {
     // a tunnel's own password comes sealed, like the login (sealedPassword)
     const tunnelBody = async () => {
       const b = await readJsonBody(req);
-      if (b && b.sealedPassword) {
-        try { b.password = String((await unwrapSealed(b.sealedPassword)).password || ""); }
+      // ...and so does the password of a link being cloned (sealedSourcePassword)
+      for (const [sealed, field] of [["sealedPassword", "password"], ["sealedSourcePassword", "sourcePassword"]]) {
+        if (!b || !b[sealed]) continue;
+        try { b[field] = String((await unwrapSealed(b[sealed])).password || ""); }
         catch { throw new Error("Secure handshake failed. Reload and try again."); }
-        delete b.sealedPassword;
+        delete b[sealed];
       }
       return b;
     };
@@ -1685,14 +1721,18 @@ async function tunnelRequest(port, req, res, path, url, host) {
   const t = tunnels.get(port);
   if (!t) return notFoundPage(res, "none");
   if (path === "/__gate/unlock" && t.access === "password" && t.enabled) return unlockRoute(t, req, res, url, host);
+  if (path === "/__gate/burrow" && req.method === "GET") return burrowInfo(t, res, host);
+  if (path === "/__gate/clone" && t.access === "password" && t.enabled) return cloneRoute(t, req, res, host);
   if (path.startsWith("/__gate/")) return handleGate(req, res, path, url, host, false);
   if (!t.enabled) return notFoundPage(res, "paused");
   if (!mayOpen(req, t)) {
+    // x-burrow-gate: a clone of this tunnel learns it was turned away, and why
+    const why = { "X-Burrow-Gate": t.access === "password" ? "password" : "login" };
     const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
-    if (!wantsHtml) return sendJson(res, 401, { error: t.access === "password" ? "password required" : "login required" });
+    if (!wantsHtml) return sendJson(res, 401, { error: t.access === "password" ? "password required" : "login required" }, why);
     const next = encodeURIComponent(safeNext(req.url, "/"));
-    if (t.access === "password") return send(res, 302, "", { Location: "/__gate/unlock?next=" + next });
-    return send(res, 302, "", { Location: mainHost() ? ssoUrl(host, req.url) : "/__gate/login?next=" + next });
+    if (t.access === "password") return send(res, 302, "", { Location: "/__gate/unlock?next=" + next, ...why });
+    return send(res, 302, "", { Location: mainHost() ? ssoUrl(host, req.url) : "/__gate/login?next=" + next, ...why });
   }
   tunnels.proxy(port, req, res, { stripCookie: stripGateCookie });
 }

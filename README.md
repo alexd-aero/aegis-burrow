@@ -273,6 +273,16 @@ This gate's **machine key is not copied**: a standby cannot reach your other mac
 - **Behind your login** or a password of the site's own; never public.
 - A Pages address that's already live (`you.github.io/project`) works too: **+ A Pages address**.
 
+### Clone a link from another Aegis × Burrow
+
+**New tunnel → Clone a link** puts someone else's Aegis × Burrow tunnel on an address of yours. Paste the link and Burrow asks it who may open it (`/__gate/burrow`):
+
+- **Public:** cloned as it is. Anyone could open it anyway.
+- **A password of its own:** type it once. It travels sealed (ML-KEM-768 + X25519, like every Aegis password) and buys a **clone key**, which your gate sends with every request. The password itself is never stored. The clone stays locked too: by default it gets the same password, or you can give it your login or another password. It can't be made public. When the owner changes the password, every clone is cut off at once and shows a "cut off" page until someone types the new password. The owner gets a notice on their bell for each clone.
+- **Behind its owner's Aegis login:** can't be cloned. Only the owner gets in, so a copy would be a way around that.
+
+The clone fetches the original over HTTPS with its certificate checked, WebSockets included. Nothing about your visitors (their IP, Cloudflare headers) is passed on. Both gates need 2.30 or later. From a terminal: `burrow clone radio.tunnel.friend.dev --sub radio` (its password is asked, or read from the first line of stdin).
+
 The engine also answers on **`data/control.sock`**, a Unix socket only your user can open. That is how [Selkies Forge](#-selkies-forge) and the `burrow` command work without a browser:
 
 ```bash
@@ -283,6 +293,7 @@ burrow publish 3000 --sub grafana   # at grafana.<your zone>
 burrow publish 8080 --password      # its own password (asked, or the first line of stdin)
 burrow password 8080                # change it; burrow access 8080 login|password|public
 burrow site github.com/you/project --sub docs --password   # a Pages site (experimental)
+burrow clone radio.tunnel.friend.dev --sub radio            # another Aegis × Burrow link (public or password)
 burrow rename 3000 dashboards       # move it; "" goes back to tunnel-3000-…
 burrow unpublish 8790
 burrow off / on                     # the module switch (tunnels are kept)
