@@ -11,6 +11,8 @@
 //   node cli.mjs pack-wait                  follow the pack until it is done
 //   node cli.mjs cf-wait                    wait for the Cloudflare authorization
 //   node cli.mjs update-wait VERSION        wait for the new version to answer
+//   node cli.mjs addons                     the addons, and which have an update
+//   node cli.mjs addon OP ID [JSON]         install|update|uninstall|action|check one, following its job
 //
 // AEGIS_HOME says where data/control.sock is.
 import { request } from "node:http";
@@ -188,6 +190,37 @@ function get(key) {
   });
 }
 
+// ---------- addons ----------
+async function addonsList() {
+  const fresh = await call("POST", "/addons/check", "{}").catch(() => null);
+  const { addons } = await call("GET", "/addons");
+  const ups = new Map(((fresh || await call("GET", "/addons/updates")).updates || []).map((u) => [u.id, u]));
+  if (!addons.length) { out(dim("  no addons yet")); return 0; }
+  for (const a of addons) {
+    const u = ups.get(a.id), v = a.version || a.manifest?.version || "";
+    const state = a.installed ? (a.status?.state === "running" || a.status?.state === "installed" ? green("●") : yellow("●")) : dim("○");
+    out(`  ${state} ${bold((a.name || a.manifest?.name || a.id).padEnd(22))} ${dim(String(v).padEnd(9))} ${a.installed ? "" : dim("not installed  ")}${u ? mint(`update: ${u.latest || u.version || "available"}  (aegis addons update ${a.id})`) : ""}`);
+  }
+  return 0;
+}
+async function addonOp(op, id, json) {
+  if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check ID]"); return 2; }
+  if (op === "check") { const r = await call("POST", `/addons/${id}/check`, "{}"); out(JSON.stringify(r)); return 0; }
+  if (op === "add") { const r = await call("POST", "/addons/add", JSON.stringify({ source: id })); out(green(`  ✓ added ${r.addon?.id || ""}: install it with aegis addons install ${r.addon?.id || "ID"}`)); return 0; }
+  const r = await call("POST", `/addons/${id}/${op}`, json || "{}");
+  const job = r.job?.id;
+  if (!job) { out(JSON.stringify(r)); return 0; }
+  let seen = 0;
+  for (;;) {
+    const j = await call("GET", `/addons/jobs/${job}`);
+    const lines = j.log || j.lines || [];
+    for (const l of lines.slice(seen)) out(`  ${dim("│")} ${typeof l === "string" ? l : l.text || l.line || JSON.stringify(l)}`);
+    seen = lines.length;
+    if (["done", "error", "failed", "cancelled"].includes(j.state)) { out(j.state === "done" ? green(`  ✓ ${op} done`) : red(`  ✗ ${j.error || j.state}`)); return j.state === "done" ? 0 : 1; }
+    await sleep(800);
+  }
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 const run = {
   // on failure the message goes to stdout too: bash reads it with out="$(…)" || die "$out"
@@ -202,6 +235,7 @@ const run = {
   tunnels: async () => { await tunnels(); return 0; }, ports: async () => { await ports(); return 0; },
   "pack-wait": packWait, "cf-wait": cfWait, "update-wait": () => updateWait(args[0], args[1]),
   get: () => { get(args[0]); return null; },
+  addons: addonsList, addon: () => addonOp(args[0], args[1], args[2]),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },

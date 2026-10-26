@@ -236,6 +236,7 @@ function bucket(list, key, value, max) {
 export class TunnelManager {
   constructor({ dataDir, domain, quick, forbiddenPorts, log, naming, edge, onNaming }) {
     this.dataDir = dataDir;
+    this.retired = new Map();               // port -> {lock, at}: passwords of tunnels removed lately, for a hand-over
     try { this.naming = cleanNaming(naming, { saved: true }); } catch { this.naming = cleanNaming(null, { saved: true }); }
     this.onNaming = onNaming || null;       // (naming) => keep it (state.json)
     this.edge = new Edge({ dataDir, log: log || console.log, cfApi: (...a) => this.cfApi(...a), ...(edge || {}) });
@@ -525,7 +526,8 @@ export class TunnelManager {
   // Who may open it, after this change: {access, lock}. Throws before anything changes.
   checkAccess(t, patch) {
     const access = "access" in patch ? accessOf(patch.access) : (t?.access || "login");
-    const lock = patch.password ? makeLock(patch.password) : t?.lock || null;
+    const lock = patch.password ? makeLock(patch.password)
+      : patch.lockFrom != null && patch.lockFrom !== "" ? this.handOver(patch.lockFrom) : t?.lock || null;
     if (t?.kind === "site" && access === "public") throw new Error("A site behind Burrow is behind a password: the login, or one of its own.");
     if (access === "password" && !lock) throw new Error("Set a password for this tunnel.");
     return { access, lock };
@@ -539,7 +541,7 @@ export class TunnelManager {
       t.enabled = !!patch.enabled;
       if (!t.enabled) this.kick(port, null);
     }
-    if ("access" in patch || patch.password) {
+    if ("access" in patch || patch.password || (patch.lockFrom != null && patch.lockFrom !== "")) {
       const { access, lock } = this.checkAccess(t, patch);
       if (lock !== t.lock) this.log("tunnels:", t.port, "has a new password; whoever had the old one is out");
       t.access = access; t.lock = lock;
@@ -583,9 +585,25 @@ export class TunnelManager {
     return this.summary(t);
   }
 
+  // A tunnel's password, handed to another one ({lockFrom: PORT} on create or update):
+  // the scrypt hash moves, never the password. From a tunnel that exists, or one
+  // removed in the last 15 minutes (a tunnel moved somewhere else is removed first,
+  // so its address is free for the new one). Whoever had it unlocked types it once more.
+  handOver(from) {
+    const n = Number(from), t = this.get(n);
+    if (t?.lock) return { ...t.lock };
+    const r = this.retired.get(n);
+    if (r && Date.now() - r.at < 15 * 60e3) return { ...r.lock };
+    throw new Error(`Tunnel ${from} has no password to hand over.`);
+  }
+
   async remove(port) {
     const t = this.get(port);
     if (!t) throw new Error("No such tunnel.");
+    if (t.lock) {
+      for (const [k, v] of this.retired) if (Date.now() - v.at > 15 * 60e3) this.retired.delete(k);
+      this.retired.set(t.port, { lock: t.lock, at: Date.now() });
+    }
     this.kick(port, null);
     const host = this.hostFor(t.port);         // its name, while the tunnel (and its sub) still exists
     this.tunnels.delete(t.port);

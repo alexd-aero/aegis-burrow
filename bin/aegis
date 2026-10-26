@@ -15,6 +15,7 @@
 #   aegis termix install | remove    Termix in Docker, behind the same login
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared
 #   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
+#   aegis addons [add LINK | update|install|uninstall|check ID]   Burrow's addons, from the terminal
 #   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
@@ -1014,6 +1015,9 @@ usage() {
     aegis ip ADDRESS             who is this IP? the shield's blocklists, GreyNoise, Shodan, StopForumSpam, DNS lists, Tor
     aegis audit [N | -f]         sign-ins, failed sign-ins, Termix sessions, tunnel changes (with IPs)
     aegis serveo on | off | url  a public link to the dashboard, no account
+    aegis addons                 the addons, and which have an update
+    aegis addons update ID       update one (install, uninstall, check too)
+    aegis addons add LINK        add one from a link or a folder
     aegis termix install | remove
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
     aegis url | setup-link | version
@@ -1052,6 +1056,8 @@ case "$1" in
       console.log("  it had moved to "+s.moved.to+"; running it here again");delete s.moved;fs.writeFileSync(f+".tmp",JSON.stringify(s,null,2));fs.renameSync(f+".tmp",f)' "$st" || exit 0
     warn "the copy on the other machine still runs: stop it there (aegis stop), or two gates answer for the same domain"
     svc restart; wait_healthy && ok "running here again" || die "not answering yet; see: aegis logs" ;;
+  addons) shift; need_installed; ensure_running
+    if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else cli addon "$1" "${2:-}"; fi ;;
   url) need_installed; links "" ;;
   setup-link) need_installed; if setup_needed; then links "$(setup_path)"; else echo "  the login is already set up:"; links ""; fi ;;
   serveo) shift; need_installed

@@ -173,6 +173,28 @@ function notify(source, n = {}) {
   noticesSave();
   return same?.id || list[0].id;
 }
+// One bad request (here, or in an addon running inside us: Burrow Pages, Bulwark…) must
+// not stop every service behind the gate. An error nothing caught is logged and put on
+// the bell, and the gate keeps going. Startup errors (a port taken) and a storm of them
+// (over 20 in a minute) still end the process, so the service manager starts it clean.
+const startedClean = Date.now();
+let crashTimes = [];
+function survived(kind, e) {
+  const now = Date.now();
+  crashTimes = crashTimes.filter((t) => now - t < 60000).concat(now);
+  log(`${kind}: ${e?.stack || e}`);
+  if (now - startedClean < 15000 || ["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"].includes(e?.code) || crashTimes.length > 20) {
+    log(crashTimes.length > 20 ? "too many errors in a minute: restarting clean" : "an error while starting: stopping");
+    process.exit(1);
+  }
+  try {
+    notify("aegis", { level: "warn", key: "uncaught", title: "Aegis caught an error that would have stopped it",
+                      body: `${String(e?.message || e).slice(0, 300)}${/\/addons\/([a-z0-9-]+)\//.exec(e?.stack || "") ? ` (in the ${/\/addons\/([a-z0-9-]+)\//.exec(e.stack)[1]} addon)` : ""}. Everything kept running.` });
+  } catch { /* the bell is a nicety */ }
+}
+process.on("unhandledRejection", (e) => survived("unhandled rejection", e));
+process.on("uncaughtException", (e) => survived("uncaught exception", e));
+
 function noticesView() {
   const list = noticesLoad();
   const unread = list.filter((x) => !x.read);
@@ -2187,6 +2209,25 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
     let records = [], error = null;
     try { records = await tunnels.dnsRecords(); } catch (e) { error = e.message; }
     return ok({ domain: d ? { mainHost: d.mainHost, zone: d.mainHost.split(".").slice(1).join(".") } : null, records, error });
+  }
+  // addons, from this machine (aegis addons …): what's installed, what has an update, and
+  // install / update / uninstall / an action, followed as a job. The dashboard's Addons tab, without a browser.
+  if (path === "/addons" && method === "GET") return ok({ addons: await addons.list() });
+  if (path === "/addons/updates" && method === "GET") return ok({ updates: addons.updates() });
+  if (path === "/addons/check" && method === "POST") { await addons.checkAll(0); return ok({ updates: addons.updates() }); }
+  if (path === "/addons/add" && method === "POST") { const src = ((await readJson()) || {}).source; audit("addon: added from the command line", null, { source: String(src || "").slice(0, 200) }); return ok({ addon: await addons.add(src) }); }
+  const aj = /^\/addons\/jobs\/([0-9a-f]{12})$/.exec(path);
+  if (aj && method === "GET") return ok(addons.job(aj[1]).view(0));
+  const ao = /^\/addons\/([a-z0-9-]{2,40})\/(install|update|uninstall|action|check|autorestart)$/.exec(path);
+  if (ao && method === "POST") {
+    const [, id, op] = ao, b = (await readJson()) || {};
+    audit(`addon: ${op}${op === "action" ? ` ${b.action}` : ""} from the command line`, null, { addon: id });
+    if (op === "install") return ok({ job: addons.install(id, b.settings) });
+    if (op === "update") return ok({ job: addons.update(id) });
+    if (op === "uninstall") return ok({ job: addons.uninstall(id, b.keep_data !== false) });
+    if (op === "action") return ok({ job: addons.action(id, b.action) });
+    if (op === "check") return ok(await addons.checkUpdates(id));
+    if (op === "autorestart") return ok(addons.setAutoRestart(id, b.on !== false));
   }
   const xc = /^\/x\/([a-z0-9][a-z0-9-]{1,39})(\/[^?]*)?$/.exec(path);
   if (xc) return extRoute(xc[1], xc[2] || "/", method, new URLSearchParams(), readJson, "control");

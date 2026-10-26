@@ -326,3 +326,26 @@ test("a foreign record still blocks a name, Worker or not", async () => {
     assert.equal(tm.naming.certs, "worker", "nothing moved");
   } finally { tm.stop(); }
 });
+
+test("a password handed to another tunnel (lockFrom), even after the first is removed", async () => {
+  const { tm } = manager();
+  try {
+    await tm.create({ port: 3100, sub: "docs", access: "password", password: "keep me" });
+    // to a tunnel that exists alongside
+    let t = await tm.create({ port: 3101, access: "password", lockFrom: 3100 });
+    assert.equal(t.locked, true); assert.ok(checkLock(tm.get(3101).lock, "keep me"));
+    // moved: the old one goes first (its address is wanted), the new one takes the password
+    await tm.remove(3100);
+    t = await tm.create({ port: 3102, sub: "docs", access: "password", lockFrom: 3100 });
+    assert.ok(checkLock(tm.get(3102).lock, "keep me"));
+    // on an update too
+    await tm.create({ port: 3103 });
+    await tm.update(3103, { access: "password", lockFrom: 3102 });
+    assert.ok(checkLock(tm.get(3103).lock, "keep me"));
+    // nothing to hand over
+    await tm.create({ port: 3104 });
+    await assert.rejects(tm.create({ port: 3105, access: "password", lockFrom: 3104 }), /no password to hand over/);
+    await assert.rejects(tm.create({ port: 3106, access: "password", lockFrom: 9999 }), /no password to hand over/);
+    assert.equal(tm.summary(tm.get(3102)).lock, undefined, "the hash still never leaves");
+  } finally { tm.stop(); }
+});
