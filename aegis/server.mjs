@@ -34,7 +34,8 @@
 
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync, rmSync, readdirSync,
+         linkSync, symlinkSync, readlinkSync, copyFileSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -344,6 +345,35 @@ function extContext(rec) {
 }
 // which copy of an addon is installed: a new commit, or a folder copied again, means reload
 const extVersion = (rec) => `${rec.commit || ""}|${rec.updated || ""}|${rec.installed_at || ""}`;
+// Node keeps every module it loaded, by its path: reloading an addon's entry
+// with ?v= gets a new entry, but the files it imports stay the old ones until
+// the gate restarts. So an addon loaded again in this process is loaded from a
+// fresh snapshot of its folder (hard links: instant, no extra space), a new
+// path for every file. Older snapshots go once the new one runs.
+const loadedOnce = new Set();
+function loadRoot(rec) {
+  const root = join(addons.addonDir(rec.id), "repo");
+  if (!loadedOnce.has(rec.id)) {
+    loadedOnce.add(rec.id);
+    rmSync(join(addons.addonDir(rec.id), ".loaded"), { recursive: true, force: true });       // a previous run's
+    return addons.rootOf(rec);
+  }
+  const base = join(addons.addonDir(rec.id), ".loaded"), snap = join(base, String(Date.now()));
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  linkTree(root, snap);
+  for (const old of readdirSync(base)) if (join(base, old) !== snap) rmSync(join(base, old), { recursive: true, force: true });
+  return join(snap, rec.subdir || "");
+}
+// a folder, again, as hard links (a plain copy where that can't be done); links stay links
+function linkTree(src, dst) {
+  mkdirSync(dst, { recursive: true, mode: 0o700 });
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    const a = join(src, e.name), b = join(dst, e.name);
+    if (e.isDirectory()) linkTree(a, b);
+    else if (e.isSymbolicLink()) symlinkSync(readlinkSync(a), b);
+    else if (e.isFile()) { try { linkSync(a, b); } catch { copyFileSync(a, b); } }
+  }
+}
 async function syncExtensions() {
   const all = addons.load();
   for (const [id, x] of extensions) {
@@ -361,7 +391,7 @@ async function syncExtensions() {
     extensions.set(rec.id, x);
     if (!b.extension) continue;
     try {
-      x.mod = await import(`${pathToFileURL(join(addons.rootOf(rec), b.extension)).href}?v=${Date.now()}`);
+      x.mod = await import(`${pathToFileURL(join(loadRoot(rec), b.extension)).href}?v=${Date.now()}`);
       x.ctx = extContext(rec);
       await x.mod.start?.(x.ctx);
       log(`${rec.id}: running inside Burrow${x.mod.guard ? " (guarding every request)" : ""}`);
