@@ -305,6 +305,8 @@ function pagesView() {
 //   observe(ip, info, {status, bytes, ms})      when the response is done
 //   signedIn(ip)  peek(ip)  lookup(ip)          sign-ins; badges; IP checks
 //   mount() -> {prefix, upstream, headers, name}   its app under the dashboard's login
+//   ctx.fleet: your other machines, and forward(machine, port) -> a port here that reaches
+//             that machine's own 127.0.0.1:port (an SSH forward, kept up until released)
 //   programs: [{id, name, note, install(machine, tools)}]   things Fleet can install on
 //             a linked machine (Machines -> Install); tools.run(script) runs there over
 //             Fleet's own link, tools.log/step feed the job. Returns {url?, version?}.
@@ -341,6 +343,16 @@ function extContext(rec) {
       create: (spec) => tunnels.create({ ...spec, app: id }),
       update: (port, patch) => { own(port); return tunnels.update(port, patch); },
       remove: (port) => { own(port); return tunnels.remove(port); },
+    },
+    // your other machines (Machines), and a port of one answering here: forward(machine, port)
+    // -> {host: "127.0.0.1", port, state}; kept up until release(machine, port) or the addon unloads
+    fleet: {
+      enabled: () => fleet.enabled(),
+      list: () => (fleet.enabled() ? fleet.list() : []).map((m) => ({ id: m.id, name: m.name, address: m.address, os: m.os || "", arch: m.arch || "",
+                                                                       up: machineUp(m), standby: !!m.standby, via: m.via || "direct" })),
+      forward: (machine, port) => { const v = fleet.forward(machine, port, id); return { ...v, port: v.local }; },
+      release: (machine, port) => fleet.release(machine, port, id),
+      forwards: () => fleet.forwards().filter((f) => f.owners.includes(id)).map(({ owners, ...f }) => f),
     },
   };
 }
@@ -381,6 +393,7 @@ async function syncExtensions() {
     const rec = all[id];
     if (!rec?.installed || extVersion(rec) !== x.version) {
       extensions.delete(id);
+      try { fleet.releaseAll(id); } catch { /* none */ }
       try { await x.mod.stop?.(); } catch (e) { log(`${id}: stop failed`, e.message); }
       log(`${id}: unloaded`);
     }

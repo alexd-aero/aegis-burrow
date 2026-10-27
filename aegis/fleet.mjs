@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync } from "node:fs"
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
+import { createServer, createConnection } from "node:net";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readJson, writeJson } from "./config.mjs";
 import { newAgentKey } from "./fleet-agent.mjs";
@@ -797,6 +798,78 @@ fi
     setTimeout(() => this.beat().catch(() => {}), 5000).unref?.();
   }
   stopBeat() { clearInterval(this.beatTimer); this.beatTimer = null; }
+
+  // ---------------- a port of a machine, here
+  // A service on a machine (its own 127.0.0.1:PORT) answering on a port of this
+  // one, 127.0.0.1 only: an `ssh -N -L` over the same link everything else uses
+  // (straight there, or through its agent), kept up while anyone wants it
+  // (restarted with a growing pause when it drops). For tunnels and addons:
+  // Burrow Pages publishes a machine's port this way.
+  //   forward(id, port, owner) -> { host: "127.0.0.1", port, state }   release(id, port, owner)
+  forward(id, port, owner = "aegis") {
+    this.need();
+    const m = this.get(id);
+    port = Math.round(Number(port));
+    if (!(port >= 1 && port <= 65535)) fail("Pick a port from 1 to 65535.");
+    this.fwds ||= new Map();
+    const key = `${m.id}:${port}`;
+    let f = this.fwds.get(key);
+    if (!f) {
+      f = { key, id: m.id, port, owners: new Set(), local: 0, proc: null, state: "starting", error: null, since: null, backoff: 2000, timer: null, stopped: false };
+      this.fwds.set(key, f);
+      f.ready = this.startForward(f);
+    }
+    f.owners.add(String(owner));
+    return this.forwardView(f);
+  }
+  release(id, port, owner = "aegis") {
+    const f = this.fwds?.get(`${id}:${Math.round(Number(port))}`);
+    if (!f) return false;
+    f.owners.delete(String(owner));
+    if (f.owners.size) return true;
+    f.stopped = true; clearTimeout(f.timer);
+    try { f.proc?.kill("SIGTERM"); } catch { /* gone */ }
+    this.fwds.delete(f.key);
+    this.log("fleet: no longer forwarding", f.key);
+    return true;
+  }
+  releaseAll(owner) { for (const f of [...(this.fwds?.values() || [])]) if (f.owners.has(String(owner))) this.release(f.id, f.port, owner); }
+  forwards() { return [...(this.fwds?.values() || [])].map((f) => this.forwardView(f)); }
+  forwardView(f) { return { machine: f.id, port: f.port, host: "127.0.0.1", local: f.local || null, state: f.state, error: f.error, since: f.since, owners: [...f.owners] }; }
+  async startForward(f) {
+    if (f.stopped) return;
+    // a free port here (asked of the kernel), kept for this forward's whole life
+    if (!f.local) f.local = await new Promise((ok, no) => { const srv = createServer(); srv.once("error", no); srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => ok(p)); }); });
+    let m;
+    try { m = this.get(f.id); } catch { f.state = "error"; f.error = "That machine was forgotten."; return; }
+    if (!existsSync(this.keyPath())) await this.publicKey();
+    const args = [...this.opts(), "-o", "ExitOnForwardFailure=yes", "-N", "-L", `127.0.0.1:${f.local}:127.0.0.1:${f.port}`,
+                  ...this.proxyOpts(m), "-p", String(m.port), `${m.user}@${m.address}`];
+    const p = spawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
+    f.proc = p; f.state = "starting"; f.error = null;
+    let err = "";
+    p.stderr.on("data", (c) => { err = (err + c).slice(-2000); });
+    // up once the local port answers
+    const t0 = Date.now();
+    const poll = setInterval(() => {
+      const c = createConnection(f.local);
+      c.once("connect", () => { c.destroy(); clearInterval(poll); if (f.proc === p) { f.state = "up"; f.since = Date.now(); f.backoff = 2000; this.log("fleet: forwarding", `${m.name}:${f.port}`, "to 127.0.0.1:" + f.local); } });
+      c.once("error", () => { c.destroy(); if (Date.now() - t0 > 30000) clearInterval(poll); });
+    }, 500);
+    p.on("error", (e) => { err = e.message; });
+    p.on("close", (code) => {
+      clearInterval(poll);
+      if (f.proc !== p) return;
+      f.proc = null;
+      if (f.stopped) return;
+      f.state = "down"; f.error = sshWhy(err) || err.trim().split("\n").pop() || `ssh ended (${code})`;
+      // through its agent next time when straight there failed and it has one online
+      if (code === 255 && !this.viaAgent(m) && this.agents?.online(m.id)) { try { this.patch(m.id, { via: "agent" }); } catch { /* */ } }
+      f.timer = setTimeout(() => this.startForward(f).catch(() => {}), f.backoff);
+      f.backoff = Math.min(f.backoff * 2, 60000);
+    });
+  }
+  stopForwards() { for (const f of [...(this.fwds?.values() || [])]) { f.owners.clear(); f.owners.add("x"); this.release(f.id, f.port, "x"); } }
 
   // ---------------- leaving
   // Takes our key off the machine when it still answers, then drops it.

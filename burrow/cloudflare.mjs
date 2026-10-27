@@ -34,6 +34,8 @@ const QUICK_URL_RE = /https:\/\/([a-z0-9-]+\.trycloudflare\.com)/;
 export const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
 export function findCloudflared(configured, home) {
+  // test runs: no cloudflared at all (a scratch gate must never open a public quick tunnel)
+  if (process.env.AEGIS_NO_CLOUDFLARED === "1") return null;
   const candidates = [configured, home && join(home, "bin", "cloudflared"),
     ...String(process.env.PATH || "").split(delimiter).map((d) => d && join(d, "cloudflared")),
     "/usr/local/bin/cloudflared", "/usr/bin/cloudflared"].filter(Boolean);
