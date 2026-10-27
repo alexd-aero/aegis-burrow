@@ -1350,7 +1350,7 @@ async function tunnelForm(edit, preset, opts = {}) {
       ${edit ? `<div class="field"><span>Blocked file types <span class="faint">(optional)</span></span>
         <div class="row" style="gap:8px"><input class="input mono grow" id="fBlock" placeholder="gif, mp4, video/*" spellcheck="false" autocapitalize="none" value="${h((t.blockTypes?.list || []).join(", "))}">
           <select class="input" id="fBlockDir" style="max-width:160px">${[["both", "both ways"], ["out", "to visitors"], ["in", "from visitors"]].map(([v, l]) => `<option value="${v}" ${(t.blockTypes?.dir || "both") === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-        <span class="faint" style="font-size:12px">Extensions or types: they don't get through (downloads and images to visitors, uploads from them).</span></div>` : ""}
+        <span class="faint" style="font-size:12px">Extensions or types: they don't get through (downloads and images to visitors, uploads from them). Pages, scripts, styles, data and fonts always do.</span></div>` : ""}
       <details class="adv" id="fAdv" ${st.mode === "port" ? "" : "hidden"}><summary>Advanced</summary>
         <div class="row">
           <label class="field grow"><span>Target speaks</span><select class="input" id="fScheme">

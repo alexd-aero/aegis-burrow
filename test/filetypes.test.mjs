@@ -68,3 +68,15 @@ test("through a tunnel: blocked out and in, everything else passes", async () =>
     assert.equal((await fetch(base + "/cat.gif")).status, 200, "cleared");
   } finally { gate.close(); app.close(); tm.stop(); }
 });
+
+test("pages, scripts, styles, data and fonts always get through, even from a saved list that names them", () => {
+  assert.deepEqual(cleanBlock("html, js, css, json, text/html, gif, */*"), { list: ["gif"], dir: "both" });
+  assert.equal(cleanBlock("html, css"), null);
+  const saved = { list: ["html", "js", "css", "json", "text/*", "application/*", "font/*", "gif"], dir: "both" };   // as 2.32.0 stored it
+  for (const [path, type] of [["/", "text/html; charset=utf-8"], ["/app.js", "text/javascript"], ["/s.css", "text/css"], ["/api/me", "application/json"],
+    ["/f.woff2", "font/woff2"], ["/login", "application/x-www-form-urlencoded"], ["/index.html", ""], ["/x", "application/vnd.api+json"]]) {
+    assert.equal(blockedBy(saved, { path, type }), null, `${path} ${type}`);
+  }
+  assert.equal(blockedBy(saved, { path: "/cat.gif" }), "gif");
+  assert.equal(blockedBy(saved, { path: "/a.zip", type: "application/zip" }), "application/*");
+});

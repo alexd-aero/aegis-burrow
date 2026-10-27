@@ -27,6 +27,15 @@ const MIME = {
   txt: ["text/plain"], csv: ["text/csv"], xml: ["application/xml", "text/xml"], wasm: ["application/wasm"], swf: ["application/x-shockwave-flash"],
   woff: ["font/woff"], woff2: ["font/woff2"], ttf: ["font/ttf"], otf: ["font/otf"],
 };
+// What every site is made of: pages, styles, scripts, data, fonts. These always
+// get through, whatever the list says (blocking them takes the whole site down,
+// and the gate's own sign-in with it), and a list that names them skips them.
+const CORE_EXT = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "cjs", "json", "map", "webmanifest", "woff", "woff2", "ttf", "otf", "txt", "xml"]);
+const CORE_MIME = new Set(["text/html", "application/xhtml+xml", "text/css", "text/javascript", "application/javascript", "application/x-javascript",
+  "application/json", "application/manifest+json", "text/plain", "text/xml", "application/xml", "font/woff", "font/woff2", "font/ttf", "font/otf",
+  "application/x-www-form-urlencoded", "text/event-stream", "application/grpc", "application/x-ndjson"]);
+const isCoreMime = (m) => CORE_MIME.has(m) || m.startsWith("font/") || m.endsWith("+json");
+export const isCore = (x) => (x.includes("/") ? isCoreMime(x) : CORE_EXT.has(x));
 const EXT_RE = /^[a-z0-9][a-z0-9+-]{0,15}$/, MIME_RE = /^[a-z]+\/(?:\*|[a-z0-9][a-z0-9.+-]{0,80})$/;
 
 // what people type -> {list, dir} (or null: nothing blocked)
@@ -37,6 +46,7 @@ export function cleanBlock(v) {
   for (let x of raw) {
     x = String(x || "").trim().toLowerCase().replace(/^\*?\./, "");
     if (!x) continue;
+    if (isCore(x) || x === "*/*") continue;          // always let through (see CORE_*)
     if (!EXT_RE.test(x) && !MIME_RE.test(x)) throw new Error(`"${x}" isn't a file type: use an extension like gif, or a type like image/gif or video/*.`);
     if (!list.includes(x)) list.push(x);
   }
@@ -55,7 +65,11 @@ export function blockedBy(rules, { path, type, name }) {
   let p = "";
   try { p = decodeURIComponent(String(path || "").split("?")[0]); } catch { p = String(path || "").split("?")[0]; }
   const exts = [extOf(p), extOf(name)].filter(Boolean), mime = mimeOf(type);
+  // a page, style, script, data or font is never stopped (a saved list from 2.32.0 may still name them)
+  if (mime && isCoreMime(mime)) return null;
+  if (!mime && exts.length && exts.every((e) => CORE_EXT.has(e))) return null;
   for (const r of rules.list) {
+    if (isCore(r)) continue;
     if (r.includes("/")) {
       if (mime && (r.endsWith("/*") ? mime.startsWith(r.slice(0, -1)) : mime === r)) return r;
       // a MIME rule also stops the extensions it's known by (image/gif stops x.gif)
