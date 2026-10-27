@@ -1510,3 +1510,22 @@ textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-botto
 .root-cmd { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); }
 .root-cmd code { flex: 1; min-width: 0; font: 13px var(--mono); color: var(--text); overflow-wrap: anywhere; user-select: all; }
 .root-wait { display: flex; align-items: center; gap: 8px; }
+
+/* Settings → Updates → Versions */
+.vers { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
+.vers-h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.vers-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+.vers-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 12px; }
+.vers-row:hover { background: rgba(255,255,255,.03); }
+.vers-row.cur { background: rgba(var(--upd-rgb), .08); }
+.vers-row.cur .vers-v { color: var(--upd-hi); }
+.vers-row.broken .vers-v { color: var(--err, #ff6b6b); text-decoration: line-through; }
+.vers-v { min-width: 72px; font-weight: 700; font-size: 13px; }
+.vers-row .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vers-held { color: var(--warn, #f2c14e); font-weight: 600; }
+.vers-alert { padding: 10px 14px; border-radius: 12px; background: rgba(255, 90, 82, .1); border: 1px solid rgba(255, 90, 82, .35); font-size: 13.5px; }
+.vers-hold { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 12px; background: rgba(242, 193, 78, .08); border: 1px solid rgba(242, 193, 78, .3); font-size: 13.5px; }
+.vers-busy { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+.vers-more summary { cursor: pointer; font-size: 13.5px; color: var(--muted); padding: 4px 0; }
+.vers-more[open] summary { margin-bottom: 6px; }
+@media (max-width: 600px) { .vers-row { flex-wrap: wrap; } .vers-row .grow { white-space: normal; flex-basis: 60%; } }

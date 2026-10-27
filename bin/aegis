@@ -10,6 +10,8 @@
 #   aegis domain [link | rename NAME | unlink]
 #   aegis passwd                     a new login (every browser is signed out)
 #   aegis update [--check] | auto on|off
+#   aegis versions                   the versions kept here, and which is held back
+#   aegis rollback [VERSION]         back to the version before (or that one); works with the gate down
 #   aegis upgrade                    copy this checkout's code over the installed one, restart
 #   aegis uninstall [--purge]        stop and remove; --purge also deletes data and the login
 #   aegis termix install | remove    Termix in Docker, behind the same login
@@ -948,6 +950,85 @@ cmd_auto() {
     *) die "aegis update auto on | off" ;;
   esac
 }
+# ------------------------------------------------------------- versions
+# The versions before are kept whole in $AEGIS_HOME/versions/<v>/ (aegis/updater.mjs).
+kept_list() {  # "version<TAB>dir<TAB>when" newest first, whole ones only
+  "$NODE" -e '
+    const fs = require("fs"), p = require("path"), d = process.argv[1];
+    let out = [];
+    try { for (const n of fs.readdirSync(d)) {
+      if (n.startsWith(".")) continue;
+      const dir = p.join(d, n);
+      let v = null, at = 0, why = "";
+      try { v = JSON.parse(fs.readFileSync(p.join(dir, "package.json"), "utf8")).version; } catch {}
+      try { const k = JSON.parse(fs.readFileSync(p.join(dir, ".kept.json"), "utf8")); at = k.at || 0; why = k.why || ""; } catch {}
+      if (!at) try { at = fs.statSync(dir).mtimeMs; } catch {}
+      if (v && fs.existsSync(p.join(dir, "aegis", "server.mjs"))) out.push({ v, n, at, why });
+    } } catch {}
+    out.sort((a, b) => b.at - a.at);
+    for (const x of out) console.log([x.v, x.n, new Date(x.at).toISOString().slice(0, 16).replace("T", " "), x.why].join("\t"));
+  ' "$AEGIS_HOME/versions"
+}
+# settings the gate changes live in data/state.json (over config.json): aegis/config.mjs
+hold_of() { "$NODE" -e 'const fs = require("fs"); let h = null; for (const f of process.argv.slice(1)) { try { const u = (JSON.parse(fs.readFileSync(f, "utf8")).updates || {}); if ("hold" in u) h = u.hold; } catch {} } if (h && h.version) console.log(h.version);' "$AEGIS_HOME/config.json" "$AEGIS_HOME/data/state.json"; }
+cmd_versions() {
+  need_installed
+  local cur hold line; cur="$(app_version)"; hold="$(hold_of)"
+  title "Versions" "$AEGIS_HOME"
+  printf '  %s●%s %-10s %s\n' "$GRN" "$NC" "v$cur" "running now"
+  while IFS=$'\t' read -r v n when why; do
+    [ -n "$v" ] || continue
+    case "$n" in *-broken) printf '  %s●%s %-10s %s\n' "$RED" "$NC" "v$v" "didn't start · kept aside · $when" ;;
+                 *) printf '  %s○%s %-10s %s\n' "$DIM" "$NC" "v$v" "kept · $when${why:+ · $why}" ;; esac
+  done < <(kept_list)
+  [ -n "$hold" ] && say "v$hold is held back from auto-update (aegis rollback put it aside)"
+  echo; dim "  aegis rollback [VERSION]   back to one of these (any older release too, while the gate runs)"
+}
+cmd_rollback() {
+  need_installed
+  local want="${1:-}" cur out dir v n
+  cur="$(app_version)"
+  if [ -z "$want" ]; then
+    while IFS=$'\t' read -r v n _; do case "$n" in *-broken) continue ;; esac; want="$v"; break; done < <(kept_list)
+    [ -n "$want" ] || die "no earlier version is kept in $AEGIS_HOME/versions; name one to fetch it from GitHub: aegis rollback 2.31.0"
+  fi
+  [ "$want" != "$cur" ] || die "v$want is the one running"
+  if running; then
+    # the gate does it: a kept copy, or that release from GitHub
+    interactive && { confirm "Go back from v$cur to v$want? It restarts for a few seconds; everything you set up is kept, and v$cur is held back from auto-update." y || return 0; }
+    spin_start "putting v$want in place"
+    out="$(burrow_call POST /update/rollback "{\"version\":\"$want\"}")" || { spin_stop; die "$out"; }
+    spin_stop; ok "v$want is in place"
+    if [ "$(service_scope)" = manual ]; then warn "restart it with whatever runs it to finish"; return 0; fi
+    spin_start "restarting"
+    if cli update-wait "$want" "$cur"; then spin_stop; ok "v$want is running"; else spin_stop; warn "not answering yet; see: aegis status"; fi
+    return 0
+  fi
+  # the gate is down (maybe that's why): two renames, no network needed
+  dir=""
+  while IFS=$'\t' read -r v n _; do [ "$v" = "$want" ] && case "$n" in *-broken) ;; *) dir="$AEGIS_HOME/versions/$n"; break ;; esac; done < <(kept_list)
+  [ -n "$dir" ] || die "v$want isn't kept here, and the gate isn't running to fetch it. Kept: $(kept_list | cut -f1 | tr '\n' ' ')"
+  interactive && { confirm "The gate isn't answering. Put v$want back in place of v$cur?" y || return 0; }
+  local aside="$AEGIS_HOME/versions/$cur"
+  [ -n "$cur" ] && { rm -rf "$aside.tmp"; [ -e "$aside" ] && mv "$aside" "$aside.tmp"; }
+  mv "$dir" "$AEGIS_HOME/app.rollback" || die "couldn't move v$want"
+  if ! mv "$APP" "${aside:-$AEGIS_HOME/versions/unknown}"; then mv "$AEGIS_HOME/app.rollback" "$dir"; die "couldn't move v$cur aside"; fi
+  mv "$AEGIS_HOME/app.rollback" "$APP"
+  rm -rf "$aside.tmp"
+  printf '{"version":"%s","at":%s000,"why":"aegis rollback"}' "$cur" "$(date +%s)" >"$aside/.kept.json" 2>/dev/null || true
+  "$NODE" -e '
+    const fs = require("fs"), [f, b, held, to] = process.argv.slice(1);
+    let c = {}; try { c = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+    try { c.updates = { ...(c.updates || {}), hold: { version: held, at: Date.now() } };
+          fs.writeFileSync(f + ".tmp", JSON.stringify(c, null, 2)); fs.renameSync(f + ".tmp", f); } catch {}
+    try { fs.writeFileSync(b, JSON.stringify({ state: "ok", from: held, to, at: Date.now(), why: "aegis rollback" })); } catch {}
+  ' "$AEGIS_HOME/data/state.json" "$AEGIS_HOME/data/boot.json" "$cur" "$want"
+  ok "v$want is in place; v$cur is kept in versions/ and held back from auto-update"
+  if [ "$(service_scope)" = manual ]; then warn "start it with whatever runs it"; return 0; fi
+  spin_start "starting v$want"; svc restart >/dev/null 2>&1 || svc start >/dev/null 2>&1 || true; spin_stop
+  if wait_healthy; then ok "v$want is running"; else warn "not answering yet; see: aegis logs"; fi
+}
+
 # not running: the newest code from GitHub, installed with its own bin/aegis
 update_offline() {
   local repo="${AEGIS_REPO:-alexd-aero/aegis-burrow}" cur latest tmp src
@@ -1052,6 +1133,8 @@ usage() {
     aegis passwd                 a new login (every browser signs in again)
     aegis update [--check]       the newest version from GitHub
     aegis update auto on|off     install new versions by themselves
+    aegis versions               the versions kept here (the ones before an update)
+    aegis rollback [VERSION]     back to the version before, or that one (works with the gate down)
     aegis start | stop | restart | logs [-f]
 
   ${B}Burrow, the tunnel engine${NC}  (also: burrow …)
@@ -1141,6 +1224,8 @@ case "$1" in
   install) shift; cmd_install "$@" ;;
   upgrade) shift; cmd_install "$@" ;;
   update) shift; need_installed; cmd_update "$@" ;;
+  versions) need_installed; cmd_versions ;;
+  rollback|downgrade) shift; need_installed; cmd_rollback "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   start|stop|restart) need_installed; svc "$1"; [ "$1" = stop ] || wait_healthy || die "not answering yet; see: aegis logs"; ok "$1 done" ;;
   status) shift; cmd_status "$@" ;;

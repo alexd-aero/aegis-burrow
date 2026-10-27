@@ -468,7 +468,41 @@ function updatesBody() {
         <p class="muted small">Checks GitHub every 30 minutes (and whenever a page opens) and installs a new version as soon as it finds one. Aegis restarts for a few seconds; your login, domain, tunnels and addons are kept.
         ${u && u.scope === "manual" ? "<br><b>This copy runs under your own supervisor</b>: it installs, and the new version starts the next time that restarts it." : ""}</p></div>
       <label class="switch" title="${auto ? "On" : "Off"}"><input type="checkbox" id="autoUpd" ${auto ? "checked" : ""} aria-label="Update by itself"><i></i></label>
+    </div>
+    ${versionsBody()}`;
+}
+// Versions: the ones kept here (go back in a moment, no network), older releases
+// from GitHub, and the one held back from auto-update
+function versionsBody() {
+  const v = S.vers;
+  if (!v) return `<div class="vers"><div class="vers-h"><b>Versions</b><span class="faint small"><i class="spin"></i> loading…</span></div></div>`;
+  if (v.error && !v.kept) return `<div class="vers"><div class="vers-h"><b>Versions</b><span class="err-msg small">${h(v.error)}</span></div></div>`;
+  const b = v.boot, recentBack = b && b.state === "rolled-back" && Date.now() - b.at < 7 * 86400e3;
+  const kept = (v.kept || []).filter((k) => !k.broken), broken = (v.kept || []).filter((k) => k.broken);
+  const busy = S.versBusy;
+  const row = (k, kind) => `<div class="vers-row ${kind}">
+      <span class="vers-v mono">v${h(k.version)}</span>
+      <span class="grow faint small">${kind === "cur" ? "running now" : kind === "broken" ? `didn't start · kept aside ${h(ago(k.at))}` : `kept ${h(ago(k.at))}${k.why ? ` · ${h(k.why)}` : ""}`}${v.hold?.version === k.version ? ' · <b class="vers-held">held back</b>' : ""}</span>
+      ${kind === "kept" ? `<button class="uc-btn" data-act="ver-go" data-v="${h(k.version)}" ${busy ? "disabled" : ""}>${verNewer(k.version, v.current) ? "Switch" : "Go back"}</button>` : ""}
     </div>`;
+  const rel = (v.releases || []).filter((r) => !r.kept).slice(0, 12);
+  return `<div class="vers">
+    <div class="vers-h"><b>Versions</b><span class="faint small">if an update misbehaves, go back; the version you leave is held back from auto-update</span></div>
+    ${recentBack ? `<div class="vers-alert"><b>v${h(b.failed || b.from)} didn't start</b>, so Aegis went back to v${h(b.to)} by itself ${h(ago(b.at))}${b.why ? ` (it ${h(b.why)})` : ""}.</div>` : ""}
+    ${v.hold ? `<div class="vers-hold"><span class="grow">v${h(v.hold.version)} is held back: auto-update waits for a version newer than it.</span><button class="uc-btn" data-act="ver-unhold">Allow it again</button></div>` : ""}
+    ${busy ? `<div class="vers-busy"><span class="uc-spin"></span>${h(busy)}</div>` : ""}
+    <div class="vers-list">${row({ version: v.current }, "cur")}${kept.map((k) => row(k, "kept")).join("")}${broken.map((k) => row(k, "broken")).join("")}</div>
+    ${kept.length ? "" : '<p class="faint small" style="margin:6px 0 0">No earlier version is kept here yet: the one before is kept at each update from now on. Older releases can still come from GitHub, below.</p>'}
+    ${rel.length ? `<details class="vers-more"><summary>Other releases on GitHub <span class="faint small">(the last ${rel.length})</span></summary>
+      <div class="vers-list">${rel.map((r) => `<div class="vers-row"><span class="vers-v mono">v${h(r.version)}</span><span class="grow small" title="${h(r.title)}">${h(r.title)} <span class="faint">· ${h(r.date ? ago(r.date) : "")}</span></span>
+        <button class="uc-btn" data-act="ver-go" data-v="${h(r.version)}" ${busy ? "disabled" : ""}>${r.newer ? "Install" : "Go back"}</button></div>`).join("")}</div></details>` : ""}
+    <p class="faint small" style="margin:8px 0 0">With the gate down: <span class="mono">aegis rollback</span> in a terminal on this machine. A new version that doesn't start puts the one before back by itself.</p>
+  </div>`;
+}
+const verNewer = (a, b) => { const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
+async function loadVersions() {
+  try { S.vers = await api("/__gate/api/update/versions"); } catch (e) { S.vers = { error: e.message }; }
+  render();
 }
 function logItem(e, kind) {
   const sha = e.short ? (e.url ? `<a href="${h(e.url)}" target="_blank" rel="noopener" title="See the commit"><span class="uc-sha">${h(e.short)}</span></a>` : `<span class="uc-sha">${h(e.short)}</span>`) : "";
@@ -995,6 +1029,7 @@ async function load() {
     S.tuns = S.doms ? (await api("/__gate/api/tunnels").catch(() => ({ tunnels: [] }))).tunnels || [] : [];
     S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
+    if (S.vers === undefined) { S.vers = null; loadVersions(); }
     loadLog(S.log);
   } catch (e) { toast(e.message); }
   render();
@@ -1027,7 +1062,27 @@ document.addEventListener("click", async (e) => {
       load();
     } else if (act === "cancel-login") { await post("/__gate/api/cf/cancel"); load(); }
     else if (act === "forget") { await post("/__gate/api/cf/forget"); load(); }
-    else if (act === "upd-check") checkUpdates(true);
+    else if (act === "upd-check") { checkUpdates(true); loadVersions(); }
+    else if (act === "ver-unhold") { S.vers = await post("/__gate/api/update/hold", { version: null }); render(); toast("Auto-update may install it again"); }
+    else if (act === "ver-go") {
+      const v = el.dataset.v, cur = S.vers?.current, down = verNewer(cur, v);
+      if (!confirm(down ? `Go back from v${cur} to v${v}? Aegis restarts for a few seconds; your login, domain, tunnels and addons are kept. v${cur} is held back from auto-update until a newer version comes.`
+                        : `Install v${v}? Aegis restarts for a few seconds; everything you set up is kept.`)) return;
+      S.versBusy = `Putting v${v} in place…`; render();
+      const before = cur;
+      try {
+        const r = await post("/__gate/api/update/rollback", { version: v });
+        if (r.job?.state === "error") throw new Error(r.job.error);
+        if (r.scope === "manual") { S.versBusy = `v${v} is in place. Restart Aegis × Burrow with whatever runs it to finish.`; render(); return; }
+        S.versBusy = `v${v} is in place. Restarting…`; render();
+        const t0 = Date.now();
+        for (;;) {
+          await new Promise((ok) => setTimeout(ok, 1500));
+          try { const hv = await fetch("/__gate/health", { cache: "no-store" }).then((x) => x.json()); if (hv.version && hv.version !== before) { location.reload(); return; } } catch { /* restarting */ }
+          if (Date.now() - t0 > 120000) { S.versBusy = "It is taking a while to come back. Reload in a minute, or run: aegis status"; render(); return; }
+        }
+      } catch (ex) { S.versBusy = null; toast(ex.message); render(); }
+    }
     else if (act === "search") searchOpen();
     else if (act === "upd-go") {
       if (!confirm(`Install Aegis × Burrow v${S.upd.latest}? It restarts for a few seconds; everything you set up is kept.`)) return;

@@ -224,8 +224,17 @@ function addonArgs(rest) {
   return o;
 }
 async function addonOp(op, id, ...rest) {
-  if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check ID | action ID ACTION] [--here]"); return 2; }
+  if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check|versions|rollback ID | action ID ACTION] [--here]"); return 2; }
   if (op === "check") { const r = await call("POST", `/addons/${id}/check`, "{}"); out(JSON.stringify(r)); return 0; }
+  // the versions kept before its updates: aegis addons rollback ID ['{"version":"1.2.0"}'] puts one back
+  if (op === "versions") {
+    const v = await call("GET", `/addons/${id}/versions`);
+    out(`  ${green("●")} ${bold(v.name)} ${v.current}  ${dim("running now")}`);
+    for (const k of v.kept) out(`  ${dim("○")} ${String(k.version).padEnd(10)} ${dim(`kept ${new Date(k.at).toISOString().slice(0, 16).replace("T", " ")}`)}`);
+    if (!v.kept.length) out(dim("  nothing kept yet: the version before is kept at each update from now on"));
+    if (v.hold) out(dim(`  rolled back from ${v.hold.version}`));
+    return 0;
+  }
   if (op === "add") { const r = await call("POST", "/addons/add", JSON.stringify({ source: id })); out(green(`  ✓ added ${r.addon?.id || ""}: install it with aegis addons install ${r.addon?.id || "ID"}`)); return 0; }
   const a = addonArgs(rest);
   // the sudo password, from bin/aegis (ask_secret) on stdin: never on a command line

@@ -585,7 +585,7 @@ function adCard(a) {
   return `<article class="card lit adc${a.installed ? " on" : ""}${upd ? " upd" : ""}">
     <div class="t-top">
       <div class="fav lg">${a.logo ? `<img src="${h(a.logo)}" alt="">` : h(a.name[0])}</div>
-      <div class="grow" style="min-width:0"><div class="t-name">${h(a.name)} <span class="faint mono small">v${h(a.installed && a.installed_version ? a.installed_version : a.version)}</span>${upd ? ' <span class="newchip">update</span>' : ""}${a.root ? ` ${rootChip(a.root.reason)}` : ""}</div>
+      <div class="grow" style="min-width:0"><div class="t-name">${h(a.name)} <span class="faint mono small">v${h(a.installed && a.installed_version ? a.installed_version : a.version)}</span>${a.hold ? ` <span class="faint small" title="Rolled back from v${h(a.hold.version)}">↩ from v${h(a.hold.version)}</span>` : ""}${upd ? ' <span class="newchip">update</span>' : ""}${a.root ? ` ${rootChip(a.root.reason)}` : ""}</div>
         <div class="t-url"><span class="mono faint small" title="${h(a.source)}">${h(shortSrc(a.source))}</span></div></div>
       ${adState(a)}
     </div>
@@ -606,6 +606,7 @@ function adCard(a) {
         ${a.installed ? a.actions.map((x) => `<button data-act="ad-action" data-id="${h(a.id)}" data-action="${h(x.id)}" data-confirm="${h(x.confirm || "")}">${h(x.label)}</button>`).join("") : ""}
         ${a.installed ? `<button data-act="ad-rescue" data-id="${h(a.id)}">Start it and write a report</button><button data-act="ad-reports" data-id="${h(a.id)}">Start reports</button>` : ""}
         <button data-act="ad-check" data-id="${h(a.id)}">Check for updates</button>
+        ${a.installed && a.kept?.length ? a.kept.map((k, i) => `<button data-act="ad-rollback" data-id="${h(a.id)}" data-key="${h(k.key)}" data-v="${h(k.version)}">${i ? "" : "Roll back to "}${i ? `…or v${h(k.version)}` : `v${h(k.version)}`} <span class="faint small">kept ${h(ago(k.at))}</span></button>`).join("") : ""}
         ${a.settings.length ? `<button data-act="ad-install" data-id="${h(a.id)}">Settings and reinstall</button>` : ""}
         ${a.links.map((l) => `<a href="${h(l.url)}" target="_blank" rel="noopener">${h(l.label)}</a>`).join("")}
         ${a.installed ? `<button class="danger" data-act="ad-uninstall" data-id="${h(a.id)}">Uninstall</button>` : `<button class="danger" data-act="ad-remove" data-id="${h(a.id)}">Remove from the list</button>`}
@@ -726,7 +727,7 @@ async function jobRun(id, op, body, opts = {}) {
   } catch (e) { toast(e.message); return; }
   jobFollow(job, `/__gate/api/addons/jobs/${job.id}`, (v) => {
     S.scan = null; S.addons = null;
-    if (op === "update" && v.state === "done") afterAddonUpdate(id);
+    if ((op === "update" || op === "rollback") && v.state === "done") afterAddonUpdate(id);
   }, true);
 }
 
@@ -1673,6 +1674,12 @@ document.addEventListener("click", async (e) => {
     else if (act === "ad-add") addAddon(el.dataset.src, el);
     else if (act === "ad-install") installForm(el.dataset.id);
     else if (act === "ad-update") jobRun(el.dataset.id, "update", {});
+    else if (act === "ad-rollback") {
+      const a = (S.addons || []).find((x) => x.id === el.dataset.id);
+      if (!confirm(`Roll ${a?.name || "this addon"} back to v${el.dataset.v}? Its code from then comes back and its setup runs again; its data and settings are kept. The version it has now is kept too, so you can come back.`)) return;
+      el.closest("details")?.removeAttribute("open");
+      jobRun(el.dataset.id, "rollback", { version: el.dataset.key });
+    }
     else if (act === "ad-rescue") { closeModal(); jobRun(el.dataset.id, "rescue", {}); }
     else if (act === "ad-report") showReport(el.dataset.id, el.dataset.file);
     else if (act === "ad-reports") reportList(el.dataset.id);

@@ -460,6 +460,8 @@ class Job {
 }
 
 // ------------------------------------------------------------------ the host
+const KEEP_VERSIONS = 3;          // an addon's checkouts before its last updates, for Roll back
+
 export class Addons {
   // dir:      where checkouts and data live (AEGIS_HOME/addons)
   // registry: the JSON file that remembers them (DATA/addons.json)
@@ -584,7 +586,7 @@ export class Addons {
   // or {job, done: true} when it needed none (an update of an addon that isn't installed…).
   async terminalRun(id, b = {}) {
     const op = b.op, rec = this.get(id);
-    if (!["install", "update", "uninstall", "action"].includes(op)) fail("op is install, update, uninstall or action");
+    if (!["install", "update", "uninstall", "action", "rollback"].includes(op)) fail("op is install, update, uninstall, rollback or action");
     if (!this.rootNeed(rec, op, b.action)) fail(`${rec.manifest.name} doesn't need root to ${op === "action" ? `run ${b.action}` : op}: it runs in Aegis (aegis addons ${op} ${id}${op === "action" ? ` ${b.action}` : ""}).`);
     const T = { token: randomBytes(32).toString("hex"), expires: Date.now() + this.terminalTtl, spec: null, closed: false };
     const ready = new Promise((r) => { T.ready = r; });
@@ -735,6 +737,7 @@ export class Addons {
     // the update runs the NEW version's script: its manifest, as the last check read it
     if (op === "update") return rec.installed ? (typeof rec.remote?.root === "string" ? rec.remote.root : why) : "";
     if (op === "uninstall") return rec.installed && m.scripts.uninstall ? why : "";
+    if (op === "rollback") return rec.installed ? why : "";
     if (op === "action") { const a = m.actions.find((x) => x.id === actionId); return a?.root ? why || `"${a.label}" needs administrator access` : ""; }
     return "";
   }
@@ -791,6 +794,7 @@ export class Addons {
       if (op === "install") return this.install(id, b.settings, { root: grant, terminal });
       if (op === "update") return this.update(id, { root: grant, terminal });
       if (op === "uninstall") return this.uninstall(id, b.keep_data !== false, { root: grant, terminal });
+      if (op === "rollback") return this.rollback(id, b.version || null, { root: grant, terminal });
       if (op === "action") return this.action(id, b.action, { root: grant, terminal });
       fail(`unknown operation ${op}`);
     } catch (e) { if (grant) this.root.drop(grant.token); throw e; }
@@ -856,13 +860,12 @@ export class Addons {
         rmSync(join(dest, "repo.old"), { recursive: true, force: true });
         if (existsSync(join(dest, "repo"))) renameSync(join(dest, "repo"), join(dest, "repo.old"));
         renameSync(join(tmp, "repo"), join(dest, "repo"));
-        // run here: the old copy goes now. Run in a terminal: it stays until that run
-        // succeeds, and comes back (code and registry) when it doesn't
-        if (!terminal) rmSync(join(dest, "repo.old"), { recursive: true, force: true });
+        // the old copy is kept (versions/, for Roll back); run in a terminal, it
+        // also comes back (code and registry) when that run doesn't succeed
       } finally { rmSync(tmp, { recursive: true, force: true }); }
       job.log(`${m.name} ${rec.manifest.version} -> ${m.version}${commit ? ` (${commit.slice(0, 10)})` : ""}`);
       const before = { manifest: rec.manifest, commit: rec.commit, updated: rec.updated, remote: rec.remote || null };
-      let cur = this.patch(id, { manifest: m, commit, updated: Date.now(), remote: null });
+      let cur = this.patch(id, { manifest: m, commit, updated: Date.now(), remote: null, hold: null });
       const res = { id, name: m.name, version: m.version, ran: null };
       const dest = this.addonDir(id);
       try {
@@ -881,11 +884,81 @@ export class Addons {
           renameSync(join(dest, "repo.old"), join(dest, "repo"));
           this.patch(id, before);
           job.log(`${before.manifest.name} ${before.manifest.version} is back in place: nothing changed.`, "err");
+        } else {
+          this.keepVersion(id, join(dest, "repo.old"), before);
+          job.log(`${before.manifest.name} ${before.manifest.version} is kept: Roll back puts it back.`, "err");
         }
         throw e;
       }
-      rmSync(join(dest, "repo.old"), { recursive: true, force: true });
+      this.keepVersion(id, join(dest, "repo.old"), before);
       return res;
+    }, grant, terminal);
+  }
+
+  // ---------------- versions: the checkouts before each update, for Roll back
+  // <addon>/versions/<version>-<time>/repo + kept.json (the registry as it was)
+  keepVersion(id, repo, before) {
+    try {
+      if (!existsSync(repo)) return;
+      const v = before.manifest?.version || "0.0.0";
+      const dir = join(this.addonDir(id), "versions", `${v}-${Date.now().toString(36)}`);
+      mkdirSync(dir, { recursive: true });
+      renameSync(repo, join(dir, "repo"));
+      writeFileSync(join(dir, "kept.json"), JSON.stringify({ version: v, at: Date.now(), before }));
+      for (const x of this.keptVersions(id).slice(KEEP_VERSIONS)) rmSync(join(this.addonDir(id), "versions", x.dir), { recursive: true, force: true });
+    } catch { rmSync(repo, { recursive: true, force: true }); }
+  }
+  keptVersions(id) {
+    const root = join(this.addonDir(id), "versions");
+    let names = [];
+    try { names = readdirSync(root); } catch { return []; }
+    return names.map((n) => {
+      try {
+        const k = JSON.parse(readFileSync(join(root, n, "kept.json"), "utf8"));
+        return existsSync(join(root, n, "repo")) ? { dir: n, version: k.version, at: k.at, commit: k.before?.commit || null } : null;
+      } catch { return null; }
+    }).filter(Boolean).sort((a, b) => b.at - a.at);
+  }
+  versionsView(id) {
+    const rec = this.get(id);
+    return { id, name: rec.manifest.name, current: rec.installed_version || rec.manifest.version, commit: rec.commit || null, hold: rec.hold || null,
+             kept: this.keptVersions(id).map(({ dir, ...k }) => ({ ...k, key: dir })) };
+  }
+
+  // Back to a kept version (the newest, or `key`): its checkout and its registry
+  // entry come back, its update (or install) script runs again, and the version
+  // left is noted (hold) until the next update.
+  rollback(id, key, { root: grant = null, terminal = null } = {}) {
+    const rec = this.get(id);
+    const kept = this.keptVersions(id);
+    const pick = key ? kept.find((k) => k.dir === key || k.version === key) : kept[0];
+    if (!pick) fail(`${rec.manifest.name} has no earlier version kept here (one is kept at each update from now on).`);
+    return this.startJob(id, "rollback", `Rolling ${rec.manifest.name} back to ${pick.version}`, async (job) => {
+      const dest = this.addonDir(id), from = join(dest, "versions", pick.dir);
+      const k = JSON.parse(readFileSync(join(from, "kept.json"), "utf8"));
+      const was = rec.installed_version || rec.manifest.version;
+      const leaving = { manifest: rec.manifest, commit: rec.commit, updated: rec.updated, remote: rec.remote || null };
+      job.phase = `Putting ${rec.manifest.name} ${pick.version} back`;
+      rmSync(join(dest, "repo.old"), { recursive: true, force: true });
+      if (existsSync(join(dest, "repo"))) renameSync(join(dest, "repo"), join(dest, "repo.old"));
+      renameSync(join(from, "repo"), join(dest, "repo"));
+      rmSync(from, { recursive: true, force: true });
+      this.keepVersion(id, join(dest, "repo.old"), leaving);
+      let m;
+      try { m = loadManifest(join(dest, "repo", rec.source?.subdir || "")); } catch { m = k.before.manifest; }
+      job.log(`${rec.manifest.name} ${was} -> ${m.version} (rolled back)`);
+      let cur = this.patch(id, { manifest: m, commit: k.before.commit || null, updated: Date.now(), remote: null, hold: { version: was, at: Date.now() } });
+      if (cur.installed) {
+        const script = m.scripts.update || m.scripts.install;
+        if (script) {
+          job.phase = `Setting ${m.name} ${m.version} up again`; job.progress = 0.3;
+          const r = await this.run(cur, script, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1", ADDON_ROLLBACK: "1", ...(m.requires.root ? this.rootEnv(grant) : {}) }, timeout: TIMEOUT.update });
+          if (r.code !== 0) fail(`${m.name} ${m.version} is back in place, but its ${m.scripts.update ? "update" : "install"} script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
+          cur = this.patch(id, { open_url: r.dir.open || cur.open_url });
+        }
+        cur = this.patch(id, { installed_version: m.version });
+      }
+      return { id, name: m.name, version: m.version, rolledBack: true };
     }, grant, terminal);
   }
 
@@ -1108,6 +1181,7 @@ export class Addons {
       logo: m.logo ? `/__gate/api/addons/${rec.id}/image?v=${v}` : null,
       source: rec.source?.display, commit: rec.commit, added: rec.added, updated: rec.updated,
       installed: !!rec.installed, installed_version: rec.installed_version || null, adopted: !!rec.adopted, open_url: rec.open_url || null,
+      kept: rec.installed ? this.keptVersions(rec.id).map((k) => ({ version: k.version, at: k.at, key: k.dir })) : [], hold: rec.hold || null,
       detected: rec.detected || { found: false },
       settings: m.settings.map((st) => {
         const cur = (rec.settings || {})[st.key] ?? st.default;

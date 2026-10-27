@@ -115,6 +115,7 @@ Everything the browser does, the terminal does too. It talks to the running gate
 | `aegis domain [link \| rename NAME \| unlink]` | Cloudflare from the terminal: it prints the authorization link (open it on any device) and waits |
 | `aegis passwd` | A new login; every browser signs in again |
 | `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
+| `aegis versions` · `aegis rollback [VERSION]` | The versions kept here; go back to one (works with the gate down) |
 | `aegis open` | The dashboard's links (and opens it, on a desktop) |
 
 Under Selkies Forge, or with no keyboard (`curl … \| bash` in a script), nothing is asked: the links are printed instead.
@@ -324,11 +325,18 @@ Each tunnel gets its own DNS record. *Change the name* moves the dashboard to an
 
 <p align="center"><img src="docs/screenshots/update.png" alt="An update waiting: the green card" width="100%"></p>
 
-Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts, every 30 minutes after that, and whenever a page opens (when the last check is more than two minutes old), so a new version shows up right away. When there is one, every page shows the green **Update available** card: the version going from → to, *What's new*, and **Update**. One click downloads it (size-capped, unpacked into a fresh folder, checked to be a whole, newer Aegis × Burrow), swaps it in for `app/` (the old code stays as `app.prev`), and restarts. The page waits and reloads itself, and greets you with **You're up to date**. Your login, domain, tunnels and addons live in `data/` and are kept.
+Aegis × Burrow checks GitHub for a newer version 20 seconds after it starts, every 30 minutes after that, and whenever a page opens (when the last check is more than two minutes old), so a new version shows up right away. When there is one, every page shows the green **Update available** card: the version going from → to, *What's new*, and **Update**. One click downloads it (size-capped, unpacked into a fresh folder, checked to be a whole, newer Aegis × Burrow), checks that every module in it parses with this Node.js (a cut-short or mangled download changes nothing), swaps it in for `app/` (the version before is kept whole in `versions/`), and restarts. The page waits and reloads itself, and greets you with **You're up to date**. Your login, domain, tunnels and addons live in `data/` and are kept.
 
 - **Update by itself** (*Settings → Updates*): install new versions as soon as they're found.
 - From a terminal: `aegis update` (or `aegis update --check`).
 - Installed as a Selkies Forge addon? Either works; the Forge's own *Update* does the same.
+
+### Going back, and updates that undo themselves
+
+- **Versions** (*Settings → Updates*): the version running, the ones kept here (the last 4, each the version before an update), and the last releases on GitHub. **Go back** puts one in place and restarts; a kept one needs no network, any other comes from GitHub by its commit and is checked the same way. The version you leave is **held back**: *Update by itself* waits for a newer one (**Allow it again**, or installing it by hand, lifts that).
+- **A broken update undoes itself.** `aegis/server.mjs` is a small launcher in front of the gate (`aegis/gate.mjs`). A new version is on trial for its first minute: if it doesn't load at all (a syntax error, a missing file) or dies three times before the minute is up, the launcher puts the version before back, keeps the failed one aside as `versions/<v>-broken`, holds it back, and the bell says what happened.
+- **With the gate down:** `aegis versions` lists what's kept, and `aegis rollback [VERSION]` puts one back with two renames and restarts it, no network or running gate needed.
+- **Addons** keep their last 3 checkouts too, one at each update: **Roll back to v…** in an addon's ⋯ menu (or `aegis addons rollback ID`, `aegis addons versions ID`) puts one back and runs its setup again, with `ADDON_ROLLBACK=1`; its data and settings are kept.
 
 ## 🔗 The serveo link
 
