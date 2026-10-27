@@ -179,4 +179,6 @@ export class RootAccess {
 }
 
 // The command to tell someone who can't sudo from here.
-export const terminalHint = (m) => `Ask an administrator, or run the installer from a terminal${m?.homepage ? ` (see ${m.homepage})` : ""}.`;
+// cmd: what to type there (aegis addons install ID): it runs the script in that terminal, where sudo can ask
+export const terminalHint = (m, cmd) => cmd ? `Run it in a terminal on this machine: ${cmd}` : `Ask an administrator, or run the installer from a terminal${m?.homepage ? ` (see ${m.homepage})` : ""}.`;
+export const terminalCommand = (id, op, action) => `aegis addons ${op === "action" || op === "down" ? `action ${id} ${action}` : `${op} ${id}`}`;

@@ -2336,6 +2336,20 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/askpass" || path.startsWith("/askpass/")) return addons.root.route(method, path, readJson);
   const ar = /^\/addons\/([a-z0-9-]{2,40})\/root$/.exec(path);
   if (ar && method === "GET") return ok(await addons.rootInfo(ar[1]));
+  // a root job run in the user's own terminal (bin/cli.mjs addon-here, burrow/terminal.mjs):
+  // its script step, once, then its lines and its exit code, with the job's token. Only here, on the socket.
+  const ats = /^\/addons\/([a-z0-9-]{2,40})\/runspec$/.exec(path);
+  const atl = /^\/addons\/jobs\/([0-9a-f]{12})\/(line|done)$/.exec(path);
+  if ((ats || atl) && method === "POST") {
+    const b = (await readJson()) || {};
+    try {
+      if (ats) {
+        audit(`addon: ${b.op}${b.op === "action" ? ` ${b.action}` : ""} run in a terminal (as root)`, null, { addon: ats[1] });
+        return ok(await addons.terminalRun(ats[1], b));
+      }
+      return ok(atl[2] === "line" ? addons.terminalLines(atl[1], b) : addons.terminalDone(atl[1], b));
+    } catch (e) { return { status: e.status || 400, json: { error: e.message } }; }
+  }
   const ao = /^\/addons\/([a-z0-9-]{2,40})\/(install|update|uninstall|action|check|autorestart)$/.exec(path);
   if (ao && method === "POST") {
     const [, id, op] = ao, b = (await readJson()) || {};

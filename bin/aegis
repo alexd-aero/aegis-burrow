@@ -15,7 +15,7 @@
 #   aegis termix install | remove    Termix in Docker, behind the same login
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared
 #   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
-#   aegis addons [add LINK | update|install|uninstall|check ID]   Burrow's addons, from the terminal
+#   aegis addons [add LINK | update|install|uninstall|check ID | action ID ACTION] [--here]   Burrow's addons, from the terminal
 #   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
@@ -1073,6 +1073,8 @@ usage() {
     aegis serveo on | off | url  a public link to the dashboard, no account
     aegis addons                 the addons, and which have an update
     aegis addons update ID       update one (install, uninstall, check too; asks for sudo when it needs root)
+    aegis addons action ID ACTION   run one of its actions
+    aegis addons install ID --here  a root one in this terminal (automatic when Aegis can't get root)
     aegis addons add LINK        add one from a link or a folder
     aegis termix install | remove
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
@@ -1088,24 +1090,36 @@ USAGE
 # access says so and why first: passwordless sudo asks "run it?", otherwise the
 # sudo password is asked (hidden) and handed over on stdin, never in argv.
 addon_op() {
-  local op="$1" id="$2" info kind name reason why hint home pw rc tries=0
-  case "$op" in install|update|uninstall) [ -n "$id" ] ;; *) false ;; esac || { cli addon "$op" "$id"; return; }
-  info="$(cli addon-root "$id" "$op")" || die "$info"
+  local op="${1:-}" id="${2:-}" act="" here=0 info kind name reason why hint home pw rc tries=0 a what
+  shift 2 2>/dev/null || shift $#
+  if [ "$op" = action ]; then act="${1:-}"; [ $# -gt 0 ] && shift; [ -n "$id" ] && [ -n "$act" ] || die "aegis addons action ID ACTION [--here]"; fi
+  local extra=()
+  for a in "$@"; do case "$a" in --here) here=1 ;; --purge) extra+=(--purge) ;; *) die "unknown option $a" ;; esac; done
+  [ -n "$act" ] && extra+=(--action "$act")
+  case "$op" in install|update|uninstall|action) [ -n "$id" ] ;; *) false ;; esac || { cli addon "$op" "$id"; return; }
+  what="$op"; [ "$op" = action ] && what="run $act"
+  info="$(cli addon-root "$id" "$op" "$act")" || die "$info"
   IFS=$'\x1f' read -r kind name reason why hint home <<<"$info" || true
-  [ "$kind" = none ] && { cli addon "$op" "$id"; return; }
-  warn "$name needs administrator (root) access to $op: ${reason:-its manifest says so}"
-  if [ "$kind" = nosudo ]; then
-    die "it can't get root from here: ${why:-sudo is not available}. ${hint:-Ask an administrator, or run the installer from a terminal.}"
+  if [ "$kind" = none ]; then
+    [ "$here" = 1 ] && info "$name doesn't need root to $what: it runs in Aegis as usual"
+    cli addon "$op" "$id" "${extra[@]}"; return
+  fi
+  warn "$name needs administrator (root) access to $what: ${reason:-its manifest says so}"
+  # in this terminal: Aegis can't get root itself (a sandboxed service, no sudo), or --here
+  if [ "$here" = 1 ] || [ "$kind" = nosudo ]; then
+    [ "$kind" = nosudo ] && info "Aegis can't get root itself (${why:-no sudo}), so it runs here, in this terminal, as you"
+    [ -t 0 ] || warn "stdin isn't a terminal: if sudo needs your password, it can't ask"
+    cli addon-here "$op" "$id" "${extra[@]}"; return
   fi
   if [ "$kind" = passwordless ]; then
     confirm "sudo needs no password here. Run it as administrator?" n || die "nothing ran"
-    cli addon "$op" "$id"; return
+    cli addon "$op" "$id" "${extra[@]}"; return
   fi
-  interactive || die "it needs your sudo password: run aegis addons $op $id in a terminal"
+  interactive || die "it needs your sudo password: run aegis addons $op $id${act:+ $act} in a terminal"
   while :; do
     pw="$(ask_secret "Your password, for sudo:")" || die "no keyboard to ask on"
     [ -n "$pw" ] || die "nothing ran"
-    rc=0; printf '%s' "$pw" | cli addon "$op" "$id" --password-stdin || rc=$?
+    rc=0; printf '%s' "$pw" | cli addon "$op" "$id" "${extra[@]}" --password-stdin || rc=$?
     pw=""
     if [ "$rc" = 4 ] && [ "$tries" -lt 2 ]; then tries=$((tries + 1)); continue; fi
     return "$rc"
@@ -1140,7 +1154,7 @@ case "$1" in
     warn "the copy on the other machine still runs: stop it there (aegis stop), or two gates answer for the same domain"
     svc restart; wait_healthy && ok "running here again" || die "not answering yet; see: aegis logs" ;;
   addons) shift; need_installed; ensure_running
-    if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else addon_op "$1" "${2:-}"; fi ;;
+    if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else addon_op "$@"; fi ;;
   url) need_installed; links "" ;;
   setup-link) need_installed; if setup_needed; then links "$(setup_path)"; else echo "  the login is already set up:"; links ""; fi ;;
   serveo) shift; need_installed

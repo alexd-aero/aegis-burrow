@@ -12,15 +12,19 @@
 //   node cli.mjs cf-wait                    wait for the Cloudflare authorization
 //   node cli.mjs update-wait VERSION        wait for the new version to answer
 //   node cli.mjs addons                     the addons, and which have an update
-//   node cli.mjs addon OP ID [JSON]         install|update|uninstall|action|check one, following its job
-//                                           (JSON --password-stdin: the sudo password on stdin, for a root one)
-//   node cli.mjs addon-root ID OP           does OP need root: none|passwordless|password|nosudo, \x1f-separated with
+//   node cli.mjs addon OP ID [--action A] [--purge] [--password-stdin] [JSON]
+//                                           install|update|uninstall|action|check one, following its job
+//                                           (--password-stdin: the sudo password on stdin, for a root one)
+//   node cli.mjs addon-root ID OP [ACTION]  does OP need root: none|passwordless|password|nosudo, \x1f-separated with
 //                                           the name, the reason, why not, the hint and the homepage (bin/aegis asks)
+//   node cli.mjs addon-here OP ID [--action A] [--purge]
+//                                           a root one run in this terminal (burrow/terminal.mjs): sudo asks here
 //
 // AEGIS_HOME says where data/control.sock is.
 import { request } from "node:http";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
+import { runHere } from "../burrow/terminal.mjs";
 
 const HOME = process.env.AEGIS_HOME || join(process.env.HOME, ".local/share/aegis");
 const SOCK = join(HOME, "data", "control.sock");
@@ -207,23 +211,38 @@ async function addonsList() {
   }
   return 0;
 }
-async function addonOp(op, id, json) {
-  if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check ID]"); return 2; }
+// [--action A] [--purge] [--password-stdin] [JSON] -> {body, pwStdin}
+function addonArgs(rest) {
+  const o = { body: {}, pwStdin: false };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--action") o.body.action = rest[++i];
+    else if (a === "--purge") o.body.keep_data = false;
+    else if (a === "--password-stdin") o.pwStdin = true;
+    else if (a) Object.assign(o.body, JSON.parse(a));
+  }
+  return o;
+}
+async function addonOp(op, id, ...rest) {
+  if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check ID | action ID ACTION] [--here]"); return 2; }
   if (op === "check") { const r = await call("POST", `/addons/${id}/check`, "{}"); out(JSON.stringify(r)); return 0; }
   if (op === "add") { const r = await call("POST", "/addons/add", JSON.stringify({ source: id })); out(green(`  ✓ added ${r.addon?.id || ""}: install it with aegis addons install ${r.addon?.id || "ID"}`)); return 0; }
+  const a = addonArgs(rest);
   // the sudo password, from bin/aegis (ask_secret) on stdin: never on a command line
-  if (json === "--password-stdin") {
+  if (a.pwStdin) {
     let pw = "";
     for await (const x of process.stdin) pw += x;
-    json = JSON.stringify({ password: pw.replace(/\r?\n$/, "") });
+    a.body.password = pw.replace(/\r?\n$/, "");
     pw = "";
   }
+  const json = JSON.stringify(a.body);
   let r;
   try { r = await call("POST", `/addons/${id}/${op}`, json || "{}"); }
   catch (e) {
     if (!e.json?.needsRoot) throw e;
     out(red(`  ✗ ${e.message}`));
-    if (e.status === 428) out(dim(`    run it as: aegis addons ${op} ${id}  (it asks for the password)`));
+    if (e.status === 428) out(dim(`    run it as: aegis addons ${op} ${id}${a.body.action ? " " + a.body.action : ""}  (it asks for the password)`));
+    if (e.json.noSudo) out(dim(`    run it in this terminal: aegis addons ${op} ${id}${a.body.action ? " " + a.body.action : ""} --here`));
     return e.json.badPassword ? 4 : e.json.noSudo ? 6 : 5;
   }
   const job = r.job?.id;
@@ -240,13 +259,26 @@ async function addonOp(op, id, json) {
 }
 
 // Does OP need root? One line for bin/aegis to read (fields split by \x1f, never empty-collapsed).
-async function addonRoot(id, op) {
+async function addonRoot(id, op, action) {
   let r;
   try { r = await call("GET", `/addons/${id}/root`); } catch (e) { out(e.message); return e.code === "DOWN" ? 3 : 2; }
-  const need = op === "action" ? false : !!r.needs?.[op];
+  const need = op === "action" ? (r.needs?.actions || []).includes(action) : !!r.needs?.[op];
   const kind = !need ? "none" : r.sudo === false ? "nosudo" : r.passwordless ? "passwordless" : "password";
   out([kind, r.name, r.reason, r.why, r.hint, r.homepage].map((x) => String(x ?? "").replace(/[\x1f\r\n]+/g, " ")).join("\x1f"));
   return 0;
+}
+
+// A root job run in this terminal: Aegis hands over its script, sudo asks here.
+async function addonHere(op, id, ...rest) {
+  if (!["install", "update", "uninstall", "action"].includes(op) || !id) { out("aegis addons install|update|uninstall ID --here | action ID ACTION --here"); return 2; }
+  const { body } = addonArgs(rest);
+  let r;
+  try { r = await runHere({ call, op, id, body, c: { dim, yellow, red, green } }); }
+  catch (e) { out(red(`  ✗ ${e.message}`)); return e.code === "DOWN" ? 3 : 1; }
+  const j = r.job;
+  if (j.state === "done") { out(green(`  ✓ ${op} done${r.ran ? "" : " (nothing needed running here)"}`)); if (j.result?.open_url) out(dim(`    open: ${j.result.open_url}`)); return 0; }
+  out(red(`  ✗ ${j.error || j.state}`));
+  return 1;
 }
 
 const [cmd, ...args] = process.argv.slice(2);
@@ -263,7 +295,8 @@ const run = {
   tunnels: async () => { await tunnels(); return 0; }, ports: async () => { await ports(); return 0; },
   "pack-wait": packWait, "cf-wait": cfWait, "update-wait": () => updateWait(args[0], args[1]),
   get: () => { get(args[0]); return null; },
-  addons: addonsList, addon: () => addonOp(args[0], args[1], args[2]), "addon-root": () => addonRoot(args[0], args[1]),
+  addons: addonsList, addon: () => addonOp(...args), "addon-root": () => addonRoot(args[0], args[1], args[2]),
+  "addon-here": () => addonHere(...args),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },

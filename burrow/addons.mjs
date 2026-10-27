@@ -24,6 +24,15 @@
 // script then gets ADDON_ROOT=1, ADDON_ASKPASS_TOKEN and SUDO_ASKPASS, and
 // calls `sudo -A`. See burrow/root.mjs.
 //
+// Or in the user's own terminal (`aegis addons install ID`, automatically when
+// this Aegis can't get root, e.g. under a sandboxed systemd unit): the job is
+// made here as always, but its script step is handed out once, on the control
+// socket only, as a run spec (POST /addons/<id>/runspec -> {job, token, script,
+// cwd, env}); the CLI runs `bash script` with the terminal as stdin (a plain
+// sudo there asks for the password itself), streams the lines back (POST
+// /addons/jobs/<job>/line {token, lines}) and the exit code (…/done {token,
+// code}), and the job ends exactly as if it had run here. Two hours at most.
+//
 // Scripts talk back with lines on stdout: "::progress N text", "::phase text",
 // "::open URL", "::warn text"; status (and detect) end with one JSON line.
 
@@ -31,10 +40,10 @@ import { spawn, execFile } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ArchiveError, download, unpack, isArchive } from "./archive.mjs";
 import { rescue as rescueAddon, reports as rescueReports, report as rescueReport } from "./rescue.mjs";
-import { RootAccess, RootError, terminalHint } from "./root.mjs";
+import { RootAccess, RootError, terminalHint, terminalCommand } from "./root.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -53,6 +62,7 @@ const ARCH_ALIASES = { amd64: "x86_64", x64: "x86_64", arm64: "aarch64", armhf: 
 const MASK = "••••••••";
 
 export class AddonError extends Error {}
+export const TERMINAL_TTL = 2 * 3600e3;
 export { RootError };
 // never passed through from Aegis's own environment, and never twinned as FORGE_*
 const ROOT_VARS = ["ADDON_ROOT", "ADDON_ASKPASS_TOKEN", "SUDO_ASKPASS", "FORGE_ADDON_ROOT", "FORGE_ADDON_ASKPASS_TOKEN"];
@@ -438,10 +448,15 @@ class Job {
   view(since = 0) {
     const from = Math.max(0, since - this.base);
     return { id: this.id, aid: this.aid, kind: this.kind, label: this.label, state: this.state, phase: this.phase, progress: this.progress,
-             started: this.started, finished: this.finished, result: this.result, error: this.error,
+             started: this.started, finished: this.finished, result: this.result, error: this.error, terminal: !!this.terminal,
              next: this.base + this.lines.length, lines: this.lines.slice(from) };
   }
-  cancel() { if (this.state !== "running") return; this.cancelled = true; for (const p of this.procs) { try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } } }
+  cancel() {
+    if (this.state !== "running") return;
+    this.cancelled = true;
+    for (const p of this.procs) { try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } }
+    this.terminal?.finish?.(130, "cancelled from the dashboard");           // the terminal hears it on its next line
+  }
 }
 
 // ------------------------------------------------------------------ the host
@@ -451,7 +466,8 @@ export class Addons {
   // env:      () => {ADDON_HOST_URL, ADDON_BIND, BURROW_SOCKET, …}: host values for scripts
   // notify:   (notice) => …: the bell, for what an automatic path skipped (root)
   // root:     a RootAccess (burrow/root.mjs): sudo checks and the askpass tokens
-  constructor({ dir, registry, version, env, log, tunnels, onChange, notify, root }) {
+  constructor({ dir, registry, version, env, log, tunnels, onChange, notify, root, terminalTtl }) {
+    this.terminalTtl = terminalTtl || TERMINAL_TTL;
     Object.assign(this, { dir, registryFile: registry, version, hostEnv: env || (() => ({})), log: log || console.log, tunnels, onChange, notify: notify || null });
     this.root = root || new RootAccess();
     this.statusCache = new Map();
@@ -498,6 +514,7 @@ export class Addons {
   run(rec, rel, { job, extra, timeout = 600, root, data } = {}) {
     root = root || this.rootOf(rec);
     data = data || this.dataDir(rec);
+    if (job?.terminal) return this.runInTerminal(job, rec, rel, { extra, root, data });
     return new Promise((done) => {
       // A job (install, update, an action like "start") runs in a scope of its
       // own under the user's systemd: what it starts (Selkies Forge's web UI)
@@ -531,6 +548,75 @@ export class Addons {
         done({ code: killed ? 124 : job?.cancelled ? 130 : (code ?? 1), lines, dir });
       });
     });
+  }
+  // The script step of a terminal job: handed to the CLI as a run spec, and
+  // finished by what it reports (line…, done). -> the same {code, lines, dir} as run()
+  runInTerminal(job, rec, rel, { extra, root, data }) {
+    const T = job.terminal;
+    const env = this.env(rec, root, data, { ...extra, ADDON_ROOT: "1" });
+    // only the addon's own variables: the terminal keeps its own PATH, HOME, TERM…
+    const host = new Set(Object.keys(this.hostEnv()));
+    const own = Object.fromEntries(Object.entries(env).filter(([k]) => /^(ADDON_|FORGE_|BURROW_)/.test(k) || host.has(k)));
+    for (const k of ["ADDON_ASKPASS_TOKEN", "FORGE_ADDON_ASKPASS_TOKEN", "SUDO_ASKPASS"]) delete own[k];
+    return new Promise((done) => {
+      const lines = [], dir = { open: null, warn: [] };
+      T.spec = { script: join(root, rel), cwd: root, env: own };
+      T.feed = (line) => {
+        line = String(line).replace(/\r$/, "").slice(0, 2000);
+        if (line.startsWith("::")) return this.directive(line, job, dir);
+        lines.push(line); if (lines.length > 400) lines.splice(0, 100);
+        job.log(line);
+      };
+      T.finish = (code, why) => {
+        if (T.closed) return;
+        T.closed = true; clearTimeout(T.timer);
+        if (why) { lines.push(why); job.log(why, "err"); }
+        done({ code: Number.isInteger(code) ? code : 1, lines, dir });
+      };
+      T.timer = setTimeout(() => T.finish(124, "the terminal never said it was done (two hours)"), Math.max(1000, T.expires - Date.now()));
+      T.timer.unref?.();
+      job.phase = "Running in your terminal";
+      T.ready?.();
+    });
+  }
+  // POST /addons/<id>/runspec {op, action?, keep_data?, settings?} (control socket only):
+  // makes the job and waits until it reaches its script -> {job, token, script, cwd, env, expires},
+  // or {job, done: true} when it needed none (an update of an addon that isn't installed…).
+  async terminalRun(id, b = {}) {
+    const op = b.op, rec = this.get(id);
+    if (!["install", "update", "uninstall", "action"].includes(op)) fail("op is install, update, uninstall or action");
+    if (!this.rootNeed(rec, op, b.action)) fail(`${rec.manifest.name} doesn't need root to ${op === "action" ? `run ${b.action}` : op}: it runs in Aegis (aegis addons ${op} ${id}${op === "action" ? ` ${b.action}` : ""}).`);
+    const T = { token: randomBytes(32).toString("hex"), expires: Date.now() + this.terminalTtl, spec: null, closed: false };
+    const ready = new Promise((r) => { T.ready = r; });
+    const view = this.runOp(op, id, b, null, { terminal: T });
+    const job = this.jobs.get(view.id);
+    const t = setTimeout(() => T.ready(), 10 * 60e3);                    // fetching an update can take a while, not forever
+    await ready; clearTimeout(t);
+    if (!T.spec) {
+      if (job.state === "running") { job.cancel(); fail("It took too long to get ready (fetching the new version?). Try again."); }
+      return { job: job.view(1e9), done: true };
+    }
+    this.log(`addon ${id}: ${op} handed to the terminal (job ${job.id})`);
+    return { job: job.view(0), token: T.token, script: T.spec.script, cwd: T.spec.cwd, env: T.spec.env, expires: T.expires };
+  }
+  // what the terminal reports: only with the job's token, only while it runs
+  terminalOf(jobId, token) {
+    const job = this.job(jobId), T = job.terminal;
+    if (!T || typeof token !== "string" || token.length !== T.token.length || !timingSafeEqual(Buffer.from(token), Buffer.from(T.token))) {
+      throw Object.assign(new AddonError("That isn't this job's token."), { status: 403 });
+    }
+    if (T.closed || !T.spec) throw Object.assign(new AddonError(job.cancelled ? "Cancelled from the dashboard." : "This job isn't waiting for its terminal any more."), { status: 410 });
+    return { job, T };
+  }
+  terminalLines(jobId, { token, lines } = {}) {
+    const { job, T } = this.terminalOf(jobId, token);
+    for (const l of (Array.isArray(lines) ? lines : []).slice(0, 500)) T.feed(l);
+    return { ok: true, state: job.state, phase: job.phase, progress: job.progress };
+  }
+  terminalDone(jobId, { token, code } = {}) {
+    const { T } = this.terminalOf(jobId, token);
+    T.finish(Number(code));
+    return { ok: true };
   }
   directive(line, job, out) {
     const [word, ...rest] = line.slice(2).split(" ");
@@ -660,9 +746,13 @@ export class Addons {
     const any = needs.install || needs.update || needs.uninstall || needs.actions.length > 0;
     const out = { id, name: m.name, homepage: m.homepage || null, logo: m.logo ? `/__gate/api/addons/${rec.id}/image?v=${(rec.commit || String(rec.updated || 0)).slice(0, 12)}` : null,
                   reason: this.rootNeed(rec, "install") || this.rootNeed(rec, "update") || (needs.actions.length ? this.rootNeed(rec, "action", needs.actions[0]) : ""),
-                  needsRoot: any, needs, start: this.startAction(rec)?.id || null, sudo: null, passwordless: null, why: null };
+                  needsRoot: any, needs, start: this.startAction(rec)?.id || null, sudo: null, passwordless: null, why: null,
+                  busy: [...this.jobs.values()].find((j) => j.aid === rec.id && j.state === "running")?.view(1e9) || null };
     if (any) Object.assign(out, await this.root.check());
-    if (out.sudo === false) out.hint = terminalHint(m);
+    // where Aegis can't get root, the terminal can: the commands for it
+    out.commands = { install: terminalCommand(id, "install"), update: terminalCommand(id, "update"), uninstall: terminalCommand(id, "uninstall"),
+                     actions: Object.fromEntries(needs.actions.map((a) => [a, terminalCommand(id, "action", a)])) };
+    if (out.sudo === false) out.hint = terminalHint(m, terminalCommand(id, "install"));
     return out;
   }
   // Before a root job: null when the operation doesn't need root, else a grant
@@ -672,14 +762,14 @@ export class Addons {
   async rootGrant(id, op, { password, action } = {}) {
     const rec = this.get(id), reason = this.rootNeed(rec, op, action);
     if (!reason) return null;
-    const m = rec.manifest, base = { needsRoot: true, id, name: m.name, reason, homepage: m.homepage || null };
+    const cmd = terminalCommand(id, op, action), m = rec.manifest, base = { needsRoot: true, id, name: m.name, reason, homepage: m.homepage || null, command: cmd };
     const c = await this.root.check(true);
-    if (!c.sudo) throw new RootError(`${m.name} needs administrator (root) access, and it can't get it from here: ${c.why} ${terminalHint(m)}`, 403, { ...base, noSudo: true, sudo: false, passwordless: false, why: c.why, hint: terminalHint(m) });
+    if (!c.sudo) throw new RootError(`${m.name} needs administrator (root) access, and Aegis can't get it itself: ${c.why} ${terminalHint(m, cmd)}`, 403, { ...base, noSudo: true, sudo: false, passwordless: false, why: c.why, hint: terminalHint(m, cmd) });
     if (c.passwordless) return { token: this.root.issue(null), reason };
     if (password == null || password === "") throw new RootError(`${m.name} needs administrator (root) access: ${reason}. Type your password for sudo.`, 428, { ...base, sudo: true, passwordless: false });
     try { await this.root.validate(password); }
     catch (e) {
-      if (e instanceof RootError) { Object.assign(e.extra, base, { sudo: !e.extra.noSudo, passwordless: false }); if (e.extra.noSudo) { e.extra.hint = terminalHint(m); e.message += " " + terminalHint(m); } }
+      if (e instanceof RootError) { Object.assign(e.extra, base, { sudo: !e.extra.noSudo, passwordless: false }); if (e.extra.noSudo) { e.extra.hint = terminalHint(m, cmd); e.message += " " + terminalHint(m, cmd); } }
       throw e;
     }
     return { token: this.root.issue(String(password)), reason };
@@ -689,28 +779,29 @@ export class Addons {
   refuseRoot(rec, op, reason, actionLabel) {
     const m = rec.manifest, what = op === "action" ? `run "${actionLabel}"` : op;
     this.notify?.({ level: "warn", key: `root-${rec.id}-${op}`, title: `${m.name} needs administrator access to ${what}`,
-      body: `${reason}. Nothing ran. ${op === "action" ? "Run it" : `${op[0].toUpperCase()}${op.slice(1)} it`} from Burrow → Addons (or aegis addons ${op} ${rec.id}), where you can give it.`,
+      body: `${reason}. Nothing ran. ${op === "action" ? "Run it" : `${op[0].toUpperCase()}${op.slice(1)} it`} from Burrow → Addons, or in a terminal on this machine: ${terminalCommand(rec.id, op, rec.manifest.actions.find((a) => a.label === actionLabel)?.id)}.`,
       link: "/__gate/tunnels#/addons" });
     fail(`${m.name} needs administrator (root) access to ${what}: ${reason}. Nothing ran.`);
   }
   // install / update / uninstall / action, with the grant rootGrant gave (or null):
   // the dashboard's and the control socket's one way in. A grant is dropped
   // if the job never starts, and when it ends.
-  runOp(op, id, b = {}, grant = null) {
+  runOp(op, id, b = {}, grant = null, { terminal = null } = {}) {
     try {
-      if (op === "install") return this.install(id, b.settings, { root: grant });
-      if (op === "update") return this.update(id, { root: grant });
-      if (op === "uninstall") return this.uninstall(id, b.keep_data !== false, { root: grant });
-      if (op === "action") return this.action(id, b.action, { root: grant });
+      if (op === "install") return this.install(id, b.settings, { root: grant, terminal });
+      if (op === "update") return this.update(id, { root: grant, terminal });
+      if (op === "uninstall") return this.uninstall(id, b.keep_data !== false, { root: grant, terminal });
+      if (op === "action") return this.action(id, b.action, { root: grant, terminal });
       fail(`unknown operation ${op}`);
     } catch (e) { if (grant) this.root.drop(grant.token); throw e; }
   }
   rootEnv(grant) { return grant ? this.root.env(grant.token) : {}; }
 
-  startJob(aid, kind, label, work, grant = null) {
+  startJob(aid, kind, label, work, grant = null, terminal = null) {
     for (const j of this.jobs.values()) if (j.aid === aid && j.state === "running") fail(`${label.split(" ").pop()} is busy: ${j.label}.`);
     const job = new Job(aid, kind, label);
     this.jobs.set(job.id, job);
+    if (terminal) job.terminal = terminal;
     if (grant) { this.root.bind(grant.token, job.id); job.root = true; }
     // whatever Burrow runs (stop, update, uninstall…) may take the addon down: that's no crash
     this.expectUntil.set(aid, Infinity);
@@ -720,16 +811,16 @@ export class Addons {
     }).catch((e) => {
       Object.assign(job, { state: job.cancelled ? "cancelled" : "error", error: e.message });
       job.log(e.message, "err");
-    }).finally(() => { if (grant) this.root.drop(grant.token); job.finished = Date.now(); this.expectUntil.set(aid, Date.now() + 30e3); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
+    }).finally(() => { if (grant) this.root.drop(grant.token); if (job.terminal) { job.terminal.closed = true; clearTimeout(job.terminal.timer); job.terminal.ready?.(); } job.finished = Date.now(); this.expectUntil.set(aid, Date.now() + 30e3); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
     return job.view();
   }
 
-  install(id, settings, { root: grant = null } = {}) {
+  install(id, settings, { root: grant = null, terminal = null } = {}) {
     const rec0 = this.get(id), m = rec0.manifest;
     const problems = checkRequirements(m, this.version);
     if (problems.length) fail(`${m.name} ${problems.join("; ")}.`);
     const why = this.rootNeed(rec0, "install");
-    if (why && !grant) this.refuseRoot(rec0, "install", why);
+    if (why && !grant && !terminal) this.refuseRoot(rec0, "install", why);
     const rec = this.patch(id, { settings: this.cleanSettings(rec0, settings || {}) });
     return this.startJob(id, "install", `Installing ${m.name}`, async (job) => {
       const found = await this.detect(rec);
@@ -741,13 +832,13 @@ export class Addons {
       const done = this.patch(id, { installed: true, installed_version: m.version, installed_at: Date.now(), adopted: !!adopt,
                                     open_url: r.dir.open || found.url || rec.open_url || null, detected: found });
       return { id, name: m.name, open_url: done.open_url, adopted: !!adopt, warnings: r.dir.warn };
-    }, grant);
+    }, grant, terminal);
   }
 
-  update(id, { root: grant = null } = {}) {
+  update(id, { root: grant = null, terminal = null } = {}) {
     const rec = this.get(id);
     const why = this.rootNeed(rec, "update");
-    if (why && !grant) this.refuseRoot(rec, "update", why);
+    if (why && !grant && !terminal) this.refuseRoot(rec, "update", why);
     return this.startJob(id, "update", `Updating ${rec.manifest.name}`, async (job) => {
       job.phase = `Fetching ${rec.manifest.name}`;
       const tmp = mkdtempSync(join(this.dir, ".upd-"));
@@ -757,7 +848,7 @@ export class Addons {
         m = loadManifest(join(tmp, "repo", rec.source.subdir || ""));
         if (m.id !== id) fail(`the repository now holds a different addon (${m.id})`);
         // the new version needs root and nobody gave it: nothing changes, and the next try asks
-        if (rec.installed && m.requires.root && !grant) {
+        if (rec.installed && m.requires.root && !grant && !terminal) {
           this.patch(id, { remote: { ...(this.get(id).remote || {}), root: m.requires.root } });
           fail(`${m.name} ${m.version} needs administrator (root) access to update: ${m.requires.root}. Nothing changed; update it again to give it.`);
         }
@@ -765,28 +856,43 @@ export class Addons {
         rmSync(join(dest, "repo.old"), { recursive: true, force: true });
         if (existsSync(join(dest, "repo"))) renameSync(join(dest, "repo"), join(dest, "repo.old"));
         renameSync(join(tmp, "repo"), join(dest, "repo"));
-        rmSync(join(dest, "repo.old"), { recursive: true, force: true });
+        // run here: the old copy goes now. Run in a terminal: it stays until that run
+        // succeeds, and comes back (code and registry) when it doesn't
+        if (!terminal) rmSync(join(dest, "repo.old"), { recursive: true, force: true });
       } finally { rmSync(tmp, { recursive: true, force: true }); }
       job.log(`${m.name} ${rec.manifest.version} -> ${m.version}${commit ? ` (${commit.slice(0, 10)})` : ""}`);
+      const before = { manifest: rec.manifest, commit: rec.commit, updated: rec.updated, remote: rec.remote || null };
       let cur = this.patch(id, { manifest: m, commit, updated: Date.now(), remote: null });
       const res = { id, name: m.name, version: m.version, ran: null };
-      if (cur.installed) {
-        const script = m.scripts.update || m.scripts.install;
-        res.ran = m.scripts.update ? "update" : "install";
-        job.phase = `Updating ${m.name}`; job.progress = 0.2;
-        const r = await this.run(cur, script, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1", ...(m.requires.root ? this.rootEnv(grant) : {}) }, timeout: TIMEOUT.update });
-        if (r.code !== 0) fail(`the update script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
-        cur = this.patch(id, { installed_version: m.version, open_url: r.dir.open || cur.open_url });
-        res.open_url = cur.open_url;
+      const dest = this.addonDir(id);
+      try {
+        if (cur.installed) {
+          const script = m.scripts.update || m.scripts.install;
+          res.ran = m.scripts.update ? "update" : "install";
+          job.phase = `Updating ${m.name}`; job.progress = 0.2;
+          const r = await this.run(cur, script, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1", ...(m.requires.root ? this.rootEnv(grant) : {}) }, timeout: TIMEOUT.update });
+          if (r.code !== 0) fail(`the update script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
+          cur = this.patch(id, { installed_version: m.version, open_url: r.dir.open || cur.open_url });
+          res.open_url = cur.open_url;
+        }
+      } catch (e) {
+        if (terminal && existsSync(join(dest, "repo.old"))) {
+          rmSync(join(dest, "repo"), { recursive: true, force: true });
+          renameSync(join(dest, "repo.old"), join(dest, "repo"));
+          this.patch(id, before);
+          job.log(`${before.manifest.name} ${before.manifest.version} is back in place: nothing changed.`, "err");
+        }
+        throw e;
       }
+      rmSync(join(dest, "repo.old"), { recursive: true, force: true });
       return res;
-    }, grant);
+    }, grant, terminal);
   }
 
-  uninstall(id, keepData = true, { root: grant = null } = {}) {
+  uninstall(id, keepData = true, { root: grant = null, terminal = null } = {}) {
     const rec = this.get(id), m = rec.manifest;
     const why = this.rootNeed(rec, "uninstall");
-    if (why && !grant) this.refuseRoot(rec, "uninstall", why);
+    if (why && !grant && !terminal) this.refuseRoot(rec, "uninstall", why);
     return this.startJob(id, "uninstall", `Uninstalling ${m.name}`, async (job) => {
       if (m.scripts.uninstall) {
         const r = await this.run(rec, m.scripts.uninstall, { job, extra: { ADDON_KEEP_DATA: keepData ? "1" : "0", ...this.rootEnv(grant) }, timeout: TIMEOUT.uninstall });
@@ -796,7 +902,7 @@ export class Addons {
       await this.share(id, false).catch(() => {});
       this.patch(id, { installed: false, installed_version: null, open_url: null, adopted: false });
       return { id, name: m.name, kept_data: !!keepData };
-    }, grant);
+    }, grant, terminal);
   }
 
   remove(id, force = false) {
@@ -808,18 +914,18 @@ export class Addons {
     return { ok: true, id };
   }
 
-  action(id, actionId, { root: grant = null } = {}) {
+  action(id, actionId, { root: grant = null, terminal = null } = {}) {
     const rec = this.get(id);
     const a = rec.manifest.actions.find((x) => x.id === actionId);
     if (!a) fail(`${rec.manifest.name} has no action ${actionId}.`);
     if (!rec.installed) fail(`Install ${rec.manifest.name} first.`);
     const why = this.rootNeed(rec, "action", a.id);
-    if (why && !grant) this.refuseRoot(rec, "action", why, a.label);
+    if (why && !grant && !terminal) this.refuseRoot(rec, "action", why, a.label);
     return this.startJob(id, "action", `${rec.manifest.name}: ${a.label}`, async (job) => {
       const r = await this.run(rec, a.script, { job, timeout: TIMEOUT.action, extra: this.rootEnv(grant) });
       if (r.code !== 0) fail(`${a.label} failed (exit ${r.code})`);
       return { id, action: a.id, open_url: r.dir.open, warnings: r.dir.warn };
-    }, grant);
+    }, grant, terminal);
   }
 
   // Start it whatever it takes, and write down why when it won't (burrow/rescue.mjs).

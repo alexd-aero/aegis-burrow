@@ -267,7 +267,7 @@ export class Burrow {
         if (path === "/status" && req.method === "GET") return reply(200, this.status());
         const x = extra ? await extra(req.method, path, () => readJson(req)) : null;
         if (x) {
-          if (req.method !== "GET" && path !== "/askpass") this.note(id, `changed ${path.slice(1)}`);
+          if (req.method !== "GET" && path !== "/askpass" && !/^\/addons\/jobs\/[0-9a-f]{12}\/line$/.test(path)) this.note(id, `changed ${path.slice(1)}`);
           return x.body !== undefined ? reply(x.status, x.body, x.headers) : reply(x.status, x.json);
         }
         if (path === "/module" && req.method === "POST") {

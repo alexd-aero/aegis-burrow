@@ -1503,3 +1503,10 @@ html.fl-noscroll .wrap { z-index: 30; }
 .fb-err { color: var(--warn); }
 textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-bottom: 9px; resize: vertical; line-height: 1.5; font-family: var(--sans); }
 @media (max-width: 640px) { .fb-row .seg { width: 100%; } .fb-row .seg button { flex: 1; } }
+/* the root dialog when this dashboard can't get root: the terminal command */
+.root-term { display: grid; gap: 8px; padding: 12px; margin: 0 0 14px; border-radius: 10px; font-size: 13px;
+             border: 1px solid rgba(242,193,78,.35); background: rgba(242,193,78,.05); }
+.root-term b { color: var(--text); }
+.root-cmd { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); }
+.root-cmd code { flex: 1; min-width: 0; font: 13px var(--mono); color: var(--text); overflow-wrap: anywhere; user-select: all; }
+.root-wait { display: flex; align-items: center; gap: 8px; }

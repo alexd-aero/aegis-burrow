@@ -430,7 +430,8 @@ export async function rootRun(id, op, body = {}, opts = {}) {
   if (!rootNeeded(info, op, body)) return plain();
   return rootDialog(id, op, body, opts, info);
 }
-function rootDialog(id, op, body, opts, info) {
+function rootDialog(id, op, body, opts, info0) {
+  let info = info0;
   const path = `/__gate/api/addons/${encodeURIComponent(id)}/${op}`;
   const name = info.name || opts.name || id, logo = info.logo || opts.logo || null;
   const verb = { install: "install", update: "update", uninstall: "uninstall", action: "run this", down: "start" }[op] || op;
@@ -440,7 +441,19 @@ function rootDialog(id, op, body, opts, info) {
     scrim.className = "scrim root-scrim";
     let state = info.sudo === false || info.noSudo ? "nosudo" : info.passwordless ? "confirm" : "password";
     let busy = false;
-    const close = (v) => { scrim.remove(); document.removeEventListener("keydown", onKey, true); try { prev?.focus?.(); } catch { /* gone */ } resolve(v); };
+    let watch = null;
+    const close = (v) => { clearTimeout(watch); watch = -1; scrim.remove(); document.removeEventListener("keydown", onKey, true); try { prev?.focus?.(); } catch { /* gone */ } resolve(v); };
+    // what to type in a terminal on this machine, for when this dashboard can't get root itself
+    const command = () => info.command || (op === "action" ? info.commands?.actions?.[body.action]
+      : op === "down" ? info.commands?.actions?.[info.start] : info.commands?.[op]) || `aegis addons ${op === "action" || op === "down" ? `action ${id} ${op === "down" ? info.start : body.action}` : `${op} ${id}`}`;
+    // ...and once that terminal run starts, its job (the dialog hands it on, so its log shows live)
+    const waitForTerminal = () => {
+      if (watch === -1) return;
+      watch = setTimeout(async () => {
+        try { const r = await api(`/__gate/api/addons/${encodeURIComponent(id)}/root`); if (r.busy && r.busy.terminal) return close({ job: r.busy }); } catch { /* keep looking */ }
+        waitForTerminal();
+      }, 2500);
+    };
     const onKey = (e) => { if (e.key === "Escape" && !busy) { e.stopPropagation(); close(null); } };
     const paint = (err = "") => {
       const why = info.why || "";
@@ -453,9 +466,11 @@ function rootDialog(id, op, body, opts, info) {
         <p class="root-lead">To ${h(verb)}${op === "action" && opts.label ? ` <b>${h(opts.label)}</b>` : ""}, ${h(name)} runs as <b>root</b> on this machine.</p>
         <div class="root-why"><span class="faint small">Why</span><span>${h(info.reason || "Its manifest says it needs root.")}</span></div>
         ${opts.note ? `<p class="root-note">${h(opts.note)}</p>` : ""}
-        ${state === "nosudo" ? `<div class="root-no"><b>It can't get root from here.</b><span>${h(why || "sudo isn't available to Aegis.")}</span>
-            <span>${h(info.hint || "Ask an administrator, or run the installer from a terminal.")}</span>
-            ${info.homepage ? `<a class="link" href="${h(info.homepage)}" target="_blank" rel="noopener">${h(String(info.homepage).replace(/^https?:\/\//, ""))}</a>` : ""}</div>
+        ${state === "nosudo" ? `<div class="root-term"><b>This dashboard can't get administrator access itself.</b>
+            <span class="faint small">${h(why || "sudo isn't available to Aegis.")}</span>
+            <span>Run this in a terminal on this machine:</span>
+            <div class="root-cmd"><code>${h(command())}</code><button type="button" class="btn sm" data-root="copy">Copy</button></div>
+            <span class="faint small root-wait"><i class="spin sm"></i> It runs there, as you; sudo asks for your password in that terminal. This shows its progress once it starts.</span></div>
           <div class="modal-actions"><button type="button" class="btn primary" data-root="cancel">Close</button></div>`
         : `<form class="root-form" autocomplete="off">
             ${state === "password" ? `<label class="field"><span>Your password, for sudo</span>
@@ -470,6 +485,12 @@ function rootDialog(id, op, body, opts, info) {
       const f = scrim.querySelector(".root-form");
       if (f) f.addEventListener("submit", submit);
       scrim.querySelectorAll('[data-root="cancel"]').forEach((b) => b.addEventListener("click", () => close(null)));
+      scrim.querySelector('[data-root="copy"]')?.addEventListener("click", async (e) => {
+        const t = command();
+        try { await navigator.clipboard.writeText(t); e.target.textContent = "Copied"; }
+        catch { const r = document.createRange(); r.selectNodeContents(scrim.querySelector(".root-cmd code")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); e.target.textContent = "Select and copy"; }
+      });
+      if (state === "nosudo" && !watch) waitForTerminal();
       setTimeout(() => (scrim.querySelector('input[name="pw"]') || scrim.querySelector(".root-go") || scrim.querySelector("[data-root]"))?.focus(), 30);
     };
     async function submit(e) {
