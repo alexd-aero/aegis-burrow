@@ -264,7 +264,10 @@ export class Burrow {
         const path = new URL(req.url || "/", "http://x").pathname.replace(/^\/__gate\/api/, "");
         if (path === "/status" && req.method === "GET") return reply(200, this.status());
         const x = extra ? await extra(req.method, path, () => readJson(req)) : null;
-        if (x) { if (req.method !== "GET") this.note(id, `changed ${path.slice(1)}`); return reply(x.status, x.json); }
+        if (x) {
+          if (req.method !== "GET" && path !== "/askpass") this.note(id, `changed ${path.slice(1)}`);
+          return x.body !== undefined ? reply(x.status, x.body, x.headers) : reply(x.status, x.json);
+        }
         if (path === "/module" && req.method === "POST") {
           const b = await readJson(req);
           this.setOn(b.burrow !== false);

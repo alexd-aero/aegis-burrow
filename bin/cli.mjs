@@ -13,6 +13,9 @@
 //   node cli.mjs update-wait VERSION        wait for the new version to answer
 //   node cli.mjs addons                     the addons, and which have an update
 //   node cli.mjs addon OP ID [JSON]         install|update|uninstall|action|check one, following its job
+//                                           (JSON --password-stdin: the sudo password on stdin, for a root one)
+//   node cli.mjs addon-root ID OP           does OP need root: none|passwordless|password|nosudo, \x1f-separated with
+//                                           the name, the reason, why not, the hint and the homepage (bin/aegis asks)
 //
 // AEGIS_HOME says where data/control.sock is.
 import { request } from "node:http";
@@ -39,7 +42,7 @@ export function call(method, path, body, timeout = 120000) {
       res.on("end", () => {
         let j = {};
         try { j = JSON.parse(d || "{}"); } catch { /* not JSON */ }
-        if (res.statusCode >= 400) reject(Object.assign(new Error(j.error || `HTTP ${res.statusCode}`), { status: res.statusCode }));
+        if (res.statusCode >= 400) reject(Object.assign(new Error(j.error || `HTTP ${res.statusCode}`), { status: res.statusCode, json: j }));
         else resolve(j);
       });
     });
@@ -208,7 +211,21 @@ async function addonOp(op, id, json) {
   if (!op || !id) { out("aegis addons [add LINK | install|update|uninstall|check ID]"); return 2; }
   if (op === "check") { const r = await call("POST", `/addons/${id}/check`, "{}"); out(JSON.stringify(r)); return 0; }
   if (op === "add") { const r = await call("POST", "/addons/add", JSON.stringify({ source: id })); out(green(`  ✓ added ${r.addon?.id || ""}: install it with aegis addons install ${r.addon?.id || "ID"}`)); return 0; }
-  const r = await call("POST", `/addons/${id}/${op}`, json || "{}");
+  // the sudo password, from bin/aegis (ask_secret) on stdin: never on a command line
+  if (json === "--password-stdin") {
+    let pw = "";
+    for await (const x of process.stdin) pw += x;
+    json = JSON.stringify({ password: pw.replace(/\r?\n$/, "") });
+    pw = "";
+  }
+  let r;
+  try { r = await call("POST", `/addons/${id}/${op}`, json || "{}"); }
+  catch (e) {
+    if (!e.json?.needsRoot) throw e;
+    out(red(`  ✗ ${e.message}`));
+    if (e.status === 428) out(dim(`    run it as: aegis addons ${op} ${id}  (it asks for the password)`));
+    return e.json.badPassword ? 4 : e.json.noSudo ? 6 : 5;
+  }
   const job = r.job?.id;
   if (!job) { out(JSON.stringify(r)); return 0; }
   let seen = 0;
@@ -220,6 +237,16 @@ async function addonOp(op, id, json) {
     if (["done", "error", "failed", "cancelled"].includes(j.state)) { out(j.state === "done" ? green(`  ✓ ${op} done`) : red(`  ✗ ${j.error || j.state}`)); return j.state === "done" ? 0 : 1; }
     await sleep(800);
   }
+}
+
+// Does OP need root? One line for bin/aegis to read (fields split by \x1f, never empty-collapsed).
+async function addonRoot(id, op) {
+  let r;
+  try { r = await call("GET", `/addons/${id}/root`); } catch (e) { out(e.message); return e.code === "DOWN" ? 3 : 2; }
+  const need = op === "action" ? false : !!r.needs?.[op];
+  const kind = !need ? "none" : r.sudo === false ? "nosudo" : r.passwordless ? "passwordless" : "password";
+  out([kind, r.name, r.reason, r.why, r.hint, r.homepage].map((x) => String(x ?? "").replace(/[\x1f\r\n]+/g, " ")).join("\x1f"));
+  return 0;
 }
 
 const [cmd, ...args] = process.argv.slice(2);
@@ -236,7 +263,7 @@ const run = {
   tunnels: async () => { await tunnels(); return 0; }, ports: async () => { await ports(); return 0; },
   "pack-wait": packWait, "cf-wait": cfWait, "update-wait": () => updateWait(args[0], args[1]),
   get: () => { get(args[0]); return null; },
-  addons: addonsList, addon: () => addonOp(args[0], args[1], args[2]),
+  addons: addonsList, addon: () => addonOp(args[0], args[1], args[2]), "addon-root": () => addonRoot(args[0], args[1]),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },

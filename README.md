@@ -347,6 +347,8 @@ Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it 
 
 Scripts get the universal `ADDON_*` names (`ADDON_ID`, `ADDON_DIR`, `ADDON_DATA`, `ADDON_SETTING_<KEY>`, `ADDON_HOST=burrow`…), the older `FORGE_ADDON_*` twins, `BURROW_SOCKET` and `BURROW_NODE`.
 
+**Addons that need root.** A manifest with `"requires": {"root": "why"}` (install, update and uninstall need root) or an action with `"root": true` gets a **needs root** chip on its card. Before such a job, Aegis checks `sudo -n`: with passwordless sudo it only warns and asks to go on; otherwise it asks for your password, checks it with sudo, and keeps it **in memory for that one job** (an hour at most): never on disk, in logs, in the job's output or in an environment. The script gets `ADDON_ROOT=1`, `ADDON_ASKPASS_TOKEN` and `SUDO_ASKPASS` (`bin/aegis-askpass`) and runs `sudo -A …`. `aegis addons install|update|uninstall ID` asks the same in the terminal. Nothing automatic (default addons, the watchdog, Start it) ever runs a root step: it leaves a notice on the bell instead. Aegis can't give root when its own systemd unit sets `NoNewPrivileges=` or `ProtectSystem=`: the dialog says so.
+
 **Addons that extend Burrow.** A manifest may add `"burrow": {"extension": "x.mjs", "ui": "y.js"}`: Burrow runs the extension inside itself while the addon is installed (with a context: its data folder, its settings, the domain and its DNS records read-only, and the tunnels it made), answers `/__gate/api/x/<id>/…` and `/x/<id>/…` on the control socket with it, and shows the UI module as a card on the Burrow page. Other hosts ignore the field. [Burrow Pages](https://github.com/alexd-aero/burrow-pages) is built this way. **Start here:** [the Weft Architecture](https://github.com/alexd-aero/weft). It has the spec, **[stable example addons that link to each other](https://github.com/alexd-aero/weft#-the-examples)** (Beacon, Pulse, Relay for Burrow, Shelf for the Forge), `weft-check`, `weft-run`, and [a strict brief for AI agents](https://github.com/alexd-aero/weft/blob/main/prompt.md). The Forge's [addon guide](https://github.com/adatskov-wcpss/animated-fiesta/blob/main/docs/addons.md) covers the details.
 
 ## 🖥️ Selkies Forge
@@ -470,12 +472,13 @@ A deep `AEGIS_HOME` whose socket path would be over 100 bytes gets the socket in
 | `GET` · `POST /__gate/api/pack` | The pack |
 | `/__gate/api/tunnels…`, `/ports` | Burrow's tunnel API (409 while it is off) |
 | `GET /__gate/api/addons` · `/addons/scan[?fresh=1]` · `POST /addons/add {source}` | Addons, and what the scan found |
-| `POST /__gate/api/addons/<id>/install` `{settings}` · `update` · `uninstall` `{keep_data}` · `remove` · `action` `{action}` · `check` · `share` `{on, access}` | The lifecycle; jobs at `GET /addons/jobs/<id>?since=N`, `POST …/cancel` |
+| `POST /__gate/api/addons/<id>/install` `{settings}` · `update` · `uninstall` `{keep_data}` · `remove` · `action` `{action}` · `check` · `share` `{on, access}` | The lifecycle; jobs at `GET /addons/jobs/<id>?since=N`, `POST …/cancel`. A root one takes `{password}`; without it, when sudo asks for one: `428 {needsRoot, reason, passwordless: false}`; a wrong one `403 {badPassword}`; no sudo here `403 {noSudo, why}` |
+| `GET /__gate/api/addons/<id>/root` | `{needsRoot, reason, needs: {install, update, uninstall, actions}, sudo, passwordless, why}`: what the dialog opens on |
 | `GET /__gate/api/addon` · `/bridge` · `POST /bridge/connect` · `GET /bridge/job/<id>?since=N` | As a Selkies Forge addon; the bridge's health; *Add it for me*; the Forge's job, live |
 | `POST /__gate/api/addons/inspect` `{source}` | Fetch and validate a link (git, GitLab, .zip, .tar.gz) without adding it or running anything |
 | `/__gate/api/cf…`, `/termix…`, `/integrations…`, `/password` | Domain, Termix, connected apps, the login |
 
-The control socket serves the tunnel API (without `/__gate/api`), plus `GET /status` and `POST /module {burrow}`. Callers name themselves with `X-Burrow-Client: name/version`.
+The control socket serves the tunnel API (without `/__gate/api`), plus `GET /status` and `POST /module {burrow}`, the addon routes (`/addons/<id>/install|update|uninstall|action` with the same `{password}`, `GET /addons/<id>/root`) and `POST /askpass {token}` (the askpass helper's: the password of a running root job, text/plain, else 404; only on the socket). Callers name themselves with `X-Burrow-Client: name/version`.
 
 </details>
 

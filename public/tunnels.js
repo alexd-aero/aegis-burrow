@@ -1,6 +1,6 @@
 // Tunnel manager UI. No inline handlers (strict CSP): everything is wired
 // through data-act attributes and one delegated listener.
-import { chrome, AU, addonUpdCard, addonUpdClick } from "./common.js";
+import { chrome, AU, addonUpdCard, addonUpdClick, rootRun, rootChip } from "./common.js";
 import { distroLogo, distroLabel } from "./distros.js";
 import * as FLEET from "./fleet.js";
 
@@ -585,7 +585,7 @@ function adCard(a) {
   return `<article class="card lit adc${a.installed ? " on" : ""}${upd ? " upd" : ""}">
     <div class="t-top">
       <div class="fav lg">${a.logo ? `<img src="${h(a.logo)}" alt="">` : h(a.name[0])}</div>
-      <div class="grow" style="min-width:0"><div class="t-name">${h(a.name)} <span class="faint mono small">v${h(a.installed && a.installed_version ? a.installed_version : a.version)}</span>${upd ? ' <span class="newchip">update</span>' : ""}</div>
+      <div class="grow" style="min-width:0"><div class="t-name">${h(a.name)} <span class="faint mono small">v${h(a.installed && a.installed_version ? a.installed_version : a.version)}</span>${upd ? ' <span class="newchip">update</span>' : ""}${a.root ? ` ${rootChip(a.root.reason)}` : ""}</div>
         <div class="t-url"><span class="mono faint small" title="${h(a.source)}">${h(shortSrc(a.source))}</span></div></div>
       ${adState(a)}
     </div>
@@ -715,10 +715,15 @@ function uninstallForm(id) {
     m.querySelector("#unGo").addEventListener("click", () => { const purge = m.querySelector("#unPurge").checked; closeModal(); jobRun(id, "uninstall", { keep_data: !purge }); });
   });
 }
-async function jobRun(id, op, body) {
+async function jobRun(id, op, body, opts = {}) {
   let job;
-  try { job = (await api(`/__gate/api/addons/${id}/${op}`, { method: "POST", body: JSON.stringify(body || {}) })).job; }
-  catch (e) { toast(e.message); return; }
+  // an operation that needs root opens the administrator dialog first (common.js rootRun)
+  const a = (S.addons || []).find((x) => x.id === id);
+  try {
+    const r = await rootRun(id, op, body || {}, { root: a ? a.root : undefined, name: a?.name, logo: a?.logo, ...opts });
+    if (!r) return;                              // closed: nothing ran
+    job = r.job;
+  } catch (e) { toast(e.message); return; }
   jobFollow(job, `/__gate/api/addons/jobs/${job.id}`, (v) => {
     S.scan = null; S.addons = null;
     if (op === "update" && v.state === "done") afterAddonUpdate(id);
@@ -1581,11 +1586,21 @@ document.addEventListener("click", async (e) => {
     else if (act === "down-start" || act === "down-leave") {
       const always = document.querySelector(`[data-down-always="${CSS.escape(el.dataset.id)}"]`)?.checked;
       el.disabled = true;
-      await api(`/__gate/api/addons/${el.dataset.id}/down`, { method: "POST", body: JSON.stringify({ start: act === "down-start", always: !!always }) });
+      const a = (S.addons || []).find((x) => x.id === el.dataset.id);
+      let r;
+      try { r = await rootRun(el.dataset.id, "down", { start: act === "down-start", always: !!always }, { root: a ? a.root : undefined, name: a?.name, logo: a?.logo }); }
+      catch (err) { el.disabled = false; toast(err.message); return; }
+      if (!r) { el.disabled = false; return; }
       toast(act === "down-start" ? "Starting it again" : "Left it off");
       await loadDown(); render();
     }
-    else if (act === "ad-action") { const go2 = () => jobRun(el.dataset.id, "action", { action: el.dataset.action }); if (el.dataset.confirm && !confirm(el.dataset.confirm)) return; go2(); }
+    else if (act === "ad-action") {
+      // a root action's own confirm text goes into the administrator dialog (one question, not two)
+      const a = (S.addons || []).find((x) => x.id === el.dataset.id), x = a?.actions.find((y) => y.id === el.dataset.action);
+      if (x?.root) { jobRun(el.dataset.id, "action", { action: x.id }, { label: x.label, note: x.confirm || "" }); return; }
+      if (el.dataset.confirm && !confirm(el.dataset.confirm)) return;
+      jobRun(el.dataset.id, "action", { action: el.dataset.action });
+    }
     else if (act === "ad-uninstall") uninstallForm(el.dataset.id);
     else if (act === "ad-remove") { await api(`/__gate/api/addons/${el.dataset.id}/remove`, { method: "POST", body: "{}" }); toast("Removed"); S.scan = null; refresh(); }
     else if (act === "ad-share") { el.disabled = true; await api(`/__gate/api/addons/${el.dataset.id}/share`, { method: "POST", body: JSON.stringify({ on: el.dataset.on === "1" }) }); toast(el.dataset.on === "1" ? "Published through Burrow" : "Unpublished"); refresh(); }

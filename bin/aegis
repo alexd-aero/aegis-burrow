@@ -1037,7 +1037,7 @@ usage() {
     aegis audit [N | -f]         sign-ins, failed sign-ins, Termix sessions, tunnel changes (with IPs)
     aegis serveo on | off | url  a public link to the dashboard, no account
     aegis addons                 the addons, and which have an update
-    aegis addons update ID       update one (install, uninstall, check too)
+    aegis addons update ID       update one (install, uninstall, check too; asks for sudo when it needs root)
     aegis addons add LINK        add one from a link or a folder
     aegis termix install | remove
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
@@ -1049,6 +1049,33 @@ usage() {
 USAGE
 }
 
+# aegis addons install|update|uninstall ID. One that needs administrator (root)
+# access says so and why first: passwordless sudo asks "run it?", otherwise the
+# sudo password is asked (hidden) and handed over on stdin, never in argv.
+addon_op() {
+  local op="$1" id="$2" info kind name reason why hint home pw rc tries=0
+  case "$op" in install|update|uninstall) [ -n "$id" ] ;; *) false ;; esac || { cli addon "$op" "$id"; return; }
+  info="$(cli addon-root "$id" "$op")" || die "$info"
+  IFS=$'\x1f' read -r kind name reason why hint home <<<"$info" || true
+  [ "$kind" = none ] && { cli addon "$op" "$id"; return; }
+  warn "$name needs administrator (root) access to $op: ${reason:-its manifest says so}"
+  if [ "$kind" = nosudo ]; then
+    die "it can't get root from here: ${why:-sudo is not available}. ${hint:-Ask an administrator, or run the installer from a terminal.}"
+  fi
+  if [ "$kind" = passwordless ]; then
+    confirm "sudo needs no password here. Run it as administrator?" n || die "nothing ran"
+    cli addon "$op" "$id"; return
+  fi
+  interactive || die "it needs your sudo password: run aegis addons $op $id in a terminal"
+  while :; do
+    pw="$(ask_secret "Your password, for sudo:")" || die "no keyboard to ask on"
+    [ -n "$pw" ] || die "nothing ran"
+    rc=0; printf '%s' "$pw" | cli addon "$op" "$id" --password-stdin || rc=$?
+    pw=""
+    if [ "$rc" = 4 ] && [ "$tries" -lt 2 ]; then tries=$((tries + 1)); continue; fi
+    return "$rc"
+  done
+}
 need_installed() { [ -f "$APP/aegis/server.mjs" ] || die "Aegis × Burrow is not installed (run: aegis install)"; NODE="$(find_node)" || die "Node.js is missing"; }
 
 # no command: the home screen in a terminal, the help elsewhere
@@ -1078,7 +1105,7 @@ case "$1" in
     warn "the copy on the other machine still runs: stop it there (aegis stop), or two gates answer for the same domain"
     svc restart; wait_healthy && ok "running here again" || die "not answering yet; see: aegis logs" ;;
   addons) shift; need_installed; ensure_running
-    if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else cli addon "$1" "${2:-}"; fi ;;
+    if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else addon_op "$1" "${2:-}"; fi ;;
   url) need_installed; links "" ;;
   setup-link) need_installed; if setup_needed; then links "$(setup_path)"; else echo "  the login is already set up:"; links ""; fi ;;
   serveo) shift; need_installed

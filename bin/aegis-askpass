@@ -1,0 +1,33 @@
+#!/bin/sh
+# aegis-askpass: SUDO_ASKPASS for addon scripts that need root (Weft requires.root).
+#
+# Aegis × Burrow sets, for such a job only: ADDON_ROOT=1, ADDON_ASKPASS_TOKEN
+# (random, valid while that job runs) and SUDO_ASKPASS=<this file>. The
+# script runs `sudo -A …`; sudo runs this, which asks the control socket
+# (BURROW_SOCKET, mode 600) for the password the user typed in the dashboard
+# or the terminal, and prints it. The token goes in the request body (stdin
+# of curl), never on a command line. Unknown or expired token: exit 1, and
+# sudo says the password was wrong.
+#
+#   POST /askpass  {"token": "<ADDON_ASKPASS_TOKEN>"}  ->  200 text/plain password | 404
+t="${ADDON_ASKPASS_TOKEN:-}"
+s="${BURROW_SOCKET:-}"
+case "$t" in *[!0-9a-f]*|"") exit 1 ;; esac
+[ "${#t}" -eq 64 ] && [ -n "$s" ] && [ -S "$s" ] || exit 1
+if command -v curl >/dev/null 2>&1; then
+  pw="$(printf '{"token":"%s"}' "$t" | curl -fsS --max-time 10 --unix-socket "$s" -X POST \
+        -H 'Content-Type: application/json' -H 'X-Burrow-Client: aegis-askpass' --data-binary @- http://burrow/askpass 2>/dev/null)" || exit 1
+elif [ -n "${BURROW_NODE:-}" ] && [ -x "$BURROW_NODE" ]; then
+  pw="$("$BURROW_NODE" -e '
+    const r = require("http").request({ socketPath: process.env.BURROW_SOCKET, method: "POST", path: "/askpass", timeout: 10000,
+      headers: { "Content-Type": "application/json", "X-Burrow-Client": "aegis-askpass" } }, (res) => {
+      let d = ""; res.on("data", (x) => (d += x));
+      res.on("end", () => { if (res.statusCode !== 200) process.exit(1); process.stdout.write(d); });
+    });
+    r.on("error", () => process.exit(1)); r.on("timeout", () => process.exit(1));
+    r.end(JSON.stringify({ token: process.env.ADDON_ASKPASS_TOKEN }));' 2>/dev/null)" || exit 1
+else
+  exit 1
+fi
+[ -n "$pw" ] || exit 1
+printf '%s\n' "$pw"

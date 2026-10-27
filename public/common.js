@@ -267,7 +267,7 @@ export function addonUpdCard(id, { whatsNew = "check" } = {}) {
   } else if (u && (job || !auLaterGet(u))) {
     const to = u.latest && u.latest !== u.version ? u.latest : null, run = !!job;
     const title = card?.title ? h(fill(card.title, u, to)) : `${h(u.name)} update`;
-    const badge = look.badge ? ` <span class="new-chip">${h(look.badge.slice(0, 14))}</span>` : "";
+    const badge = (look.badge ? ` <span class="new-chip">${h(look.badge.slice(0, 14))}</span>` : "") + (u.root ? ` ${rootChip(u.root)}` : "");
     const base = `${to ? `<span class="uc-pill">v${h(to)}</span> is ready to install` : `Commit <span class="mono">${h(short(u.commit))}</span> is ready to install`}${!card?.tagline && u.subject ? ` · ${h(u.subject)}` : ""}.`;
     const sub = `${card?.tagline ? `<span class="uc-line">${h(card.tagline)}</span>` : ""}${look.line ? `<b class="uc-urgent">${h(look.line)}</b> ` : ""}${base} Its settings and everything it set up are kept.`
       + (card?.highlights?.length ? `<ul class="uc-hl">${card.highlights.slice(0, 5).map((x) => `<li>${h(x)}</li>`).join("")}</ul>` : "");
@@ -287,7 +287,8 @@ export async function updateAddon(id, render, after) {
   AU.job[id] = { u, state: "running", phase: "Starting…" };
   render();
   let job;
-  try { job = (await api(`/__gate/api/addons/${id}/update`, { method: "POST", body: "{}" })).job; }
+  // an update that needs root asks first (rootRun); closing that dialog changes nothing
+  try { const r = await rootRun(id, "update", {}, { root: u.root ? undefined : null, name: u.name, logo: u.logo }); if (!r) { delete AU.job[id]; render(); return; } job = r.job; }
   catch (e) { AU.job[id] = { u, state: "error", error: e.message }; render(); return; }
   let v = job;
   for (let miss = 0; v.state === "running" && miss < 30;) {
@@ -389,5 +390,109 @@ export function updateBanner(me, before) {
     b.disabled = true; b.innerHTML = '<span class="uc-spin sm"></span><span>Updating…</span>';
     try { await runUpdate((t) => { const p = el.querySelector("#updPhase"); if (p) p.textContent = t; }); }
     catch (ex) { toast(ex.message); b.disabled = false; b.innerHTML = `${UPD.down}<span>Try again</span>`; }
+  });
+}
+
+// ---------- administrator (root) access for an addon's job (Weft requires.root) ----------
+// rootRun(id, op, body, {root, name, logo, note}) posts /__gate/api/addons/<id>/<op>
+// like before, but when that operation needs root it first opens a dialog: a
+// warning and "Run as administrator" when sudo needs no password here, a
+// password field when it does (checked by the server with sudo; a wrong one
+// runs nothing), or the reason it can't be done from here. Resolves to the
+// API's answer ({job}), or null when the dialog was closed. `root` is what
+// the addon listing said (null: nothing needs root, so no extra request).
+export const ROOT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 4 5.5v6c0 4.9 3.4 8.8 8 10 4.6-1.2 8-5.1 8-10v-6l-8-3Z"/><rect x="9" y="10.5" width="6" height="5" rx="1"/><path d="M10.2 10.5V9a1.8 1.8 0 0 1 3.6 0v1.5"/></svg>';
+export const rootChip = (reason) => `<span class="root-chip" title="${h(reason ? `Needs administrator (root) access: ${reason}` : "Needs administrator (root) access")}">${ROOT_ICON}needs root</span>`;
+async function rawPost(path, body) {
+  const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Gate": "1" }, body: JSON.stringify(body || {}) });
+  if (r.status === 401) { location.href = "/__gate/login?next=" + encodeURIComponent(location.pathname + location.hash); throw new Error("Signed out"); }
+  const j = await r.json().catch(() => ({}));
+  return { status: r.status, ok: r.ok, json: j };
+}
+const rootNeeded = (info, op, body) => {
+  const n = info && info.needs;
+  if (!n) return false;
+  if (op === "action") return (n.actions || []).includes(body.action);
+  if (op === "down") return !!body.start && !!info.start && (n.actions || []).includes(info.start);
+  return !!n[op];
+};
+export async function rootRun(id, op, body = {}, opts = {}) {
+  const path = `/__gate/api/addons/${encodeURIComponent(id)}/${op}`;
+  const plain = async () => {
+    const r = await rawPost(path, body);
+    if (r.ok) return r.json;
+    if (r.json && r.json.needsRoot) return rootDialog(id, op, body, opts, r.json);       // the listing was out of date
+    throw new Error(r.json.error || `HTTP ${r.status}`);
+  };
+  if (opts.root === null || !["install", "update", "uninstall", "action", "down"].includes(op)) return plain();
+  let info;
+  try { info = await api(`/__gate/api/addons/${encodeURIComponent(id)}/root`); } catch { return plain(); }
+  if (!rootNeeded(info, op, body)) return plain();
+  return rootDialog(id, op, body, opts, info);
+}
+function rootDialog(id, op, body, opts, info) {
+  const path = `/__gate/api/addons/${encodeURIComponent(id)}/${op}`;
+  const name = info.name || opts.name || id, logo = info.logo || opts.logo || null;
+  const verb = { install: "install", update: "update", uninstall: "uninstall", action: "run this", down: "start" }[op] || op;
+  return new Promise((resolve) => {
+    const prev = document.activeElement;
+    const scrim = document.createElement("div");
+    scrim.className = "scrim root-scrim";
+    let state = info.sudo === false || info.noSudo ? "nosudo" : info.passwordless ? "confirm" : "password";
+    let busy = false;
+    const close = (v) => { scrim.remove(); document.removeEventListener("keydown", onKey, true); try { prev?.focus?.(); } catch { /* gone */ } resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape" && !busy) { e.stopPropagation(); close(null); } };
+    const paint = (err = "") => {
+      const why = info.why || "";
+      scrim.innerHTML = `<div class="card lit modal root-modal" role="dialog" aria-modal="true" aria-labelledby="rootT">
+        <div class="root-head">
+          <div class="root-badge">${ROOT_ICON}</div>
+          <div class="fav lg root-logo">${logo ? `<img src="${h(logo)}" alt="">` : h(String(name)[0] || "?")}</div>
+        </div>
+        <h2 id="rootT">${h(name)} needs administrator access</h2>
+        <p class="root-lead">To ${h(verb)}${op === "action" && opts.label ? ` <b>${h(opts.label)}</b>` : ""}, ${h(name)} runs as <b>root</b> on this machine.</p>
+        <div class="root-why"><span class="faint small">Why</span><span>${h(info.reason || "Its manifest says it needs root.")}</span></div>
+        ${opts.note ? `<p class="root-note">${h(opts.note)}</p>` : ""}
+        ${state === "nosudo" ? `<div class="root-no"><b>It can't get root from here.</b><span>${h(why || "sudo isn't available to Aegis.")}</span>
+            <span>${h(info.hint || "Ask an administrator, or run the installer from a terminal.")}</span>
+            ${info.homepage ? `<a class="link" href="${h(info.homepage)}" target="_blank" rel="noopener">${h(String(info.homepage).replace(/^https?:\/\//, ""))}</a>` : ""}</div>
+          <div class="modal-actions"><button type="button" class="btn primary" data-root="cancel">Close</button></div>`
+        : `<form class="root-form" autocomplete="off">
+            ${state === "password" ? `<label class="field"><span>Your password, for sudo</span>
+              <input class="input" type="password" name="pw" autocomplete="current-password" spellcheck="false" required ${busy ? "disabled" : ""}></label>
+              <p class="faint small root-fine">Checked with sudo, kept in memory for this one job only, then forgotten. Never stored or logged.</p>`
+              : `<p class="faint small root-fine">sudo needs no password here, so it runs straight away. Continue?</p>`}
+            <div class="err-msg" role="alert">${h(err)}</div>
+            <div class="modal-actions"><button type="button" class="btn ghost" data-root="cancel" ${busy ? "disabled" : ""}>Cancel</button>
+              <button class="btn primary root-go" ${busy ? "disabled" : ""}>${busy ? '<span class="spin sm"></span> Checking…' : `${ROOT_ICON}Run as administrator`}</button></div>
+          </form>`}
+      </div>`;
+      const f = scrim.querySelector(".root-form");
+      if (f) f.addEventListener("submit", submit);
+      scrim.querySelectorAll('[data-root="cancel"]').forEach((b) => b.addEventListener("click", () => close(null)));
+      setTimeout(() => (scrim.querySelector('input[name="pw"]') || scrim.querySelector(".root-go") || scrim.querySelector("[data-root]"))?.focus(), 30);
+    };
+    async function submit(e) {
+      e.preventDefault();
+      if (busy) return;
+      const input = scrim.querySelector('input[name="pw"]');
+      let pw = input ? input.value : undefined;
+      if (input && !pw) { paint("Type your password."); return; }
+      busy = true; paint();
+      let r;
+      try { r = await rawPost(path, pw === undefined ? body : { ...body, password: pw }); }
+      catch (err) { busy = false; pw = null; paint(err.message); return; }
+      pw = null;
+      busy = false;
+      if (r.ok) { close(r.json); return; }
+      const j = r.json || {};
+      if (j.noSudo) { info = { ...info, ...j, sudo: false }; state = "nosudo"; paint(); return; }
+      if (r.status === 428) { const had = !!input; state = "password"; paint(had ? "Type your password." : "sudo asks for a password here after all."); return; }
+      paint(j.error || `HTTP ${r.status}`);
+    }
+    scrim.addEventListener("mousedown", (e) => { if (e.target === scrim && !busy) close(null); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(scrim);
+    paint();
   });
 }

@@ -18,6 +18,12 @@
 // and the same values as FORGE_ADDON_*, for scripts written before ADDON_*.
 // Burrow adds BURROW_SOCKET: its control socket, to publish a port.
 //
+// Root: "requires": {"root": "why"} means install, update and uninstall need
+// root; an action with "root": true does too. Such a job only starts once the
+// user said yes (and typed their sudo password when sudo asks for one); its
+// script then gets ADDON_ROOT=1, ADDON_ASKPASS_TOKEN and SUDO_ASKPASS, and
+// calls `sudo -A`. See burrow/root.mjs.
+//
 // Scripts talk back with lines on stdout: "::progress N text", "::phase text",
 // "::open URL", "::warn text"; status (and detect) end with one JSON line.
 
@@ -28,6 +34,7 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ArchiveError, download, unpack, isArchive } from "./archive.mjs";
 import { rescue as rescueAddon, reports as rescueReports, report as rescueReport } from "./rescue.mjs";
+import { RootAccess, RootError, terminalHint } from "./root.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -46,6 +53,10 @@ const ARCH_ALIASES = { amd64: "x86_64", x64: "x86_64", arm64: "aarch64", armhf: 
 const MASK = "••••••••";
 
 export class AddonError extends Error {}
+export { RootError };
+// never passed through from Aegis's own environment, and never twinned as FORGE_*
+const ROOT_VARS = ["ADDON_ROOT", "ADDON_ASKPASS_TOKEN", "SUDO_ASKPASS", "FORGE_ADDON_ROOT", "FORGE_ADDON_ASKPASS_TOKEN"];
+const NO_TWIN = new Set(["ADDON_ROOT", "ADDON_ASKPASS_TOKEN"]);
 
 // systemd-run --user --scope, when this user's systemd manager is there
 // (lingering, or logged in); null otherwise. Checked once.
@@ -276,6 +287,14 @@ export function cleanUpdateCard(c) {
   return Object.keys(out).length ? out : null;
 }
 
+// requires.root: why install/update/uninstall need root, shown to the user before they run.
+export function rootReason(v) {
+  if (v == null) return "";
+  if (typeof v !== "string" || !v.trim()) fail('requires.root must be text: why the addon needs root, e.g. "Installs and configures Postfix"');
+  if (v.trim().length > 200) fail("requires.root is longer than 200 characters");
+  return v.trim();
+}
+
 export function loadManifest(root) {
   const path = join(root, MANIFEST);
   let size;
@@ -311,7 +330,8 @@ export function loadManifest(root) {
   for (const a of d.actions || []) {
     if (!a || typeof a !== "object" || !ACTION_RE.test(String(a.id || ""))) fail('every action needs an "id" (lowercase letters, digits, dashes)');
     if (SCRIPTS.includes(a.id)) fail(`action "${a.id}" has the name of a lifecycle script`);
-    m.actions.push({ id: a.id, label: text(a, "label", 24, true), script: inside(root, a.script, `actions.${a.id}.script`), confirm: text(a, "confirm", 200) });
+    if (a.root != null && typeof a.root !== "boolean") fail(`actions.${a.id}.root must be true or false`);
+    m.actions.push({ id: a.id, label: text(a, "label", 24, true), script: inside(root, a.script, `actions.${a.id}.script`), confirm: text(a, "confirm", 200), root: a.root === true });
   }
   if (m.actions.length > 8) fail("at most 8 actions");
   m.settings = [];
@@ -351,6 +371,7 @@ export function loadManifest(root) {
     commands: (req.commands || []).map(String).filter((x) => /^[A-Za-z0-9._+-]+$/.test(x)),
   };
   for (const h of ["forge", "burrow"]) if (m.requires[h] && !/^(>=)?\s*\d+(\.\d+){0,2}$/.test(m.requires[h])) fail(`requires.${h} must look like ">=1.10.0"`);
+  m.requires.root = rootReason(req.root);
   m.integration = {};
   if (d.integration && Object.keys(d.integration).length) {
     const p = String(d.integration.dir || "");
@@ -428,8 +449,11 @@ export class Addons {
   // dir:      where checkouts and data live (AEGIS_HOME/addons)
   // registry: the JSON file that remembers them (DATA/addons.json)
   // env:      () => {ADDON_HOST_URL, ADDON_BIND, BURROW_SOCKET, …}: host values for scripts
-  constructor({ dir, registry, version, env, log, tunnels, onChange }) {
-    Object.assign(this, { dir, registryFile: registry, version, hostEnv: env || (() => ({})), log: log || console.log, tunnels, onChange });
+  // notify:   (notice) => …: the bell, for what an automatic path skipped (root)
+  // root:     a RootAccess (burrow/root.mjs): sudo checks and the askpass tokens
+  constructor({ dir, registry, version, env, log, tunnels, onChange, notify, root }) {
+    Object.assign(this, { dir, registryFile: registry, version, hostEnv: env || (() => ({})), log: log || console.log, tunnels, onChange, notify: notify || null });
+    this.root = root || new RootAccess();
     this.statusCache = new Map();
     this.jobs = new Map();
     this.scanCache = null;
@@ -454,9 +478,11 @@ export class Addons {
   // ---------------- scripts
   env(rec, root, data, extra = {}) {
     const m = rec.manifest;
-    const e = { ...process.env, ADDON_SPEC: String(SPEC), ADDON_ID: m.id, ADDON_NAME: m.name, ADDON_VERSION: m.version,
-                ADDON_DIR: root, ADDON_DATA: data, ADDON_ADOPT: "0", ADDON_UPDATE: "0", ADDON_ARCH: machine(),
-                ADDON_HOST: HOST, ADDON_HOST_VERSION: this.version, ...this.hostEnv() };
+    const e = { ...process.env };
+    for (const k of ROOT_VARS) delete e[k];                // root comes only from a grant (extra), never inherited
+    Object.assign(e, { ADDON_SPEC: String(SPEC), ADDON_ID: m.id, ADDON_NAME: m.name, ADDON_VERSION: m.version,
+                ADDON_DIR: root, ADDON_DATA: data, ADDON_ADOPT: "0", ADDON_UPDATE: "0", ADDON_ARCH: machine(), ADDON_ROOT: "0",
+                ADDON_HOST: HOST, ADDON_HOST_VERSION: this.version, ...this.hostEnv() });
     for (const st of m.settings) {
       let v = (rec.settings || {})[st.key] ?? st.default;
       v = v == null ? "" : st.type === "bool" ? (v ? "1" : "0") : String(v);
@@ -464,7 +490,7 @@ export class Addons {
     }
     Object.assign(e, extra);
     // the older names, for scripts written for Selkies Forge first
-    for (const k of Object.keys(e)) if (k.startsWith("ADDON_") && !k.startsWith("ADDON_HOST")) e["FORGE_" + k] = e[k];
+    for (const k of Object.keys(e)) if (k.startsWith("ADDON_") && !k.startsWith("ADDON_HOST") && !NO_TWIN.has(k)) e["FORGE_" + k] = e[k];
     if (e.ADDON_BIND) e.FORGE_BIND = e.ADDON_BIND;
     return e;
   }
@@ -615,10 +641,77 @@ export class Addons {
     return out;
   }
 
-  startJob(aid, kind, label, work) {
+  // ---------------- root (burrow/root.mjs)
+  // Why this operation needs root, or "" when it doesn't.
+  rootNeed(rec, op, actionId) {
+    const m = rec.manifest, why = m.requires?.root || "";
+    if (op === "install") return why;
+    // the update runs the NEW version's script: its manifest, as the last check read it
+    if (op === "update") return rec.installed ? (typeof rec.remote?.root === "string" ? rec.remote.root : why) : "";
+    if (op === "uninstall") return rec.installed && m.scripts.uninstall ? why : "";
+    if (op === "action") { const a = m.actions.find((x) => x.id === actionId); return a?.root ? why || `"${a.label}" needs administrator access` : ""; }
+    return "";
+  }
+  // What the dashboard and the command line ask before a root job: cheap (one `sudo -n`, cached a minute).
+  async rootInfo(id) {
+    const rec = this.get(id), m = rec.manifest;
+    const needs = { install: !!this.rootNeed(rec, "install"), update: !!this.rootNeed(rec, "update"), uninstall: !!this.rootNeed(rec, "uninstall"),
+                    actions: m.actions.filter((a) => a.root).map((a) => a.id) };
+    const any = needs.install || needs.update || needs.uninstall || needs.actions.length > 0;
+    const out = { id, name: m.name, homepage: m.homepage || null, logo: m.logo ? `/__gate/api/addons/${rec.id}/image?v=${(rec.commit || String(rec.updated || 0)).slice(0, 12)}` : null,
+                  reason: this.rootNeed(rec, "install") || this.rootNeed(rec, "update") || (needs.actions.length ? this.rootNeed(rec, "action", needs.actions[0]) : ""),
+                  needsRoot: any, needs, start: this.startAction(rec)?.id || null, sudo: null, passwordless: null, why: null };
+    if (any) Object.assign(out, await this.root.check());
+    if (out.sudo === false) out.hint = terminalHint(m);
+    return out;
+  }
+  // Before a root job: null when the operation doesn't need root, else a grant
+  // ({token}) once sudo is passwordless or the password checks out. Throws a
+  // RootError: 428 {needsRoot, passwordless: false} without a password,
+  // 403 {badPassword} for a wrong one, 403 {noSudo} when sudo can't work here.
+  async rootGrant(id, op, { password, action } = {}) {
+    const rec = this.get(id), reason = this.rootNeed(rec, op, action);
+    if (!reason) return null;
+    const m = rec.manifest, base = { needsRoot: true, id, name: m.name, reason, homepage: m.homepage || null };
+    const c = await this.root.check(true);
+    if (!c.sudo) throw new RootError(`${m.name} needs administrator (root) access, and it can't get it from here: ${c.why} ${terminalHint(m)}`, 403, { ...base, noSudo: true, sudo: false, passwordless: false, why: c.why, hint: terminalHint(m) });
+    if (c.passwordless) return { token: this.root.issue(null), reason };
+    if (password == null || password === "") throw new RootError(`${m.name} needs administrator (root) access: ${reason}. Type your password for sudo.`, 428, { ...base, sudo: true, passwordless: false });
+    try { await this.root.validate(password); }
+    catch (e) {
+      if (e instanceof RootError) { Object.assign(e.extra, base, { sudo: !e.extra.noSudo, passwordless: false }); if (e.extra.noSudo) { e.extra.hint = terminalHint(m); e.message += " " + terminalHint(m); } }
+      throw e;
+    }
+    return { token: this.root.issue(String(password)), reason };
+  }
+  // Nothing that needs root runs without a grant: an automatic path (default
+  // addons, the watchdog, the bridge) gets this instead, and the bell says so.
+  refuseRoot(rec, op, reason, actionLabel) {
+    const m = rec.manifest, what = op === "action" ? `run "${actionLabel}"` : op;
+    this.notify?.({ level: "warn", key: `root-${rec.id}-${op}`, title: `${m.name} needs administrator access to ${what}`,
+      body: `${reason}. Nothing ran. ${op === "action" ? "Run it" : `${op[0].toUpperCase()}${op.slice(1)} it`} from Burrow → Addons (or aegis addons ${op} ${rec.id}), where you can give it.`,
+      link: "/__gate/tunnels#/addons" });
+    fail(`${m.name} needs administrator (root) access to ${what}: ${reason}. Nothing ran.`);
+  }
+  // install / update / uninstall / action, with the grant rootGrant gave (or null):
+  // the dashboard's and the control socket's one way in. A grant is dropped
+  // if the job never starts, and when it ends.
+  runOp(op, id, b = {}, grant = null) {
+    try {
+      if (op === "install") return this.install(id, b.settings, { root: grant });
+      if (op === "update") return this.update(id, { root: grant });
+      if (op === "uninstall") return this.uninstall(id, b.keep_data !== false, { root: grant });
+      if (op === "action") return this.action(id, b.action, { root: grant });
+      fail(`unknown operation ${op}`);
+    } catch (e) { if (grant) this.root.drop(grant.token); throw e; }
+  }
+  rootEnv(grant) { return grant ? this.root.env(grant.token) : {}; }
+
+  startJob(aid, kind, label, work, grant = null) {
     for (const j of this.jobs.values()) if (j.aid === aid && j.state === "running") fail(`${label.split(" ").pop()} is busy: ${j.label}.`);
     const job = new Job(aid, kind, label);
     this.jobs.set(job.id, job);
+    if (grant) { this.root.bind(grant.token, job.id); job.root = true; }
     // whatever Burrow runs (stop, update, uninstall…) may take the addon down: that's no crash
     this.expectUntil.set(aid, Infinity);
     for (const [id, j] of this.jobs) if (j.state !== "running" && Date.now() - j.started > 3600e3) this.jobs.delete(id);
@@ -627,30 +720,34 @@ export class Addons {
     }).catch((e) => {
       Object.assign(job, { state: job.cancelled ? "cancelled" : "error", error: e.message });
       job.log(e.message, "err");
-    }).finally(() => { job.finished = Date.now(); this.expectUntil.set(aid, Date.now() + 30e3); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
+    }).finally(() => { if (grant) this.root.drop(grant.token); job.finished = Date.now(); this.expectUntil.set(aid, Date.now() + 30e3); this.statusCache.delete(aid); this.scanCache = null; this.log(`addon ${aid}: ${kind} ${job.state}`); this.onChange?.(aid); });
     return job.view();
   }
 
-  install(id, settings) {
+  install(id, settings, { root: grant = null } = {}) {
     const rec0 = this.get(id), m = rec0.manifest;
     const problems = checkRequirements(m, this.version);
     if (problems.length) fail(`${m.name} ${problems.join("; ")}.`);
+    const why = this.rootNeed(rec0, "install");
+    if (why && !grant) this.refuseRoot(rec0, "install", why);
     const rec = this.patch(id, { settings: this.cleanSettings(rec0, settings || {}) });
     return this.startJob(id, "install", `Installing ${m.name}`, async (job) => {
       const found = await this.detect(rec);
       const adopt = found.found && !rec.installed;
       job.phase = adopt ? `Linking the ${m.name} already on this machine` : `Installing ${m.name}`;
       if (adopt) job.log(`${m.name} is already on this machine${found.detail ? ` (${found.detail})` : ""}; linking it.`);
-      const r = await this.run(rec, m.scripts.install, { job, extra: { ADDON_ADOPT: adopt ? "1" : "0" }, timeout: TIMEOUT.install });
+      const r = await this.run(rec, m.scripts.install, { job, extra: { ADDON_ADOPT: adopt ? "1" : "0", ...this.rootEnv(grant) }, timeout: TIMEOUT.install });
       if (r.code !== 0) fail(`the install script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
       const done = this.patch(id, { installed: true, installed_version: m.version, installed_at: Date.now(), adopted: !!adopt,
                                     open_url: r.dir.open || found.url || rec.open_url || null, detected: found });
       return { id, name: m.name, open_url: done.open_url, adopted: !!adopt, warnings: r.dir.warn };
-    });
+    }, grant);
   }
 
-  update(id) {
+  update(id, { root: grant = null } = {}) {
     const rec = this.get(id);
+    const why = this.rootNeed(rec, "update");
+    if (why && !grant) this.refuseRoot(rec, "update", why);
     return this.startJob(id, "update", `Updating ${rec.manifest.name}`, async (job) => {
       job.phase = `Fetching ${rec.manifest.name}`;
       const tmp = mkdtempSync(join(this.dir, ".upd-"));
@@ -659,6 +756,11 @@ export class Addons {
         commit = await fetchSource(rec.source, join(tmp, "repo"));
         m = loadManifest(join(tmp, "repo", rec.source.subdir || ""));
         if (m.id !== id) fail(`the repository now holds a different addon (${m.id})`);
+        // the new version needs root and nobody gave it: nothing changes, and the next try asks
+        if (rec.installed && m.requires.root && !grant) {
+          this.patch(id, { remote: { ...(this.get(id).remote || {}), root: m.requires.root } });
+          fail(`${m.name} ${m.version} needs administrator (root) access to update: ${m.requires.root}. Nothing changed; update it again to give it.`);
+        }
         const dest = this.addonDir(id);
         rmSync(join(dest, "repo.old"), { recursive: true, force: true });
         if (existsSync(join(dest, "repo"))) renameSync(join(dest, "repo"), join(dest, "repo.old"));
@@ -672,27 +774,29 @@ export class Addons {
         const script = m.scripts.update || m.scripts.install;
         res.ran = m.scripts.update ? "update" : "install";
         job.phase = `Updating ${m.name}`; job.progress = 0.2;
-        const r = await this.run(cur, script, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1" }, timeout: TIMEOUT.update });
+        const r = await this.run(cur, script, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1", ...(m.requires.root ? this.rootEnv(grant) : {}) }, timeout: TIMEOUT.update });
         if (r.code !== 0) fail(`the update script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
         cur = this.patch(id, { installed_version: m.version, open_url: r.dir.open || cur.open_url });
         res.open_url = cur.open_url;
       }
       return res;
-    });
+    }, grant);
   }
 
-  uninstall(id, keepData = true) {
+  uninstall(id, keepData = true, { root: grant = null } = {}) {
     const rec = this.get(id), m = rec.manifest;
+    const why = this.rootNeed(rec, "uninstall");
+    if (why && !grant) this.refuseRoot(rec, "uninstall", why);
     return this.startJob(id, "uninstall", `Uninstalling ${m.name}`, async (job) => {
       if (m.scripts.uninstall) {
-        const r = await this.run(rec, m.scripts.uninstall, { job, extra: { ADDON_KEEP_DATA: keepData ? "1" : "0" }, timeout: TIMEOUT.uninstall });
+        const r = await this.run(rec, m.scripts.uninstall, { job, extra: { ADDON_KEEP_DATA: keepData ? "1" : "0", ...this.rootEnv(grant) }, timeout: TIMEOUT.uninstall });
         if (r.code !== 0) fail(`the uninstall script failed (exit ${r.code}): ${(r.lines.filter((l) => l.trim()).pop() || "no output").slice(0, 300)}`);
       } else job.log(`${m.name} has no uninstall script; Burrow only forgets that it is installed.`);
       if (!keepData) rmSync(join(this.addonDir(id), "data"), { recursive: true, force: true });
       await this.share(id, false).catch(() => {});
       this.patch(id, { installed: false, installed_version: null, open_url: null, adopted: false });
       return { id, name: m.name, kept_data: !!keepData };
-    });
+    }, grant);
   }
 
   remove(id, force = false) {
@@ -704,16 +808,18 @@ export class Addons {
     return { ok: true, id };
   }
 
-  action(id, actionId) {
+  action(id, actionId, { root: grant = null } = {}) {
     const rec = this.get(id);
     const a = rec.manifest.actions.find((x) => x.id === actionId);
     if (!a) fail(`${rec.manifest.name} has no action ${actionId}.`);
     if (!rec.installed) fail(`Install ${rec.manifest.name} first.`);
+    const why = this.rootNeed(rec, "action", a.id);
+    if (why && !grant) this.refuseRoot(rec, "action", why, a.label);
     return this.startJob(id, "action", `${rec.manifest.name}: ${a.label}`, async (job) => {
-      const r = await this.run(rec, a.script, { job, timeout: TIMEOUT.action });
+      const r = await this.run(rec, a.script, { job, timeout: TIMEOUT.action, extra: this.rootEnv(grant) });
       if (r.code !== 0) fail(`${a.label} failed (exit ${r.code})`);
       return { id, action: a.id, open_url: r.dir.open, warnings: r.dir.warn };
-    });
+    }, grant);
   }
 
   // Start it whatever it takes, and write down why when it won't (burrow/rescue.mjs).
@@ -765,18 +871,19 @@ export class Addons {
     }
   }
   // The answer to "start it back up?": start it (and maybe always do), or leave it off.
-  answerDown(id, { start, always }) {
+  answerDown(id, { start, always }, grant = null) {
     this.get(id);
     if (always !== undefined) this.patch(id, { autoRestart: !!always });
     if (!start) { this.patch(id, { down: null }); return null; }
-    const job = this.startDown(id);
+    const job = this.startDown(id, grant);
     return job;
   }
-  startDown(id) {
+  startDown(id, grant = null) {
     const rec = this.get(id);
     const a = this.startAction(rec);
     if (!a) fail(`${rec.manifest.name} has no start action.`);
-    const job = this.action(id, a.id);
+    let job;
+    try { job = this.action(id, a.id, { root: grant }); } catch (e) { if (grant) this.root.drop(grant.token); throw e; }
     this.patch(id, { down: rec.down ? { ...rec.down, starting: Date.now() } : null });
     return job;
   }
@@ -800,12 +907,12 @@ export class Addons {
       const tmp = mkdtempSync(join(this.dir, ".chk-"));
       try {
         const digest = await fetchSource(src, join(tmp, "x"));
-        let version = "", card = null;
-        try { const nm = loadManifest(join(tmp, "x", rec.subdir || "")); version = nm.version; card = nm.update_card; } catch { /* */ }
+        let version = "", card = null, root = null;
+        try { const nm = loadManifest(join(tmp, "x", rec.subdir || "")); version = nm.version; card = nm.update_card; root = nm.requires.root; } catch { /* */ }
         out.up_to_date = digest === rec.commit;
-        out.remote = { commit: digest, short: digest.slice(7, 14), version, subject: "a new archive", card };
+        out.remote = { commit: digest, short: digest.slice(7, 14), version, subject: "a new archive", card, root };
         out.note = out.up_to_date ? "Checked by downloading the archive again." : "The archive at that link has changed.";
-        this.patch(id, { remote: { checked: out.checked, up_to_date: out.up_to_date, commit: digest, version, subject: "a new archive", card } });
+        this.patch(id, { remote: { checked: out.checked, up_to_date: out.up_to_date, commit: digest, version, subject: "a new archive", card, ...(root == null ? {} : { root }) } });
         return out;
       } finally { rmSync(tmp, { recursive: true, force: true }); }
     }
@@ -834,8 +941,10 @@ export class Addons {
       out.remote.version = String(nm?.version || "").slice(0, 30);
       // the new version's own update card (a bad one is left out, never in the way of the update)
       try { out.remote.card = cleanUpdateCard(nm?.update_card); } catch { out.remote.card = null; }
+      // and whether it needs root (asked before the update runs)
+      try { out.remote.root = nm ? rootReason(nm.requires?.root) : null; } catch { out.remote.root = null; }
     } else out.remote = { commit: remote, short: remote.slice(0, 7) };
-    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null, count: same ? 0 : (out.commits || []).length, card: out.remote.card || null } });
+    this.patch(id, { remote: { checked: out.checked, up_to_date: same, commit: out.remote.commit, version: out.remote.version || null, subject: out.remote.subject || null, count: same ? 0 : (out.commits || []).length, card: out.remote.card || null, ...(typeof out.remote.root === "string" ? { root: out.remote.root } : {}) } });
     return out;
   }
 
@@ -859,7 +968,7 @@ export class Addons {
     return Object.values(this.load()).filter((r) => r.installed && r.remote?.up_to_date === false).map((r) => ({
       id: r.id, name: r.manifest.name, version: r.installed_version || r.manifest.version, latest: r.remote.version || null,
       commit: r.remote.commit || null, from: r.commit || null, subject: r.remote.subject || null, count: r.remote.count || 0, checked: r.remote.checked,
-      card: r.remote.card || r.manifest.update_card || null,
+      card: r.remote.card || r.manifest.update_card || null, root: this.rootNeed(r, "update") || null,
       logo: r.manifest.logo ? `/__gate/api/addons/${r.id}/image?v=${(r.commit || String(r.updated || 0)).slice(0, 12)}` : null,
     }));
   }
@@ -898,7 +1007,11 @@ export class Addons {
         const cur = (rec.settings || {})[st.key] ?? st.default;
         return { ...st, value: st.type === "password" ? (cur ? MASK : "") : cur, icon: st.icon ? `/__gate/api/addons/${rec.id}/image?path=${encodeURIComponent(st.icon)}&v=${v}` : undefined };
       }),
-      actions: m.actions.map((a) => ({ id: a.id, label: a.label, confirm: a.confirm })),
+      actions: m.actions.map((a) => ({ id: a.id, label: a.label, confirm: a.confirm, root: !!a.root })),
+      // what needs root, from the manifest alone (GET …/root asks sudo)
+      root: m.requires?.root || m.actions.some((a) => a.root)
+        ? { reason: m.requires?.root || "", install: !!this.rootNeed(rec, "install"), update: !!this.rootNeed(rec, "update"), uninstall: !!this.rootNeed(rec, "uninstall"),
+            actions: m.actions.filter((a) => a.root).map((a) => a.id), passwordless: this.root.checked?.value?.passwordless ?? null } : null,
       has: Object.fromEntries(SCRIPTS.map((k) => [k, k in m.scripts])),
       problems: checkRequirements(m, this.version), remote: rec.remote || null,
       down: rec.down || null, autoRestart: !!rec.autoRestart, restartable: !!this.startAction(rec) && !!m.scripts.status,

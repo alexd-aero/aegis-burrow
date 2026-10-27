@@ -52,7 +52,7 @@ import { RelayLink, AGENT_VERSION, visitorPage, verify as relayVerify } from "..
 import { lookup as dnsLookup } from "node:dns/promises";
 import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
-import { Addons, AddonError } from "../burrow/addons.mjs";
+import { Addons, AddonError, RootError } from "../burrow/addons.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
@@ -268,6 +268,8 @@ const burrowOn = () => burrow.on;
 const addons = new Addons({
   dir: join(DATA, "addons"), registry: join(DATA, "addons.json"), version: VERSION, log, tunnels,
   onChange: () => { syncExtensions(); },
+  // what an automatic path skipped because it needs root goes on the bell
+  notify: (n) => { try { notify("aegis", n); } catch (e) { log("addons:", e.message); } },
   env: () => {
     const e = { ADDON_HOST_URL: `${TLS ? "https" : "http"}://${ORIGIN_HOST}:${LISTEN.port}/`, ADDON_BIND: LISTEN.host,
                 // the short path when data/ is deep: curl and others refuse socket paths over ~107 bytes
@@ -1323,10 +1325,12 @@ async function handleAddons(req, res, path, url) {
       if (j[2] && req.method === "POST") { job.cancel(); return ok(job.view(1e9)); }
       return ok(job.view(Number(url.searchParams.get("since")) || 0));
     }
-    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share|down|autorestart|rescue|reports|report)$/.exec(path);
+    const m = /^\/__gate\/api\/addons\/([a-z0-9-]{2,40})\/(image|install|update|uninstall|remove|action|check|share|down|autorestart|rescue|reports|report|root)$/.exec(path);
     if (m) {
       const [, id, op] = m;
       if (op === "reports") return ok({ reports: addons.reports(id) });
+      // does it need root, and does sudo ask for a password here? (the dialog opens on this)
+      if (op === "root") return ok(await addons.rootInfo(id));
       if (op === "report") {
         const file = String(url.searchParams.get("file") || ""), text = addons.report(id, file);
         return send(res, 200, text, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store",
@@ -1335,20 +1339,25 @@ async function handleAddons(req, res, path, url) {
       if (op === "image") { const im = addons.image(id, url.searchParams.get("path")); return send(res, 200, im.body, { "Content-Type": im.type, "Cache-Control": "private, max-age=86400", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" }); }
       if (req.method !== "POST") return sendJson(res, 405, { error: "POST" });
       const b = await readJsonBody(req);
-      if (op === "install") {
-        const job = addons.install(id, b.settings);
-        if (id === "selkies-forge") followForge(job.id);
+      // install / update / uninstall / an action: root ones need a grant first
+      // (b.password when sudo asks; never kept past the job, never logged)
+      if (["install", "update", "uninstall", "action"].includes(op)) {
+        const grant = await addons.rootGrant(id, op, { password: b.password, action: b.action });
+        if (grant) audit(`addon: ${op}${op === "action" ? ` ${b.action}` : ""} as administrator (root)`, req, { addon: id });
+        const job = addons.runOp(op, id, b, grant);
+        if (op === "install" && id === "selkies-forge") followForge(job.id);
         return ok({ job });
       }
-      if (op === "update") return ok({ job: addons.update(id) });
-      if (op === "uninstall") return ok({ job: addons.uninstall(id, b.keep_data !== false) });
       if (op === "remove") return ok(addons.remove(id));
-      if (op === "action") return ok({ job: addons.action(id, b.action) });
       if (op === "rescue") { audit("addon: start it whatever it takes", req, { addon: id }); return ok({ job: addons.rescue(id) }); }
       if (op === "check") return ok(await addons.checkUpdates(id));
       if (op === "share") return ok({ tunnel: await addons.share(id, b.on !== false, b.access === "public" ? "public" : "login") });
       // it stopped on its own: start it again (maybe always), or leave it off
-      if (op === "down") return ok({ job: addons.answerDown(id, { start: !!b.start, always: "always" in b ? !!b.always : undefined }) });
+      if (op === "down") {
+        const a = b.start ? addons.startAction(addons.get(id)) : null;
+        const grant = a ? await addons.rootGrant(id, "action", { password: b.password, action: a.id }) : null;
+        return ok({ job: addons.answerDown(id, { start: !!b.start, always: "always" in b ? !!b.always : undefined }, grant) });
+      }
       if (op === "autorestart") return ok(addons.setAutoRestart(id, b.on !== false));
     }
     if (path === "/__gate/api/bridge" && req.method === "GET") return ok(await bridgeHealth({ burrow, addons }));
@@ -1362,6 +1371,7 @@ async function handleAddons(req, res, path, url) {
     }
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
+    if (e instanceof RootError) return sendJson(res, e.status, { error: e.message, ...e.extra });
     if (!(e instanceof AddonError)) log("addons:", e.message);
     return sendJson(res, 400, { error: e.message });
   }
@@ -2301,14 +2311,22 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/addons/add" && method === "POST") { const src = ((await readJson()) || {}).source; audit("addon: added from the command line", null, { source: String(src || "").slice(0, 200) }); return ok({ addon: await addons.add(src) }); }
   const aj = /^\/addons\/jobs\/([0-9a-f]{12})$/.exec(path);
   if (aj && method === "GET") return ok(addons.job(aj[1]).view(0));
+  // the askpass helper (bin/aegis-askpass) of a running root job: POST {token} -> the password.
+  // Only here, on the socket (mode 600); the dashboard has no such route.
+  if (path === "/askpass" || path.startsWith("/askpass/")) return addons.root.route(method, path, readJson);
+  const ar = /^\/addons\/([a-z0-9-]{2,40})\/root$/.exec(path);
+  if (ar && method === "GET") return ok(await addons.rootInfo(ar[1]));
   const ao = /^\/addons\/([a-z0-9-]{2,40})\/(install|update|uninstall|action|check|autorestart)$/.exec(path);
   if (ao && method === "POST") {
     const [, id, op] = ao, b = (await readJson()) || {};
-    audit(`addon: ${op}${op === "action" ? ` ${b.action}` : ""} from the command line`, null, { addon: id });
-    if (op === "install") return ok({ job: addons.install(id, b.settings) });
-    if (op === "update") return ok({ job: addons.update(id) });
-    if (op === "uninstall") return ok({ job: addons.uninstall(id, b.keep_data !== false) });
-    if (op === "action") return ok({ job: addons.action(id, b.action) });
+    if (["install", "update", "uninstall", "action"].includes(op)) {
+      let grant;
+      try { grant = await addons.rootGrant(id, op, { password: b.password, action: b.action }); }
+      catch (e) { if (e instanceof RootError) return { status: e.status, json: { error: e.message, ...e.extra } }; throw e; }
+      audit(`addon: ${op}${op === "action" ? ` ${b.action}` : ""}${grant ? " as administrator (root)" : ""} from the command line`, null, { addon: id });
+      return ok({ job: addons.runOp(op, id, b, grant) });
+    }
+    audit(`addon: ${op} from the command line`, null, { addon: id });
     if (op === "check") return ok(await addons.checkUpdates(id));
     if (op === "autorestart") return ok(addons.setAutoRestart(id, b.on !== false));
   }

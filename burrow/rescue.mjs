@@ -9,6 +9,10 @@
 //   4. its Docker containers
 //   5. its install/update script again, as a repair (ADDON_ADOPT=1)
 //
+// A step that needs root (the addon's requires.root, or a start action with
+// "root": true) is skipped and the report says so: a rescue never asks for a
+// password and never runs anything as root by itself.
+//
 // Whatever happens, it writes one report: this machine, the addon, what each
 // attempt printed, the status before and after, and - when it still won't
 // run - the logs that say why (journal, docker logs, the addon's own *.log).
@@ -142,8 +146,10 @@ export async function rescue(addons, rec, job) {
   sec("Status before", `${before.state}${before.detail ? `\n${before.detail}` : ""}`);
 
   const tries = [];
+  const needsRoot = (why) => ({ code: 3, out: `skipped: it needs administrator (root) access (${why}). Run it from the addon's card, where you can give it.` });
   const act = addons.startAction(rec);
-  if (act) tries.push({ name: `its own "${act.label}" action (${act.script})`, go: () => addons.run(rec, act.script, { job, timeout: 300 }).then((r) => ({ code: r.code, out: r.lines.join("\n") })) });
+  const actRoot = act ? addons.rootNeed(rec, "action", act.id) : "";
+  if (act) tries.push({ name: `its own "${act.label}" action (${act.script})`, go: () => actRoot ? needsRoot(actRoot) : addons.run(rec, act.script, { job, timeout: 300 }).then((r) => ({ code: r.code, out: r.lines.join("\n") })) });
   const shipped = (await runBash(addons, rec, sh, ["scripts"], { timeout: 20 })).out.split("\n").map((x) => x.trim()).filter(Boolean)
     .filter((s) => !act || s !== act.script);
   if (shipped.length) tries.push({ name: `the start script it ships (${shipped[0]})`, go: () => addons.run(rec, shipped[0], { job, timeout: 300 }).then((r) => ({ code: r.code, out: r.lines.join("\n") })) });
@@ -152,7 +158,7 @@ export async function rescue(addons, rec, job) {
   tries.push({ name: "its Docker containers", go: () => runBash(addons, rec, sh, ["docker"], { job, timeout: 180 }) });
   const fix = m.scripts.update || m.scripts.install;
   if (fix) tries.push({ name: `its ${m.scripts.update ? "update" : "install"} script again, as a repair (${fix})`, repair: true,
-                        go: () => addons.run(rec, fix, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1" }, timeout: 1800 }).then((r) => ({ code: r.code, out: r.lines.join("\n") })) });
+                        go: () => m.requires?.root ? needsRoot(m.requires.root) : addons.run(rec, fix, { job, extra: { ADDON_UPDATE: "1", ADDON_ADOPT: "1" }, timeout: 1800 }).then((r) => ({ code: r.code, out: r.lines.join("\n") })) });
 
   let after = before, worked = null;
   if (before.state === "running") {
