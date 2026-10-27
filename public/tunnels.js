@@ -959,6 +959,7 @@ function renderDetail() {
           <dt>Who</dt><dd>${d.access === "public" ? "anyone with the link" : d.access === "password" ? `its own password${d.lockSet ? ` (set ${ago(d.lockSet)})` : ""}, or your login` : "your Aegis login"}</dd>
           <dt>Health</dt><dd>${d.health.up === null ? "checking" : d.health.up ? `up · ${fmtMs(d.health.ms)}` : "down"}${d.healthSince ? ` · since ${ago(d.healthSince)}` : ""}</dd>
           <dt>Checked</dt><dd>${ago(d.health.checked)}</dd>
+          ${d.blockTypes?.list?.length ? `<dt>Blocked types</dt><dd class="mono">${h(d.blockTypes.list.join(", "))} <span class="faint">(${{ both: "both ways", out: "to visitors", in: "from visitors" }[d.blockTypes.dir] || "both ways"})</span></dd>` : ""}
           <dt>Host header</dt><dd>${d.kind === "site" || d.kind === "clone" ? `the ${d.kind === "site" ? "site" : "original"}'s own; nothing about visitors is passed on` : d.preserveHost ? "kept (tunnel name)" : "rewritten to target"}</dd>
           <dt>DNS</dt><dd>${d.dns && d.dns.ok ? "proxied CNAME" : h(d.dns && d.dns.error || "pending")}</dd>
           ${pickRows(d)}
@@ -1339,6 +1340,10 @@ async function tunnelForm(edit, preset, opts = {}) {
         <div class="addr"><input class="input mono" id="fSub" maxlength="40" value="${h(t.sub || "")}" placeholder="${h(S.mode === "domain" ? defaultLabel(t.port) : "grafana")}" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zoneName() || "your-domain")}</span></div></label>
       <div class="field"><span>Who can open it</span><div id="fAccessBox">${accessSeg("fAccess", st.access, noPublic())}</div></div>
       ${pwFields(!!t.locked)}
+      <div class="field"><span>Blocked file types <span class="faint">(optional)</span></span>
+        <div class="row" style="gap:8px"><input class="input mono grow" id="fBlock" placeholder="gif, mp4, video/*" spellcheck="false" autocapitalize="none" value="${h((t.blockTypes?.list || []).join(", "))}">
+          <select class="input" id="fBlockDir" style="max-width:160px">${[["both", "both ways"], ["out", "to visitors"], ["in", "from visitors"]].map(([v, l]) => `<option value="${v}" ${(t.blockTypes?.dir || "both") === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <span class="faint" style="font-size:12px">Extensions or types: they don't get through (downloads and images to visitors, uploads from them).</span></div>
       <details class="adv" id="fAdv" ${st.mode === "port" ? "" : "hidden"}><summary>Advanced</summary>
         <div class="row">
           <label class="field grow"><span>Target speaks</span><select class="input" id="fScheme">
@@ -1475,7 +1480,8 @@ async function tunnelForm(edit, preset, opts = {}) {
         // a clone of a password link may take the original's password as its own (the server does that)
         const ownOptional = !edit && st.mode === "clone" && st.probe?.access === "password" && !!srcPw;
         const pw = st.access === "password" ? await sealedPw(m, !(t.locked && edit) && !ownOptional) : {};
-        let body = { name: m.querySelector("#fName").value.trim(), access: st.access, sub, ...pw };
+        let body = { name: m.querySelector("#fName").value.trim(), access: st.access, sub, ...pw,
+                     blockTypes: { list: m.querySelector("#fBlock").value.trim(), dir: m.querySelector("#fBlockDir").value } };
         if (srcPw) {
           if (!window.AegisSeal) throw new Error("The sealing script didn't load. Reload the page.");
           body.sealedSourcePassword = await window.AegisSeal({ password: srcPw });
