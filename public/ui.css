@@ -1491,3 +1491,15 @@ html.fl-noscroll .wrap { z-index: 30; }
 .root-no b { color: var(--err); }
 .root-no span { color: var(--muted); }
 @media (max-width: 480px) { .root-modal { padding: 20px 18px 16px; } .root-modal .modal-actions { flex-direction: column-reverse; } .root-modal .modal-actions .btn { width: 100%; justify-content: center; } }
+
+/* ---------- a tunnel's fallback: "If this machine is down" (tunnels.js fbPanel) ---------- */
+.fb-panel { margin-bottom: 14px; }
+.fb-panel .fb-lead { margin: -2px 0 12px; max-width: 760px; }
+.fb-row { gap: 8px; align-items: center; }
+.fb-kv { margin-top: 12px; }
+.fb-kv .fb-msg { white-space: pre-line; overflow-wrap: anywhere; }
+.fb-status { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.fb-ok { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.fb-err { color: var(--warn); }
+textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-bottom: 9px; resize: vertical; line-height: 1.5; font-family: var(--sans); }
+@media (max-width: 640px) { .fb-row .seg { width: 100%; } .fb-row .seg button { flex: 1; } }

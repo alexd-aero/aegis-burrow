@@ -31,19 +31,31 @@
 // too. A request with a device key is passed on: only your Aegis can tell a
 // real one, and it does.
 //
+// Standby (agent 1.5+): your Aegis can hand this agent a stand-in for a tunnel
+// (a copy of a folder, or a message page), kept in /etc/aegis-relay/standby/<host>/.
+// While your Aegis answers, nothing changes. When it doesn't (the link is down,
+// it says 502/503/504, or it says nothing for 8 seconds), visitors of that
+// tunnel get the stand-in instead, marked X-Aegis-Standby: 1, behind the same
+// lock as the tunnel: public, or a small password form checked against a copy
+// of the tunnel's password hash (scrypt; never the password itself). Files come
+// over the signed control channel one by one, each bound to its signature by
+// its sha256, and a commit swaps the new copy in at once.
+//
 // One file, no dependencies, Node 18+. Config: /etc/aegis-relay/config.json.
 // Installed by the one-line command your Aegis shows (Settings → Domain).
 
 import { createServer as httpServer, request as httpRequest } from "node:http";
 import { createServer as httpsServer } from "node:https";
 import { createSecureContext } from "node:tls";
-import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, chownSync, statSync, rmSync } from "node:fs";
+import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual, X509Certificate } from "node:crypto";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, chownSync, statSync, rmSync, readdirSync, copyFileSync,
+         createReadStream, createWriteStream } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, sep, extname } from "node:path";
 
-export const VERSION = "1.4.0";
-export const FEATURES = ["zones", "update", "edge", "fleet"];
+export const VERSION = "1.5.0";
+export const FEATURES = ["zones", "update", "edge", "fleet", "standby"];
+export const STANDBY_LIMITS = { files: 2000, bytes: 50 * 1024 * 1024 };
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
 
@@ -86,11 +98,59 @@ h1{font-size:18px;margin:0 0 6px;letter-spacing:-.01em}p{margin:0;color:#8a8f97}
 <h1>${title}</h1><p>${text}</p><dl><dt>Address</dt><dd>${esc(ip)}</dd><dt>Time</dt><dd>${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC</dd></dl></main></body></html>`;
 }
 
+// ------------------------------------------------------------------ standby (1.5+)
+const SHA_RE = /^[0-9a-f]{64}$/;
+const B64_RE = /^[A-Za-z0-9_-]{4,200}$/;
+export const STANDBY_HOST_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+// A file's place in a stand-in: relative, "/"-separated, no empty, ".", ".." or
+// hidden parts. -> the path, or null
+export function standbyPath(p) {
+  if (typeof p !== "string" || !p || p.length > 512 || /[\0\\]/.test(p)) return null;
+  const parts = p.split("/");
+  if (parts.length > 24 || parts.some((x) => !x || x === "." || x === ".." || x.startsWith("."))) return null;
+  return p;
+}
+// Every token and cookie of the standby is an HMAC with the relay key, under a
+// label of its own (never the shape of a request signature).
+export const standbyMac = (key, ...parts) => createHmac("sha256", key).update(["aegis-standby", ...parts].join("\n")).digest("base64url");
+// The gate's "Preview the fallback" link: https://<host>/?__aegis_standby=<token>
+export function previewToken(key, host, ttl = 10 * 60e3, now = Date.now()) {
+  const exp = now + Math.min(ttl, 10 * 60e3);
+  return `p1.${exp}.${standbyMac(key, "preview", String(host).toLowerCase(), exp)}`;
+}
+const macOk = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+const MIME = { ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8", ".json": "application/json", ".map": "application/json", ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8",
+  ".xml": "application/xml", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".avif": "image/avif", ".ico": "image/x-icon", ".bmp": "image/bmp", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+  ".mp4": "video/mp4", ".webm": "video/webm", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".pdf": "application/pdf",
+  ".wasm": "application/wasm", ".webmanifest": "application/manifest+json", ".csv": "text/csv; charset=utf-8" };
+export const mimeOf = (p) => MIME[extname(p).toLowerCase()] || "application/octet-stream";
+const STANDBY_CSS = `:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--line:rgba(0,0,0,.1);--text:#16181d;--muted:#5b616b;--accent:#2f6fe0}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0c0e;--card:#141518;--line:rgba(255,255,255,.1);--text:#e8eaed;--muted:#9aa0a8;--accent:#7aa7ff}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;padding:20px;box-sizing:border-box}
+main{max-width:520px;width:100%;padding:32px 30px 26px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-sizing:border-box}
+h1{font-size:22px;line-height:1.3;margin:0 0 10px;letter-spacing:-.01em}p{margin:0 0 12px;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}
+small{display:block;margin-top:18px;color:var(--muted);font-size:12.5px}`;
+// kind "page": the owner's words, and back home by itself every 30 seconds
+export function standbyPage({ title, message } = {}) {
+  const t = esc(title || "Back soon");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="30"><meta name="robots" content="noindex"><title>${t}</title><style>${STANDBY_CSS}</style></head>
+<body><main><h1>${t}</h1><p>${esc(message || "This site is taking a short break. This page checks again by itself every 30 seconds.")}</p><small>This page reloads by itself every 30 seconds.</small></main></body></html>`;
+}
+export function unlockPage({ error = "", next = "/" } = {}) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Password</title><style>${STANDBY_CSS}
+form{display:grid;gap:10px;margin-top:6px}input{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--text)}
+button{font:inherit;font-weight:600;padding:10px 12px;border-radius:10px;border:0;background:var(--accent);color:#fff;cursor:pointer}.e{color:#e5484d;font-size:14px;min-height:1.2em;margin:0}</style></head>
+<body><main><h1>This site has a password</h1><p>Type it to go on.</p><form method="post" action="/__aegis_standby/unlock"><input type="hidden" name="next" value="${esc(next)}">
+<input type="password" name="password" autocomplete="current-password" autofocus required aria-label="Password"><p class="e" role="alert">${esc(error)}</p><button>Open</button></form></main></body></html>`;
+}
+
 // ------------------------------------------------------------------ the agent
 export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOString(), ...a) } = {}) {
   const key = Buffer.from(cfg.key, "base64url");
   const suffix = String(cfg.suffix).toLowerCase();                    // ".tunnel.example.com": the first zone, from the install
-  const stats = { requests: 0, ws: 0, refused: 0, upstreamErrors: 0, edgeChecks: 0, edgeBlocked: 0, since: Date.now(), lastOk: 0 };
+  const stats = { requests: 0, ws: 0, refused: 0, upstreamErrors: 0, edgeChecks: 0, edgeBlocked: 0, standby: 0, since: Date.now(), lastOk: 0 };
   const certFile = join(cfg.certDir, "tunnel.crt"), keyFile = join(cfg.certDir, "tunnel.key");
   // every zone: the first one, and the ones your Aegis added since (zones.json)
   const zonesFile = cfg.zonesFile || join(dirname(cfg.certDir), "zones.json");
@@ -152,19 +212,140 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Not connected</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0b0c0e;color:#e8eaed;font:15px system-ui,sans-serif"><div style="max-width:380px;padding:24px"><h1 style="font-size:18px">The home end isn\'t connected</h1><p style="color:#8a8f97">This relay is up, but the Aegis it carries isn\'t connected to it right now. Try again in a minute.</p></div>');
   };
 
+  // ---------------- standby: the stand-ins, on disk and in memory
+  const sbDir = cfg.standbyDir || join(dirname(cfg.certDir), "standby");
+  const STANDBY_WAIT = Number(cfg.standbyWait) || 8000;               // how long home gets to start answering
+  const sites = new Map();                                             // primary host -> site
+  const aliases = new Map();                                           // every host it answers for -> site
+  const staged = new Map();                                            // host -> bytes staged
+  const index = () => { aliases.clear(); for (const s of sites.values()) for (const h of s.hosts) aliases.set(h, s); };
+  const siteOf = (dir, host) => {
+    const j = JSON.parse(readFileSync(join(dir, "site.json"), "utf8"));
+    const files = new Map(Object.entries(j.files || {}));
+    return { ...j, host, root: join(dir, "files"), files, bytes: [...files.values()].reduce((a, f) => a + f.size, 0) };
+  };
+  try {
+    for (const h of readdirSync(sbDir)) if (STANDBY_HOST_RE.test(h)) { try { sites.set(h, siteOf(join(sbDir, h), h)); } catch (e) { log(`standby ${h}:`, e.message); } }
+    index();
+  } catch { /* none yet */ }
+  const sbHeaders = { "X-Aegis-Standby": "1", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin" };
+  const cookieOf = (req, name) => {
+    const out = [];
+    for (const part of String(req.headers.cookie || "").split(/;\s*/)) { const i = part.indexOf("="); if (i > 0 && part.slice(0, i) === name) out.push(part.slice(i + 1)); }
+    return out;
+  };
+  const cookieValid = (req, name, ...parts) => cookieOf(req, name).some((v) => {
+    const m = /^(\d{10,16})\.([A-Za-z0-9_-]{43})$/.exec(v);
+    return !!m && Number(m[1]) > Date.now() && macOk(m[2], standbyMac(key, ...parts, m[1]));
+  });
+  const unlocked = (req, sb, host) => sb.access === "public" || (!!sb.lock && cookieValid(req, "__Host-aegis-sb", "unlock", host, sb.lock.epoch));
+  const previewing = (req, host) => cookieValid(req, "__Host-aegis-sbp", "preview-cookie", host);
+  const fails = new Map();                                             // ip -> recent wrong passwords
+  const sbSend = (req, res, status, body, type, extra = {}) => {
+    res.writeHead(status, { "Content-Type": type, ...sbHeaders, ...extra });
+    res.end(req.method === "HEAD" ? undefined : body);
+  };
+  // the stand-in itself: GET/HEAD only, behind the tunnel's lock
+  function serveStandby(req, res, sb, host) {
+    stats.standby++;
+    if (req.method !== "GET" && req.method !== "HEAD") return sbSend(req, res, 503, "This site is offline right now; only reading works until it's back.\n", "text/plain; charset=utf-8", { "Retry-After": "30" });
+    let u;
+    try { u = new URL(req.url, "http://x"); } catch { return sbSend(req, res, 400, "Bad request\n", "text/plain"); }
+    if (!unlocked(req, sb, host)) return sbSend(req, res, 401, unlockPage({ next: u.pathname + u.search }), "text/html; charset=utf-8");
+    if (sb.kind === "page") return sbSend(req, res, 503, standbyPage(sb), "text/html; charset=utf-8", { "Retry-After": "30" });
+    let p;
+    try { p = decodeURIComponent(u.pathname).replace(/^\/+/, ""); } catch { return sbSend(req, res, 400, "Bad request\n", "text/plain"); }
+    const has = (x) => standbyPath(x) && sb.files.has(x);
+    let file = null;
+    if (p && has(p)) file = p;
+    else if (has((p && !p.endsWith("/") ? p + "/" : p) + "index.html")) {
+      if (p && !p.endsWith("/")) { res.writeHead(302, { Location: "/" + encodeURI(p) + "/" + u.search, ...sbHeaders }); return res.end(); }
+      file = p + "index.html";
+    } else if (has("index.html")) file = "index.html";                // a single-page app's own router
+    if (!file) return sbSend(req, res, 404, "Not found\n", "text/plain; charset=utf-8");
+    const full = join(sb.root, ...file.split("/"));
+    if (!full.startsWith(sb.root + sep)) return sbSend(req, res, 404, "Not found\n", "text/plain; charset=utf-8");
+    res.writeHead(200, { "Content-Type": mimeOf(file), "Content-Length": sb.files.get(file).size, ...sbHeaders });
+    if (req.method === "HEAD") return res.end();
+    createReadStream(full).on("error", () => res.destroy()).pipe(res);
+  }
+  // the password form's answer: POST /__aegis_standby/unlock (password, next)
+  function standbyUnlock(req, res, sb, host, ip) {
+    let b = "";
+    req.on("data", (d) => { b += d; if (b.length > 4096) req.destroy(); });
+    req.on("end", () => {
+      const f = new URLSearchParams(b), next0 = String(f.get("next") || "/");
+      const next = next0.startsWith("/") && !next0.startsWith("//") && !next0.startsWith("/\\") ? next0 : "/";
+      const now = Date.now(), recent = (fails.get(ip) || []).filter((t) => now - t < 15 * 60e3);
+      if (recent.length >= 10) return sbSend(req, res, 429, unlockPage({ next, error: "Too many tries. Wait a few minutes." }), "text/html; charset=utf-8", { "Retry-After": "300" });
+      const pw = String(f.get("password") || "");
+      if (sb.access === "public" || !sb.lock) { res.writeHead(303, { Location: next, ...sbHeaders }); return res.end(); }
+      const sc = sb.scrypt || {}, N = Number(sc.N) || 2 ** 15, r = Number(sc.r) || 8, pp = Number(sc.p) || 1;
+      const salt = Buffer.from(sb.lock.salt, "base64url"), want = Buffer.from(sb.lock.hash, "base64url");
+      if (!pw || pw.length > 256) return wrong();
+      scrypt(pw, salt, want.length, { N, r, p: pp, maxmem: 128 * N * r * 2 }, (err, got) => {
+        if (err || !timingSafeEqual(got, want)) return wrong();
+        fails.delete(ip);
+        const exp = Date.now() + 30 * 86400e3;
+        res.writeHead(303, { Location: next, "Set-Cookie": `__Host-aegis-sb=${exp}.${standbyMac(key, "unlock", host, sb.lock.epoch, exp)}; Path=/; Max-Age=${30 * 86400}; Secure; HttpOnly; SameSite=Lax`, ...sbHeaders });
+        res.end();
+      });
+      function wrong() {
+        recent.push(now); fails.set(ip, recent);
+        if (fails.size > 20000) for (const [k, v] of fails) { if (now - v[v.length - 1] > 15 * 60e3) fails.delete(k); if (fails.size < 10000) break; }
+        sbSend(req, res, 401, unlockPage({ next, error: "That's not it." }), "text/html; charset=utf-8");
+      }
+    });
+  }
+
   function onRequest(req, res) {
     const host = ours(req.headers.host), ip = visitor(req);
     if (!host || !ip) { stats.refused++; res.writeHead(421, { "Content-Type": "text/plain" }); return res.end("Misdirected request"); }
     const stop = edgeStop(req, host, ip);
     if (stop) return turnAway(res, stop, ip);
+    const sb = aliases.get(host) || null;
+    if (sb) {
+      if (req.url.startsWith("/__aegis_standby/")) {
+        if (req.url === "/__aegis_standby/unlock" && req.method === "POST") return standbyUnlock(req, res, sb, host, ip);
+        return sbSend(req, res, 404, "Not found\n", "text/plain");
+      }
+      // "Preview the fallback": a link the gate made, then a cookie for ten minutes
+      const pq = /[?&]__aegis_standby=([^&]*)/.exec(req.url);
+      if (pq) {
+        const m = /^p1\.(\d{10,16})\.([A-Za-z0-9_-]{43})$/.exec(decodeURIComponent(pq[1]));
+        const ok = !!m && Number(m[1]) > Date.now() && Number(m[1]) - Date.now() <= 10 * 60e3 + 5000 && macOk(m[2], standbyMac(key, "preview", host, m[1]));
+        if (!ok) return sbSend(req, res, 403, "That preview link has expired. Make a new one in Aegis.\n", "text/plain; charset=utf-8");
+        const u = new URL(req.url, "http://x");
+        u.searchParams.delete("__aegis_standby");
+        const exp = Date.now() + 10 * 60e3;
+        res.writeHead(303, { Location: u.pathname + (u.search || ""), "Set-Cookie": `__Host-aegis-sbp=${exp}.${standbyMac(key, "preview-cookie", host, exp)}; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Lax`, ...sbHeaders });
+        return res.end();
+      }
+      if (previewing(req, host)) return serveStandby(req, res, sb, host);
+    }
     stats.requests++;
+    let settled = false, piping = false;
+    const standIn = () => { if (settled || res.headersSent) return; settled = true; serveStandby(req, res, sb, host); };
     const up = httpRequest({ host: "127.0.0.1", port: cfg.upstreamPort, method: req.method, path: req.url, headers: upstreamHeaders(req, host, ip), timeout: 120000 }, (upRes) => {
+      clearTimeout(wait);
+      // home answers, but only to say it can't: the stand-in, before anything is written
+      if (sb && [502, 503, 504].includes(upRes.statusCode)) { upRes.resume(); return standIn(); }
+      settled = true; piping = true;
       stats.lastOk = Date.now();
       res.writeHead(upRes.statusCode, upRes.headers);
       upRes.pipe(res);
     });
+    // with a stand-in, home gets STANDBY_WAIT to start answering (not 120 s)
+    const wait = sb ? setTimeout(() => { up.destroy(new Error("timeout")); standIn(); }, STANDBY_WAIT) : null;
     up.on("timeout", () => up.destroy(new Error("timeout")));
-    up.on("error", () => { stats.upstreamErrors++; if (!res.headersSent) offline(res); else res.destroy(); });
+    up.on("error", () => {
+      clearTimeout(wait);
+      if (settled) { if (piping && !res.writableEnded) res.destroy(); return; }       // the stand-in's own response is left alone
+      stats.upstreamErrors++;
+      if (sb) return standIn();
+      settled = true;
+      if (!res.headersSent) offline(res); else res.destroy();
+    });
     req.pipe(up);
   }
   function onUpgrade(req, socket, head) {
@@ -297,6 +478,131 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   }
   const certInfo = (z) => { try { const x = new X509Certificate(readFileSync(filesOf(z).crt)); return { fingerprint: x.fingerprint256, notAfter: Date.parse(x.validTo), names: x.subjectAltName }; } catch { return null; } };
 
+  // ---------------- standby: what your Aegis sends (signed; bodies bound by their sha256)
+  //   GET    /standby                         -> {sites: [{host, hosts, kind, fp, files, bytes, at}]}
+  //   GET    /standby/<host>                  -> {host, kind, fp, files: {path: {sha, size}}} | 404
+  //   PUT    /standby/<host>/file?path=&sha=  raw body; refused unless its sha256 is the signed one
+  //   POST   /standby/<host>/commit?sha=      {kind, hosts, title, message, access, lock, scrypt, fp, files}: swapped in at once
+  //   DELETE /standby/<host>
+  const sbView = (s) => ({ host: s.host, hosts: s.hosts, kind: s.kind, fp: s.fp || null, files: s.files.size, bytes: s.bytes, at: s.at || null });
+  function standbyControl(req, res, reply, u, host, op) {
+    if (!host) {
+      if (req.method === "GET" && !op) return reply(200, { sites: [...sites.values()].map(sbView), limits: STANDBY_LIMITS });
+      return reply(404, { error: "not found" });
+    }
+    if (!STANDBY_HOST_RE.test(host) || !ours(host)) return reply(400, { error: "that isn't a name this relay carries" });
+    const dir = join(sbDir, host), stage = join(sbDir, `.staging-${host}`);
+    if (req.method === "GET" && !op) {
+      const s = sites.get(host);
+      return s ? reply(200, { ...sbView(s), files: Object.fromEntries(s.files) }) : reply(404, { error: "no standby for that name", files: {} });
+    }
+    if (req.method === "DELETE" && !op) {
+      const had = sites.delete(host);
+      rmSync(dir, { recursive: true, force: true }); rmSync(stage, { recursive: true, force: true }); staged.delete(host);
+      index();
+      if (had) log(`standby for ${host} removed`);
+      return reply(200, { ok: true, removed: had });
+    }
+    if (req.method === "PUT" && op === "/file") {
+      const path = standbyPath(u.searchParams.get("path")), sha = String(u.searchParams.get("sha") || "");
+      if (!path || !SHA_RE.test(sha)) { req.resume(); return reply(400, { error: "a file needs a clean path and its sha256" }); }
+      mkdirSync(stage, { recursive: true, mode: 0o750 });
+      const tmp = join(stage, `.up-${randomBytes(6).toString("hex")}`), h = createHash("sha256"), out = createWriteStream(tmp, { mode: 0o640 });
+      let size = 0, failed = null;
+      const fail = (status, error) => { if (failed) return; failed = error; out.destroy(); rmSync(tmp, { force: true }); req.resume(); reply(status, { error }); };
+      req.on("data", (d) => {
+        size += d.length;
+        if (size > STANDBY_LIMITS.bytes || (staged.get(host) || 0) + size > STANDBY_LIMITS.bytes * 2) return fail(413, "too large");
+        h.update(d);
+      });
+      req.pipe(out);
+      out.on("finish", () => {
+        if (failed) return;
+        if (h.digest("hex") !== sha) { rmSync(tmp, { force: true }); return reply(400, { error: "the body isn't the file that was signed (sha256 differs)" }); }
+        renameSync(tmp, join(stage, sha));
+        staged.set(host, (staged.get(host) || 0) + size);
+        reply(200, { ok: true, path, sha, size });
+      });
+      out.on("error", (e) => fail(500, e.message));
+      req.on("error", () => fail(400, "upload broken off"));
+      return;
+    }
+    if (req.method === "POST" && op === "/commit") {
+      const want = String(u.searchParams.get("sha") || "");
+      let b = "";
+      req.on("data", (d) => { b += d; if (b.length > 2 * 1024 * 1024) req.destroy(); });
+      req.on("end", () => {
+        try {
+          if (!SHA_RE.test(want) || createHash("sha256").update(b).digest("hex") !== want) return reply(400, { error: "the body isn't the one that was signed (sha256 differs)" });
+          const j = JSON.parse(b), site = cleanSite(j, host);
+          // the new copy, from what was just sent and what the old copy already had
+          const next = join(sbDir, `.next-${host}`), old = sites.get(host), have = new Map();
+          if (old) for (const [p, f] of old.files) if (!have.has(f.sha)) have.set(f.sha, join(old.root, ...p.split("/")));
+          rmSync(next, { recursive: true, force: true });
+          mkdirSync(join(next, "files"), { recursive: true, mode: 0o750 });
+          const missing = [];
+          for (const [p, f] of site.files) {
+            const from = existsSync(join(stage, f.sha)) ? join(stage, f.sha) : have.get(f.sha);
+            if (!from || !existsSync(from)) { missing.push(p); continue; }
+            const to = join(next, "files", ...p.split("/"));
+            mkdirSync(dirname(to), { recursive: true, mode: 0o750 });
+            copyFileSync(from, to);
+            if (statSync(to).size !== f.size) throw new Error(`${p}: the size doesn't match`);
+          }
+          if (missing.length) { rmSync(next, { recursive: true, force: true }); return reply(409, { error: `missing ${missing.length} file(s)`, missing: missing.slice(0, 50) }); }
+          const at = Date.now();
+          writeFileSync(join(next, "site.json"), JSON.stringify({ hosts: site.hosts, kind: site.kind, title: site.title, message: site.message, access: site.access,
+                                                                   lock: site.lock, scrypt: site.scrypt, fp: site.fp, at, files: Object.fromEntries(site.files) }), { mode: 0o640 });
+          const gone = join(sbDir, `.old-${host}`);
+          rmSync(gone, { recursive: true, force: true });
+          if (existsSync(dir)) renameSync(dir, gone);
+          renameSync(next, dir);
+          rmSync(gone, { recursive: true, force: true }); rmSync(stage, { recursive: true, force: true }); staged.delete(host);
+          sites.set(host, siteOf(dir, host));
+          index();
+          log(`standby for ${host}: ${site.kind}${site.kind === "folder" ? `, ${site.files.size} files` : ""} (${site.access})`);
+          reply(200, { ok: true, ...sbView(sites.get(host)) });
+        } catch (e) { reply(400, { error: e.message }); }
+      });
+      return;
+    }
+    req.resume();
+    reply(404, { error: "not found" });
+  }
+  function cleanSite(j, host) {
+    if (!j || typeof j !== "object") throw new Error("a standby is an object");
+    const kind = j.kind === "page" ? "page" : j.kind === "folder" ? "folder" : null;
+    if (!kind) throw new Error("kind is folder or page");
+    const hosts = [...new Set([host, ...(Array.isArray(j.hosts) ? j.hosts : []).map((x) => String(x).toLowerCase())])];
+    if (hosts.length > 8 || hosts.some((x) => !STANDBY_HOST_RE.test(x) || !ours(x))) throw new Error("hosts: names this relay carries, 8 at most");
+    const access = ["public", "password", "login"].includes(j.access) ? j.access : null;
+    if (!access) throw new Error("access is public, password or login");
+    let lock = null;
+    if (access !== "public") {
+      const l = j.lock || {};
+      if (![l.salt, l.hash, l.epoch].every((x) => typeof x === "string" && B64_RE.test(x))) throw new Error("a locked standby needs the password's hash");
+      lock = { salt: l.salt, hash: l.hash, epoch: l.epoch };
+    }
+    const sc = j.scrypt || {}, N = Number(sc.N || 2 ** 15), r = Number(sc.r || 8), p = Number(sc.p || 1);
+    if (!(N >= 1024 && N <= 2 ** 17 && (N & (N - 1)) === 0 && r >= 1 && r <= 16 && p >= 1 && p <= 4)) throw new Error("scrypt parameters out of range");
+    const files = new Map();
+    let bytes = 0;
+    if (kind === "folder") {
+      const ents = Object.entries(j.files || {});
+      if (ents.length > STANDBY_LIMITS.files) throw new Error(`more than ${STANDBY_LIMITS.files} files`);
+      for (const [p0, f] of ents) {
+        const pth = standbyPath(p0);
+        if (!pth || !f || !SHA_RE.test(String(f.sha)) || !Number.isInteger(f.size) || f.size < 0) throw new Error(`bad file entry ${String(p0).slice(0, 80)}`);
+        bytes += f.size;
+        files.set(pth, { sha: f.sha, size: f.size });
+      }
+      if (bytes > STANDBY_LIMITS.bytes) throw new Error(`more than ${STANDBY_LIMITS.bytes / 1048576} MB`);
+      const paths = new Set(files.keys());
+      for (const pth of paths) { const parts = pth.split("/"); for (let i = 1; i < parts.length; i++) if (paths.has(parts.slice(0, i).join("/"))) throw new Error(`${pth}: a file is in the way of a folder`); }
+    }
+    return { kind, hosts, access, lock, scrypt: { N, r, p }, files, title: String(j.title || "").slice(0, 120), message: String(j.message || "").slice(0, 2000), fp: String(j.fp || "").slice(0, 100) };
+  }
+
   // the control side: only through the tunnel, only signed by your Aegis
   const control = httpServer((req, res) => {
     const reply = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
@@ -304,8 +610,12 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     if (req.method === "GET" && req.url === "/status") {
       return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, cert: certInfo(suffix),
                           zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), stats,
-                          edge: { on: edge.on, epoch: edge.epoch, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size } });
+                          edge: { on: edge.on, epoch: edge.epoch, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size },
+                          standby: { sites: sites.size } });
     }
+    const su = new URL(req.url, "http://agent");
+    const sm = /^\/standby(?:\/([^/]+))?(\/file|\/commit)?$/.exec(su.pathname);
+    if (sm) return standbyControl(req, res, reply, su, sm[1] ? sm[1].toLowerCase() : null, sm[2] || "");
     const body = (max, fn) => {
       let b = "";
       req.on("data", (d) => { b += d; if (b.length > max) req.destroy(); });
@@ -370,7 +680,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     reply(404, { error: "not found" });
   });
   control.listen(cfg.controlPort, "127.0.0.1");
-  return { front, control, stats, installCert, removeZone, zones, close: () => { front.close(); control.close(); } };
+  return { front, control, stats, installCert, removeZone, zones, sites, close: () => { front.close(); control.close(); } };
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

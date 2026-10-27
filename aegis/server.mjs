@@ -53,6 +53,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError, RootError } from "../burrow/addons.mjs";
+import { Standby } from "../burrow/standby.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
@@ -2136,7 +2137,7 @@ async function relayMachine({ bringUp = false } = {}) {
   } finally { relayMachineBusy = false; superviseRelay(); }
 }
 setTimeout(() => relayMachine({ bringUp: true }).catch(() => {}), 90000).unref();
-relayLink.onUp = () => { relayUp().catch(() => {}); };
+relayLink.onUp = () => { relayUp().catch(() => {}).finally(() => standby.tick().catch(() => {})); };
 setInterval(() => { if (relayLink.link.state === "up") relayLink.control("GET", "/status").then((s) => { relayLink.agent = { ...s, at: Date.now() }; return relayUp(); }).catch(() => {}); }, 3600e3).unref();
 // other domains through your VPS (burrow/domains.mjs): the link, its address, its agent
 burrow.domains.useRelay({
@@ -2185,6 +2186,25 @@ setInterval(async () => {
 }, 1000).unref();
 setInterval(superviseRelay, 20000).unref();
 setTimeout(superviseRelay, 8000).unref();
+
+// A tunnel's fallback (burrow/standby.mjs): the relay agent stands in while this
+// machine, or the tunnel's target, doesn't answer. Only where the VPS carries it.
+function standbyHosts(t) {
+  const zones = (relayLink.agent?.zones || []).map((z) => z.suffix).filter(Boolean);
+  const all = [tunnels.hostFor(t.port), ...tunnels.alsoFor(t).filter((a) => !a.hidden).map((a) => a.host)].filter(Boolean).map((h) => h.toLowerCase());
+  if (!zones.length) return all.slice(0, 1);             // the agent not met yet: its zones come with the link
+  return [...new Set(all.filter((h) => zones.some((z) => h.endsWith(z) && h.length > z.length && !h.slice(0, -z.length).includes("."))))].slice(0, 8);
+}
+function standbyWhy(t) {
+  if (!relayLink.configured()) return "Your tunnels don't go through a VPS of yours (Settings → Domain → Your VPS). The fallback lives on that VPS, so there's nowhere to keep it.";
+  if (!relayWanted()) return "Your tunnels don't go through your VPS right now (Settings → Domain → Your VPS): the fallback is served from there.";
+  if (relayLink.agent?.zones && !standbyHosts(t).length) return "This tunnel's address isn't one your VPS carries, so the VPS can't stand in for it.";
+  if (relayLink.agent?.version && !relayLink.can("standby") && relayLink.outdated() === "reinstall") return `The agent on ${relayLink.state.vps.host} is ${relayLink.agent.version} and can't update itself: run its install command once more (Settings → Domain → Your VPS) to get fallbacks.`;
+  return null;
+}
+const standby = new Standby({ tunnels, link: relayLink, log, eligible: standbyWhy, hostsOf: standbyHosts });
+burrow.standby = standby;
+standby.start();
 async function relayRoute(method, path, readJson) {
   const ok = (json) => ({ status: 200, json });
   try {

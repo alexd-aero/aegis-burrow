@@ -573,7 +573,41 @@ cmd_burrow() {
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow rename PORT NAME   (NAME \"\" goes back to tunnel-PORT-…)"
       out="$(burrow_call PATCH "/tunnels/$2" "$("$NODE" -e 'process.stdout.write(JSON.stringify({sub:process.argv[1]||null}))' "${3:-}")")" || die "$out"
       ok "tunnel $2: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way)")' "$out")" ;;
-    *) die "aegis burrow status | list | on | off | publish PORT | site URL | clone LINK | password PORT | access PORT WHO | unpublish PORT | rename PORT NAME" ;;
+    fallback)
+      # if this machine is down: your VPS serves a copy of a folder, or a message (relay agent 1.5+)
+      local port="${2:-}" kind="" dir="" title="" msg="" what="status" pw="" newpw=0 cur; shift 2 || true
+      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow fallback PORT --folder PATH | --message TEXT [--title T] | --off | --sync | --status   [--password: a new one, for login tunnels]"
+      while [ $# -gt 0 ]; do case "$1" in
+        --folder) kind=folder; dir="${2:-}"; what=set; shift ;; --message) kind=page; msg="${2:-}"; what=set; shift ;; --title) title="${2:-}"; shift ;;
+        --off) kind=off; what=set ;; --sync) what=sync ;; --status) what=status ;; --password) newpw=1 ;;
+        *) die "unknown option $1" ;; esac; shift; done
+      if [ "$what" = set ]; then
+        [ "$kind" != folder ] || [ -n "$dir" ] || die "--folder needs the folder's path"
+        [ "$kind" != folder ] || dir="$(cd "$dir" 2>/dev/null && pwd -P)" || die "no such folder: ${dir}"
+        cur="$(burrow_call GET "/tunnels/$port/fallback")" || die "$cur"
+        if [ "$kind" != off ] && [ "$(printf '%s' "$cur" | jget access)" = login ] && { [ "$newpw" = 1 ] || [ "$(printf '%s' "$cur" | jget hasPassword)" != true ]; }; then
+          info "this tunnel opens with your login, which lives on this machine: the fallback gets a password of its own"
+          pw="$(tunnel_password)" || exit 1
+        fi
+        [ "$kind" = off ] || spin_start "syncing to your VPS"
+        out="$(FB_kind="$kind" FB_dir="$dir" FB_title="$title" FB_msg="$msg" FB_pw="$pw" "$NODE" -e '
+          const e = process.env, o = { kind: e.FB_kind };
+          if (e.FB_kind === "folder") o.dir = e.FB_dir;
+          if (e.FB_kind === "page") { o.message = e.FB_msg; if (e.FB_title) o.title = e.FB_title; }
+          if (e.FB_pw) o.password = e.FB_pw;
+          process.stdout.write(JSON.stringify(o));' | burrow_call PUT "/tunnels/$port/fallback" -)" || { spin_stop; die "$out"; }
+        spin_stop
+      elif [ "$what" = sync ]; then
+        spin_start "syncing to your VPS"; out="$(burrow_call POST "/tunnels/$port/fallback/sync")" || { spin_stop; die "$out"; }; spin_stop
+      else out="$(burrow_call GET "/tunnels/$port/fallback")" || die "$out"; fi
+      "$NODE" -e 'const f=JSON.parse(process.argv[1]),s=f.status||{},mb=(b)=>(b/1048576).toFixed(1)+" MB";
+        if(!f.offered){console.log("  not offered: "+f.why);process.exit(0)}
+        console.log(`  tunnel ${f.port} if this machine is down: ${f.kind==="off"?"nothing (the VPS says home is not connected)":f.kind==="folder"?"a copy of "+f.dir:"a message: "+(f.title||"Back soon")}`);
+        if(f.kind!=="off"){
+          console.log("  "+(s.error?"! "+s.error:s.syncedAt?`on your VPS${f.kind==="folder"?`: ${s.files} files, ${mb(s.bytes)}`:""} (synced ${new Date(s.syncedAt).toLocaleString()})`:"not on your VPS yet"));
+          console.log("  served at "+(f.hosts||[]).join(", ")+(f.access==="public"?" (public)":f.access==="password"?" (the tunnel password)":" (its own password)"));
+        }' "$out" ;;
+    *) die "aegis burrow status | list | on | off | publish PORT | site URL | clone LINK | password PORT | access PORT WHO | unpublish PORT | rename PORT NAME | fallback PORT …" ;;
   esac
 }
 
@@ -1026,6 +1060,7 @@ usage() {
     aegis burrow password PORT   its own password (asked, or read from stdin)
     aegis burrow access PORT login|password|public
     aegis burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (Burrow Pages addon)
+    aegis burrow fallback PORT --folder PATH | --message TEXT | --off | --sync | --status   if this machine is down, your VPS serves this
     aegis burrow clone LINK --sub NAME             another Aegis × Burrow link (public or password) on a name of yours
     aegis burrow rename PORT NAME | unpublish PORT
 

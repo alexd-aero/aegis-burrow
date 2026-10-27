@@ -132,6 +132,8 @@ export class Burrow {
     if (path === "/shield" || path.startsWith("/shield/")) return this.shieldRoute(method, path, readJson);
     if (path !== "/ports" && !path.startsWith("/tunnels")) return null;
     if (!this.on) return { status: 409, json: { error: "Burrow is switched off. Turn it on under Settings → Modules." } };
+    // a tunnel's fallback on the relay VPS (burrow/standby.mjs, wired by Aegis)
+    if (this.standby && /^\/tunnels\/\d+\/fallback/.test(path)) { const r = await this.standby.route(method, path, readJson); if (r) return r; }
     const T = this.tunnels;
     if (path === "/tunnels" && method === "GET") return ok({ tunnels: T.list(), now: Date.now(), mode: T.mode, pattern: T.pattern() });
     if (path === "/tunnels" && method === "POST") {

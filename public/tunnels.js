@@ -6,7 +6,7 @@ import * as FLEET from "./fleet.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const app = $("#app");
-const S = { intel: {}, intelOpen: null, shield: null, shCheck: null, scanning: false, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
+const S = { fb: {}, fbLoading: {}, intel: {}, intelOpen: null, shield: null, shCheck: null, scanning: false, updAt: 0, view: "list", port: null, list: [], detail: null, ports: null, timer: null, busy: false, modal: null, lastOk: 0,
             mode: "domain", pattern: "", integrations: [], integ: null, integData: null, forgeSummary: {}, addon: null,
             addons: null, scan: null, scanning: false, bridge: null, bridgeBusy: false };
 
@@ -975,6 +975,8 @@ function renderDetail() {
       </section>
     </div>
 
+    ${fbPanel(d)}
+
     <section class="card panel" style="margin-bottom:14px"><div class="row" style="justify-content:space-between;align-items:center"><h3 style="margin:0">Clients <span class="faint">${fmtN(d.clients)} seen</span></h3>${d.clientList.length ? `<button class="btn sm" data-act="scan-clients" ${S.scanning ? "disabled" : ""}>${S.scanning ? '<i class="spin"></i> Checking every IP…' : "Scan all"}</button>` : ""}</div>
       ${d.clientList.length ? `<div class="scroll"><table>
         <thead><tr><th></th><th>Client</th><th>Browser</th><th>Requests</th><th>Served</th><th>Open</th><th>First seen</th><th>Last seen</th><th></th></tr></thead>
@@ -1516,6 +1518,101 @@ async function tunnelForm(edit, preset, opts = {}) {
   });
 }
 
+// ---- if this machine is down: the tunnel's fallback on the relay VPS (burrow/standby.mjs)
+function loadFb(port, force) {
+  const f = S.fb[port];
+  if (S.fbLoading[port] || (!force && f && Date.now() - f.at < 15000)) return;
+  S.fbLoading[port] = true;
+  api(`/__gate/api/tunnels/${port}/fallback`).then((r) => { S.fb[port] = { ...r, at: Date.now() }; })
+    .catch((e) => { S.fb[port] = { offered: false, why: e.message, at: Date.now() }; })
+    .finally(() => { S.fbLoading[port] = false; if (S.view === "detail" && S.port === port) render(); });
+}
+const FB_KINDS = [["off", "Off"], ["folder", "A copy of a folder"], ["page", "A message"]];
+function fbStatus(f) {
+  const st = f.status;
+  if (f.kind === "off") return '<span class="faint">Visitors get your VPS\'s "home isn\'t connected" page.</span>';
+  if (!st) return '<span class="faint">Not on your VPS yet.</span>';
+  if (st.error) return `<span class="fb-err">${h(st.error)}</span>`;
+  return `<span class="fb-ok"><i class="dot ok"></i>On your VPS${f.kind === "folder" ? `: ${fmtN(st.files)} file${st.files === 1 ? "" : "s"} · ${fmtB(st.bytes)}` : ""}${st.syncedAt ? ` · synced ${ago(st.syncedAt)}` : ""}</span>`;
+}
+function fbPanel(d) {
+  loadFb(d.port);
+  const f = S.fb[d.port];
+  const head = '<h3>If this machine is down <span class="faint">your VPS stands in</span></h3>';
+  if (!f) return `<section class="card panel fb-panel">${head}<p class="muted" style="margin:0">Loading…</p></section>`;
+  if (!f.offered) return `<section class="card panel fb-panel">${head}<p class="muted" style="margin:0">${h(f.why || "Not available for this tunnel.")}</p></section>`;
+  return `<section class="card panel fb-panel">${head}
+    <p class="faint small fb-lead">When this machine (or what the tunnel points at) stops answering, your VPS serves this instead, at once, behind the same ${d.access === "public" ? "open door" : d.access === "password" ? "password" : "lock (a password of the fallback's own)"}. It goes back by itself when home answers again.</p>
+    <div class="row fb-row" style="flex-wrap:wrap">
+      <div class="seg" role="group" aria-label="If this machine is down">${FB_KINDS.map(([v, l]) => `<button data-act="fb-kind" data-v="${v}" class="${f.kind === v ? "on" : ""}">${l}</button>`).join("")}</div>
+      <span class="grow"></span>
+      ${f.kind !== "off" ? `<button class="btn sm" data-act="fb-edit">${ICON.edit} Change</button>
+        <button class="btn sm" data-act="fb-sync" ${S.fbBusy ? "disabled" : ""}>${S.fbBusy === "sync" ? '<i class="spin"></i> Syncing…' : `${ICON.restart} Sync now`}</button>
+        <button class="btn sm" data-act="fb-preview" ${f.status?.syncedAt && !f.status?.error ? "" : "disabled"}>${ICON.ext} Preview the fallback</button>` : ""}
+    </div>
+    ${f.kind === "folder" ? `<dl class="kv fb-kv"><dt>Folder</dt><dd class="mono">${h(f.dir)}</dd></dl>` : ""}
+    ${f.kind === "page" ? `<dl class="kv fb-kv"><dt>Title</dt><dd>${h(f.title || "Back soon")}</dd><dt>Message</dt><dd class="fb-msg">${h(f.message)}</dd></dl>` : ""}
+    <div class="fb-status small">${fbStatus(f)}</div>
+  </section>`;
+}
+function fbForm(d, kind) {
+  const f = S.fb[d.port] || {};
+  const needPw = d.access === "login" && !f.hasPassword;
+  openModal(`<h2>${kind === "folder" ? "A copy of a folder" : "A message"}</h2>
+    <p>${kind === "folder" ? "Its files are copied to your VPS now, and again whenever they change. Up to 2000 files and 50 MB; hidden files are left out." : "A short page that checks every 30 seconds and sends visitors back once this machine answers."}</p>
+    <form id="fbF" autocomplete="off">
+      ${kind === "folder" ? `<label class="field"><span>Folder on this machine</span><input class="input mono" id="fbDir" spellcheck="false" placeholder="/home/you/site/public" value="${h(f.dir || "")}"></label>`
+        : `<label class="field"><span>Title</span><input class="input" id="fbTitle" maxlength="80" placeholder="Back soon" value="${h(f.title || "")}"></label>
+           <label class="field"><span>Message</span><textarea class="input" id="fbMsg" rows="4" maxlength="1000" placeholder="This site is taking a short break.">${h(f.message || "")}</textarea></label>`}
+      ${d.access === "login" ? `<p class="faint small">This tunnel opens with your Aegis login, which lives on this machine. While it's down, the fallback asks for a password of its own${f.hasPassword ? " (set; type a new one to change it)" : ""}.</p>${pwFields(false)}`
+        : `<p class="faint small">${d.access === "password" ? "It opens with the tunnel's own password there too (only its hash goes to the VPS)." : "Anyone can open it, like the tunnel."}</p>`}
+      <div class="err-msg" id="fbErr"></div>
+      <div class="modal-actions"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn primary" id="fbGo">Save and sync</button></div>
+    </form>`, (m) => {
+    (m.querySelector("#fbDir") || m.querySelector("#fbTitle"))?.focus();
+    m.querySelector("#fbF").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const b = m.querySelector("#fbGo");
+      b.disabled = true; b.innerHTML = '<i class="spin"></i> Syncing…';
+      try {
+        const body = { kind, ...(kind === "folder" ? { dir: m.querySelector("#fbDir").value } : { title: m.querySelector("#fbTitle").value, message: m.querySelector("#fbMsg").value }) };
+        if (d.access === "login") Object.assign(body, await sealedPw(m, needPw));
+        const r = await api(`/__gate/api/tunnels/${d.port}/fallback`, { method: "PUT", body: JSON.stringify(body) });
+        S.fb[d.port] = { ...r, at: Date.now() };
+        closeModal();
+        toast(r.status?.error ? r.status.error : "The fallback is on your VPS");
+      } catch (ex) { m.querySelector("#fbErr").textContent = ex.message; b.disabled = false; b.textContent = "Save and sync"; }
+    });
+  });
+}
+async function fbClick(act, el) {
+  const d = S.detail;
+  if (!d) return;
+  if (act === "fb-kind") {
+    const v = el.dataset.v, f = S.fb[d.port] || {};
+    if (v === "off") {
+      if (f.kind === "off") return;
+      try { const r = await api(`/__gate/api/tunnels/${d.port}/fallback`, { method: "PUT", body: JSON.stringify({ kind: "off" }) }); S.fb[d.port] = { ...r, at: Date.now() }; toast("No fallback: it's gone from your VPS"); }
+      catch (e) { toast(e.message); }
+      return render();
+    }
+    return fbForm(d, v);
+  }
+  if (act === "fb-edit") return fbForm(d, (S.fb[d.port] || {}).kind);
+  if (act === "fb-sync") {
+    S.fbBusy = "sync"; render();
+    try { const r = await api(`/__gate/api/tunnels/${d.port}/fallback/sync`, { method: "POST", body: "{}" }); S.fb[d.port] = { ...r, at: Date.now() }; toast(r.status?.error || "Synced"); }
+    catch (e) { toast(e.message); }
+    finally { S.fbBusy = null; render(); }
+    return;
+  }
+  if (act === "fb-preview") {
+    const w = window.open("about:blank", "_blank");       // opened now: a popup blocker lets a click's window through
+    try { const r = await api(`/__gate/api/tunnels/${d.port}/fallback/preview`, { method: "POST", body: "{}" }); if (w) { w.opener = null; w.location = r.url; } else location.href = r.url; }
+    catch (e) { w?.close(); toast(e.message); }
+  }
+}
+
 // Set or change a tunnel's own password (and switch it to that).
 function passwordForm(d) {
   openModal(`<h2>${d.locked ? "Change the password" : "A password of its own"}</h2>
@@ -1618,6 +1715,7 @@ document.addEventListener("click", async (e) => {
       toast(v === "public" ? "Anyone with the link can open it" : v === "password" ? "It opens with its own password (or your login)" : "Login required"); refresh();
     }
     else if (act === "password") passwordForm(S.detail);
+    else if (act.startsWith("fb-")) await fbClick(act, el);
     else if (act === "pick-domain") {
       const z = el.dataset.zone, on = el.checked, cur = new Set(S.detail.domains || []);
       on ? cur.add(z) : cur.delete(z);

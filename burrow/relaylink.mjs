@@ -29,6 +29,9 @@
 //   machines   the VPS is linked into Machines too (agent 1.4+, POST /fleet/link):
 //              the gate hands the agent the usual link script and it runs it as
 //              root, once; forgetting it in Machines keeps it out (state.machine).
+//   standby    a tunnel's stand-in for when this machine is down (agent 1.5+,
+//              burrow/standby.mjs): a folder's files, sent one by one (each
+//              bound to its signed URL by its sha256), or a message page
 //   updates    an agent older than this Aegis's (relay/agent.mjs) is sent the
 //              new one over the link (1.1 and later take it by themselves; 1.0
 //              needs the install command once more).
@@ -42,9 +45,9 @@ import { hostname } from "node:os";
 import { isIP } from "node:net";
 import { randomBytes, X509Certificate } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { sign, verify, visitorPage, VERSION as AGENT_VERSION } from "../relay/agent.mjs";
+import { sign, verify, visitorPage, previewToken, VERSION as AGENT_VERSION } from "../relay/agent.mjs";
 
-export { sign, verify, visitorPage, AGENT_VERSION };
+export { sign, verify, visitorPage, previewToken, AGENT_VERSION };
 const newer = (a, b) => { const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
 const AGENT_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "relay", "agent.mjs");
 const TOKEN_MS = 30 * 60e3;
@@ -200,12 +203,14 @@ export class RelayLink {
   running() { return !this.stopped; }
 
   // ------------------------------------------------------------ talking to the agent
+  // body: an object (sent as JSON), or a Buffer (sent as it is: the standby's files)
   control(method, path, body, timeout = 10000) {
     return new Promise((resolve, reject) => {
       if (!this.localCtl || !this.configured()) return reject(new Error("no link"));
-      const data = body ? JSON.stringify(body) : null;
+      const raw = Buffer.isBuffer(body), data = raw ? body : body ? JSON.stringify(body) : null;
       const r = httpRequest({ host: "127.0.0.1", port: this.localCtl, method, path, timeout,
-        headers: { "x-aegis-relay": sign(this.keyBuf(), { host: "agent", ip: "-", method, url: path }), ...(data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
+        headers: { "x-aegis-relay": sign(this.keyBuf(), { host: "agent", ip: "-", method, url: path }),
+                   ...(data != null ? { "content-type": raw ? "application/octet-stream" : "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
         let b = ""; res.on("data", (d) => { b += d; }); res.on("end", () => { try { const j = JSON.parse(b); res.statusCode < 400 ? resolve(j) : reject(new Error(j.error || `HTTP ${res.statusCode}`)); } catch { reject(new Error(`HTTP ${res.statusCode}`)); } });
       });
       r.on("timeout", () => r.destroy(new Error("timeout")));

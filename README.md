@@ -283,6 +283,19 @@ This gate's **machine key is not copied**: a standby cannot reach your other mac
 
 The clone fetches the original over HTTPS with its certificate checked, WebSockets included. Nothing about your visitors (their IP, Cloudflare headers) is passed on. Both gates need 2.30 or later. From a terminal: `burrow clone radio.tunnel.friend.dev --sub radio` (its password is asked, or read from the first line of stdin).
 
+### If this machine is down: a fallback on your VPS
+
+When your tunnels go through a VPS of yours (**Settings → Domain → Your VPS**, Aegis Relay), its agent can stand in for a tunnel while this machine, or whatever the tunnel points at, isn't answering. In the tunnel's page, **If this machine is down**: **Off**, **A copy of a folder**, or **A message**.
+
+- **A copy of a folder**: a static site (any folder on this machine, up to 2000 files and 50 MB; hidden files and links leading out of it are left out) is copied to the VPS and served from there as it is: the exact file, then `folder/index.html`, then `index.html` for a single-page app's own routes. Only changed files go over, each one checked by its sha256 against the signed request that carried it, and the new copy is swapped in at once. It syncs when you set it, when the folder changes (a few quiet seconds after), every 10 minutes by hash, when the link comes up, and whenever the VPS's copy isn't the one expected (a reinstalled agent gets it again).
+- **A message**: a title and a few words on a plain page (light or dark, as the visitor's system is) that checks every 30 seconds and goes back to your site once it answers.
+- **The same lock as the tunnel.** Public stays public. A tunnel with its own password asks for it on the VPS too, on a small form checked against a copy of the password's scrypt hash (never the password); a right one sets a cookie for that name only, for 30 days, void once the password changes; ten wrong tries from one address mean a pause. A tunnel behind your Aegis login gets a password of the fallback's own, since the login lives on this machine.
+- **When it steps in:** the link to this machine is down, this machine answers 502/503/504 (the tunnel's target is down), or it says nothing for 8 seconds. Only reading works on a stand-in (`GET`/`HEAD`; anything else gets 503), every answer says `X-Aegis-Standby: 1` and `Cache-Control: no-store`, and the moment this machine answers again, visitors get it again. Checks that run before (unknown names, bans, scan-first for public tunnels) still come first.
+- **Preview the fallback** opens the tunnel's address with a ten-minute link that shows the stand-in even while this machine is up.
+- From a terminal: `burrow fallback 8793 --folder ~/site/public`, `burrow fallback 8793 --message "Back in a few minutes" --title "Updating"`, `--off`, `--sync`, `--status`. On the control socket: `GET|PUT /tunnels/PORT/fallback {kind: off|folder|page, dir, title, message, password}`, `POST /tunnels/PORT/fallback/sync`, `POST /tunnels/PORT/fallback/preview`.
+
+It needs the relay agent 1.5.0, which Aegis 2.34 sends to your VPS by itself over the link. Where the tunnels don't go through a VPS of yours, the section says so instead.
+
 The engine also answers on **`data/control.sock`**, a Unix socket only your user can open. That is how [Selkies Forge](#-selkies-forge) and the `burrow` command work without a browser:
 
 ```bash

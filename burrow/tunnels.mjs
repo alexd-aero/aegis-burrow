@@ -129,7 +129,7 @@ const siteAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
 const SITE_BASE = 70000;        // site keys: 70001…99999 (the API takes 1-5 digits)
 const SITE_HOST = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?\.(github|gitlab)\.io$/;
 const SITE_PATH = /^\/(?:[A-Za-z0-9._~%-]+\/)*$/;
-const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+export const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 export const accessOf = (v) => (v === "public" || v === "password" ? v : "login");
 // A tunnel an addon made carries its id (t.app) and a few words about itself
 // (t.meta: {repo, branch, mode…}), so the dashboard can show it on that addon's card.
@@ -996,6 +996,9 @@ export class TunnelManager {
       target: t.site ? t.site.url : t.clone ? t.clone.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost, blockTypes: t.blockTypes || null,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
+      // if this machine is down (burrow/standby.mjs): never the fallback's own password hash
+      fallback: t.fallback ? { kind: t.fallback.kind, dir: t.fallback.dir || "", title: t.fallback.title || "", message: t.fallback.message || "",
+                               hasPassword: !!t.fallback.lock, status: t.fallback.status || null } : null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
       also: this.alsoFor(t), domains: t.domains || [], pickable: this.domain ? this.extras.filter((d) => d.picked).map((d) => d.zone) : [],
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
