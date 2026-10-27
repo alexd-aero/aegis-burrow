@@ -72,7 +72,6 @@
 import { request as httpRequest, Agent as HttpAgent } from "node:http";
 import { request as httpsRequest, Agent as HttpsAgent } from "node:https";
 import { connect as netConnect } from "node:net";
-import { cleanBlock, blockedBy, blocksIn, blocksOut, dispositionName, uploadWatch } from "./filetypes.mjs";
 import { connect as tlsConnect } from "node:tls";
 import { execFile } from "node:child_process";
 import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
@@ -397,7 +396,7 @@ export class TunnelManager {
   load() {
     try {
       const cfg = JSON.parse(readFileSync(this.file("tunnels.json"), "utf8"));
-      for (const t of cfg.tunnels || []) this.tunnels.set(t.port, t);
+      for (const t of cfg.tunnels || []) { delete t.blockTypes; this.tunnels.set(t.port, t); }   // 2.32's file-type blocking is gone
     } catch { /* first run */ }
     let saved = {};
     try { saved = JSON.parse(readFileSync(this.file("metrics.json"), "utf8")); } catch { /* none */ }
@@ -494,7 +493,6 @@ export class TunnelManager {
       name: String(spec.name || "").slice(0, 60),
       access, lock,
       preserveHost: !!spec.preserveHost,
-      blockTypes: cleanBlock(spec.blockTypes),
       enabled: true, created: now(), blocked: [], dns: null,
       ...cleanMeta(spec.app, spec.meta),
     };
@@ -595,7 +593,6 @@ export class TunnelManager {
       t.access = access; t.lock = lock;
     }
     if ("name" in patch) t.name = String(patch.name || "").slice(0, 60);
-    if ("blockTypes" in patch) t.blockTypes = cleanBlock(patch.blockTypes);
     if ("meta" in patch && t.app) t.meta = cleanMeta(t.app, patch.meta).meta;
     if (t.kind === "site") {
       if ("site" in patch) {
@@ -994,7 +991,7 @@ export class TunnelManager {
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
       clone: t.clone ? { url: t.clone.url, host: t.clone.host, access: t.clone.access, name: t.clone.name, lost: t.clone.lost || null } : null,
       target: t.site ? t.site.url : t.clone ? t.clone.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
-      scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost, blockTypes: t.blockTypes || null,
+      scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       // if this machine is down (burrow/standby.mjs): never the fallback's own password hash
       fallback: t.fallback ? { kind: t.fallback.kind, dir: t.fallback.dir || "", title: t.fallback.title || "", message: t.fallback.message || "",
@@ -1195,15 +1192,6 @@ export class TunnelManager {
         this.cloneBack(t);
       }
       const out = { ...upRes.headers };
-      if (blocksOut(t.blockTypes)) {
-        const hit = blockedBy(t.blockTypes, { path: req.url, type: out["content-type"], name: dispositionName(out["content-disposition"]) });
-        if (hit) {
-          upRes.resume(); status = 403;
-          res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Burrow-Blocked": hit });
-          res.end(`This file type (${hit}) isn't let through this tunnel.`);
-          return finish(`blocked: ${hit}`);
-        }
-      }
       if (site && out.location) out.location = this.siteLocation(t, out.location);
       if (clone) {
         if (out.location) out.location = this.cloneLocation(t, out.location);
@@ -1227,24 +1215,7 @@ export class TunnelManager {
     });
     req.on("data", (d) => { inB += d.length; });
     res.on("close", () => finish(done ? undefined : (status ? undefined : "client closed")));
-    if (!blocksIn(t.blockTypes) || /^(GET|HEAD|OPTIONS)$/.test(req.method)) { req.pipe(up); return; }
-    const refuse = (hit) => {
-      up.destroy(); status = 415;
-      if (!res.headersSent) { res.writeHead(415, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close", "X-Burrow-Blocked": hit }); res.end(`This file type (${hit}) can't be sent through this tunnel.`); }
-      req.resume();
-      finish(`blocked upload: ${hit}`);
-    };
-    const first = blockedBy(t.blockTypes, { path: req.url, type: /multipart\//i.test(req.headers["content-type"] || "") ? "" : req.headers["content-type"] });
-    if (first) return refuse(first);
-    const watch = /multipart\//i.test(req.headers["content-type"] || "") ? uploadWatch(t.blockTypes) : null;
-    let stopped = false;
-    req.on("data", (chunk) => {
-      if (stopped) return;
-      const hit = watch?.(chunk);
-      if (hit) { stopped = true; return refuse(hit); }
-      if (!up.write(chunk)) { req.pause(); up.once("drain", () => req.resume()); }
-    });
-    req.on("end", () => { if (!stopped) up.end(); });
+    req.pipe(up);
   }
 
   proxyUpgrade(port, req, socket, head, { stripCookie }) {
