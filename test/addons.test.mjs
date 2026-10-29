@@ -272,7 +272,17 @@ test("watchdog: stopped on its own vs stopped by Burrow", async () => {
   assert.equal(H.get("dog").watch.state, "running");
   assert.deepEqual(H.downList(), []);
 
+  // one failed check (a slow machine, a status script past its timeout) is not a death
+  writeFileSync(flag, "stopped");
+  await H.watchOnce();
+  assert.deepEqual(H.downList(), [], "one miss: nothing yet");
+  writeFileSync(flag, "running");
+  await H.watchOnce();
+  assert.equal(H.get("dog").watch.misses, undefined, "answering again: the misses are forgotten");
+
   writeFileSync(flag, "stopped");                // it dies by itself
+  await H.watchOnce(); await H.watchOnce();
+  assert.deepEqual(H.downList(), [], "two misses: still nothing");
   await H.watchOnce();
   const [d] = H.downList();
   assert.equal(d.id, "dog");
@@ -294,7 +304,7 @@ test("watchdog: stopped on its own vs stopped by Burrow", async () => {
 
   H.answerDown("dog", { start: false, always: true });   // "always" from now on
   writeFileSync(flag, "stopped");
-  await H.watchOnce();
+  await H.watchOnce(); await H.watchOnce(); await H.watchOnce();
   for (let i = 0; i < 100 && [...H.jobs.values()].some((j) => j.state === "running"); i++) await new Promise((r) => setTimeout(r, 50));
   assert.equal((await H.status(H.get("dog"), 0)).state, "running", "started again without asking");
   assert.equal(H.downList()[0].down.auto, true);
@@ -304,7 +314,7 @@ test("watchdog: stopped on its own vs stopped by Burrow", async () => {
   H.answerDown("dog", { start: false });
   writeFileSync(flag, "stopped");
   H.setAutoRestart("dog", false);
-  await H.watchOnce();
+  await H.watchOnce(); await H.watchOnce(); await H.watchOnce();
   H.answerDown("dog", { start: false });         // "leave it off"
   assert.deepEqual(H.downList(), []);
   await H.watchOnce();

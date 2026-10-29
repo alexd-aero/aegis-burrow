@@ -57,6 +57,7 @@ const SCRIPTS = ["detect", "install", "update", "uninstall", "status"];
 const SETTING_TYPES = ["text", "number", "bool", "select", "password"];
 const IMAGE_TYPES = { ".svg": "image/svg+xml", ".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg" };
 const MAX_IMAGE = 512 * 1024, MAX_MANIFEST = 64 * 1024;
+const WATCH_MISSES = 3;      // the watchdog's checks (a minute apart) that must fail in a row before an addon counts as down
 const TIMEOUT = { detect: 20, status: 15, install: 3600, update: 3600, uninstall: 900, action: 900 };
 const ARCH_ALIASES = { amd64: "x86_64", x64: "x86_64", arm64: "aarch64", armhf: "armv7l", arm: "armv7l" };
 const MASK = "••••••••";
@@ -1034,10 +1035,17 @@ export class Addons {
       const st = await this.status(rec, 0);
       const was = rec.watch?.state;
       if (st.state === "running") {
-        if (was !== "running" || rec.down) this.patch(rec.id, { watch: { state: "running", at: Date.now() }, down: null });
+        if (was !== "running" || rec.down || rec.watch?.misses) this.patch(rec.id, { watch: { state: "running", at: Date.now() }, down: null });
         continue;
       }
       const ownDoing = (this.expectUntil.get(rec.id) || 0) > Date.now();
+      // Down only after WATCH_MISSES checks in a row: on a loaded machine (a Pi 3 swapping)
+      // one status script that ran past its timeout read as "stopped on its own", and the
+      // watchdog "restarted" an app that was running all along, loading the machine further.
+      if (was === "running" && !ownDoing && (st.state === "stopped" || st.state === "error")) {
+        const misses = (rec.watch?.misses || 0) + 1;
+        if (misses < WATCH_MISSES) { this.patch(rec.id, { watch: { state: "running", at: rec.watch?.at || Date.now(), misses } }); continue; }
+      }
       if (was === "running" && !ownDoing && (st.state === "stopped" || st.state === "error")) {
         const down = { at: Date.now(), state: st.state, detail: st.detail || "", auto: !!rec.autoRestart };
         this.log(`addon ${rec.id}: stopped on its own (${st.state}${st.detail ? ": " + st.detail : ""})${rec.autoRestart ? "; starting it again" : "; asking whether to start it"}`);
