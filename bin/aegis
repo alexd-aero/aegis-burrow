@@ -15,7 +15,7 @@
 #   aegis upgrade                    copy this checkout's code over the installed one, restart
 #   aegis uninstall [--purge]        stop and remove; --purge also deletes data and the login
 #   aegis termix install | remove    Termix in Docker, behind the same login
-#   aegis doctor [--fix]             check (and fetch) Node and cloudflared
+#   aegis doctor [--fix]             check (and fetch) Node and cloudflared; your VPS from outside
 #   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
 #   aegis addons [add LINK | update|install|uninstall|check ID | action ID ACTION] [--here]   Burrow's addons, from the terminal
 #   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME
@@ -475,8 +475,25 @@ cmd_doctor() {
   if find_cloudflared >/dev/null; then ok "cloudflared ($(find_cloudflared))"; else
     warn "no cloudflared (tunnels need it)"; bad=1; [ "$fix" = 1 ] && fetch_cloudflared && bad=0; fi
   if docker version >/dev/null 2>&1; then ok "Docker (for Termix and the port list)"; else say "no Docker access: Termix and container names in the port list are unavailable"; fi
-  if [ -f "$APP/aegis/server.mjs" ]; then cmd_status || bad=1; else say "not installed yet: aegis install"; fi
+  if [ -f "$APP/aegis/server.mjs" ]; then cmd_status || bad=1; relay_doctor "$fix" || bad=1; else say "not installed yet: aegis install"; fi
   return $bad
+}
+# Your VPS, checked from the outside the way a visitor comes in (burrow/relaydoctor.mjs); fixes with --fix
+relay_doctor() {
+  local out
+  out="$(cli call POST /relay/doctor "{\"fix\":$([ "$1" = 1 ] && echo true || echo false)}" 2>/dev/null)" || return 0
+  "$NODE" -e '
+    const d = JSON.parse(process.argv[1]).last, fix = process.argv[2] === "1";
+    if (!d || !d.vps || d.idle) process.exit(0);
+    const c = (n, s) => process.stdout.isTTY ? `\x1b[${n}m${s}\x1b[0m` : s;
+    console.log(`  ${d.ok ? c(32, "✓") : c(31, "✗")} your VPS ${d.vps}: ${d.ok ? "visitors get through" : "visitors can\x27t get through"}`);
+    for (const x of d.checks) {
+      console.log(`    ${x.ok ? c(32, "●") : c(31, "●")} ${x.title}: ${x.detail || ""}`);
+      if (x.fixed) console.log(c(32, `      fixed: ${x.fixed}`));
+      if (!x.ok && x.hint) console.log(c(2, `      ${x.hint}`));
+    }
+    if (!d.ok && !fix) console.log(c(2, "    aegis doctor --fix tries to fix it"));
+    process.exit(d.ok ? 0 : 1);' "$out" "$1"
 }
 
 cmd_logs() {

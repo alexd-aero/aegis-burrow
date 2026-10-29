@@ -31,6 +31,12 @@
 // too. A request with a device key is passed on: only your Aegis can tell a
 // real one, and it does.
 //
+// Clock (agent 1.6+): signatures only hold for a minute, so a clock that
+// drifted makes everything look unsigned. This agent says its time even when it
+// refuses a request (so your Aegis can sign in its time and keep working), and
+// POST /clock (signed) switches NTP on here, and failing that sets the clock
+// from the time your Aegis read off the web.
+//
 // Standby (agent 1.5+): your Aegis can hand this agent a stand-in for a tunnel
 // (a copy of a folder, or a message page), kept in /etc/aegis-relay/standby/<host>/.
 // While your Aegis answers, nothing changes. When it doesn't (the link is down,
@@ -53,8 +59,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname, sep, extname } from "node:path";
 
-export const VERSION = "1.5.0";
-export const FEATURES = ["zones", "update", "edge", "fleet", "standby"];
+export const VERSION = "1.6.0";
+export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock"];
 export const STANDBY_LIMITS = { files: 2000, bytes: 50 * 1024 * 1024 };
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
@@ -208,7 +214,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     res.end(visitorPage(kind, { ip }));
   };
   const offline = (res) => {
-    res.writeHead(502, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.writeHead(502, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Aegis-Relay": "home-offline" });
     res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Not connected</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0b0c0e;color:#e8eaed;font:15px system-ui,sans-serif"><div style="max-width:380px;padding:24px"><h1 style="font-size:18px">The home end isn\'t connected</h1><p style="color:#8a8f97">This relay is up, but the Aegis it carries isn\'t connected to it right now. Try again in a minute.</p></div>');
   };
 
@@ -606,9 +612,10 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   // the control side: only through the tunnel, only signed by your Aegis
   const control = httpServer((req, res) => {
     const reply = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
-    if (!verify(key, req.headers["x-aegis-relay"], { host: "agent", ip: "-", method: req.method, url: req.url })) return reply(401, { error: "not signed by your Aegis" });
+    // the time goes with a refusal too: a clock that drifted is the usual reason for one
+    if (!verify(key, req.headers["x-aegis-relay"], { host: "agent", ip: "-", method: req.method, url: req.url })) return reply(401, { error: "not signed by your Aegis", now: Date.now() });
     if (req.method === "GET" && req.url === "/status") {
-      return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, cert: certInfo(suffix),
+      return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, now: Date.now(), cert: certInfo(suffix),
                           zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), stats,
                           edge: { on: edge.on, epoch: edge.epoch, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size },
                           standby: { sites: sites.size } });
@@ -663,6 +670,16 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
         if (cfg.exitOnUpdate !== false) setTimeout(() => process.exit(0), 300);
       });
     }
+    // this server's clock, right again ({truth: ms since 1970, read off the web by your Aegis}; -> {before, after, how})
+    if (req.method === "POST" && req.url === "/clock") {
+      return body(4096, ({ truth }) => {
+        truth = Number(truth);
+        if (!(truth > 1.7e12 && truth < 4.1e12)) return reply(400, { error: "that isn't a time" });
+        // the true time from here on, on the monotonic clock (Date.now() is the one that's wrong)
+        const t0 = performance.now(), real = () => truth + (performance.now() - t0), off = () => Date.now() - real();
+        fixClock(off, real).then((r) => reply(200, r), (e) => reply(500, { error: e.message }));
+      });
+    }
     // into your Aegis's Machines: its link script, as root ({script}; -> {code, out})
     if (req.method === "POST" && req.url === "/fleet/link") {
       return body(512 * 1024, ({ script }) => {
@@ -679,6 +696,23 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     }
     reply(404, { error: "not found" });
   });
+  // NTP first (timedatectl, then whichever time service is there); only if the
+  // clock is still off after that is it set by hand, to the time your Aegis sent
+  async function fixClock(off, real) {
+    const before = off(), how = [];
+    const run = (cmd, args) => new Promise((ok) => execFile(cmd, args, { timeout: 20000, env: { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" } }, (e) => ok(!e)));
+    if (Math.abs(before) < 2000) return { before, after: before, how: ["already right"] };
+    if (cfg.clockCommands === false) return { before, after: before, how: ["not allowed here"] };
+    if (await run("timedatectl", ["set-ntp", "true"])) how.push("ntp on");
+    for (const svc of ["systemd-timesyncd", "chrony", "chronyd", "ntp", "ntpd"]) if (await run("systemctl", ["try-restart", svc])) { /* restarted only if it was running */ }
+    for (let i = 0; i < 10 && Math.abs(off()) > 2000; i++) await new Promise((ok) => setTimeout(ok, 1000));
+    if (Math.abs(off()) > 2000) {
+      if (await run("date", ["-u", "-s", `@${(real() / 1000).toFixed(3)}`])) { how.push("set by hand"); await run("hwclock", ["--systohc"]); }
+    }
+    const after = off();
+    log(`clock: was ${Math.round(before / 1000)} s off, now ${Math.round(after / 1000)} s (${how.join(", ") || "nothing worked"})`);
+    return { before, after, how };
+  }
   control.listen(cfg.controlPort, "127.0.0.1");
   return { front, control, stats, installCert, removeZone, zones, sites, close: () => { front.close(); control.close(); } };
 }

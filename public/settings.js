@@ -58,6 +58,16 @@ function edgeStatus(e, zone) {
 function vpsLinked(host) { const r = S.relay; return !!(r?.configured && r.vps?.host === host); }
 // the install command shown has been run (the VPS registered after it was made)
 const setupDone = (r) => !!(r?.setup && r.configured && r.vps?.host === r.setup.host && r.installed?.at > r.setup.created);
+// the relay doctor's last run (burrow/relaydoctor.mjs): what a visitor really gets, and what it fixed
+function doctorView() {
+  const d = S.doctor;
+  if (!d || d.idle) return "";
+  const row = (c) => `<li class="small"><i class="dot ${c.ok ? "ok" : "err"}"></i> <b>${h(c.title)}</b> <span class="faint">· ${h(c.detail || "")}</span>
+      ${c.fixed ? `<br><span class="small" style="color:var(--ok)">Fixed: ${h(c.fixed)}</span>` : ""}${!c.ok && c.hint ? `<br><span class="small">${h(c.hint)}</span>` : ""}</li>`;
+  return `<div class="note-box${d.ok ? "" : " note-err"}" style="margin-top:12px">
+      <p class="small"><b>${d.ok ? "Visitors get through" : "Visitors can't get through"}</b> <span class="faint">· checked from outside ${h(hm(d.at))}${d.reason && d.reason !== "asked" ? ` (${h(d.reason)})` : ""}</span></p>
+      <ul style="margin:0;padding-left:0;list-style:none;display:grid;gap:6px">${d.checks.map(row).join("")}</ul></div>`;
+}
 function vpsPanel(n) {
   const r = S.relay || {}, host = n.relay, linked = vpsLinked(host);
   const setup = r.setup && r.setup.host === host && !setupDone(r) ? r.setup : null;
@@ -84,7 +94,9 @@ function vpsPanel(n) {
       ${err ? `<p class="note-err small">${h(err)}</p>` : ""}
       <div class="row end" style="gap:8px;margin-top:8px"><button type="button" class="btn ghost sm" data-act="relay-forget">Forget it</button>
         <button type="button" class="btn ghost sm" data-act="relay-setup">Reinstall</button>
-        <button type="button" class="btn sm" data-act="relay-check" ${S.vpsChecking ? "disabled" : ""}>Check the link</button></div>` : "";
+        <button type="button" class="btn ghost sm" data-act="relay-check" ${S.vpsChecking ? "disabled" : ""}>Check the link</button>
+        <button type="button" class="btn sm" data-act="relay-doctor" ${S.doctorBusy ? "disabled" : ""}>${S.doctorBusy ? '<i class="spin"></i> Checking…' : "Check from outside and fix"}</button></div>
+      ${doctorView()}` : "";
   return `${step1}${cmd}${state}
     <details class="adv" style="margin-top:10px"><summary>What the command does, and what the VPS needs</summary>
       <p class="faint small">Any Linux server with systemd, a public IPv4 address and root: port 443 free (or already served by Caddy, which it shares) and SSH on port 22. The command installs Node.js if needed, a small agent, and a user, <span class="mono">aegis-relay</span>, that only this Aegis's key can use, for two port forwards and nothing else. It opens 443 in ufw or firewalld if they block it, checks sshd allows the forward, and stops with the reason if anything is off. Then this Aegis connects to it over SSH (post-quantum where the server has it) to prove the link works.</p>
@@ -1026,6 +1038,7 @@ async function load() {
     S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
     S.doms = cf.domain ? await api("/__gate/api/domains").catch(() => null) : null;
     S.relay = cf.domain ? { ...(await api("/__gate/api/relay").catch(() => null)), setup: S.relay?.setup } : null;
+    if (S.relay?.configured && !S.doctorBusy) S.doctor = (await api("/__gate/api/relay/doctor").catch(() => null))?.last || null;
     S.tuns = S.doms ? (await api("/__gate/api/tunnels").catch(() => ({ tunnels: [] }))).tunnels || [] : [];
     S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
     if (!S.upd && !S.checking) checkUpdates(false);
@@ -1140,6 +1153,12 @@ document.addEventListener("click", async (e) => {
       try { S.relay = { ...(await api("/__gate/api/relay/check", { method: "POST", body: "{}" })), setup: S.relay?.setup }; toast(S.relay.checked?.ok ? "The VPS answers through the link" : "Couldn't reach the VPS"); }
       catch (ex) { toast(ex.message); }
       S.vpsChecking = false; render();
+    }
+    else if (act === "relay-doctor") {
+      S.doctorBusy = true; render();
+      try { S.doctor = (await api("/__gate/api/relay/doctor", { method: "POST", body: "{}" })).last; toast(S.doctor?.ok ? "Visitors get through your VPS" : "Not reachable yet: see below"); }
+      catch (ex) { toast(ex.message); }
+      S.doctorBusy = false; render();
     }
     else if (act === "relay-forget") {
       if (S.naming?.active && S.naming.certs === "self" && S.naming.route === "vps") { toast("The tunnels go through this VPS: move them elsewhere first"); return; }

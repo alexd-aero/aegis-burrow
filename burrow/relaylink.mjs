@@ -32,6 +32,11 @@
 //   standby    a tunnel's stand-in for when this machine is down (agent 1.5+,
 //              burrow/standby.mjs): a folder's files, sent one by one (each
 //              bound to its signed URL by its sha256), or a message page
+//   the clock  a signature holds for a minute, so the two clocks must agree.
+//              The agent says its time (in /status, and with every refusal; an
+//              older agent's Date header does too), and this machine signs and
+//              checks in the agent's time from then on (skew), so a VPS whose
+//              clock drifted keeps working until relaydoctor.mjs sets it right.
 //   updates    an agent older than this Aegis's (relay/agent.mjs) is sent the
 //              new one over the link (1.1 and later take it by themselves; 1.0
 //              needs the install command once more).
@@ -70,6 +75,22 @@ export class RelayLink {
     this.verifying = false;
     this.localCtl = null; this.stopped = true; this.backoff = 5000; this.timer = null;
     this.onUp = null;                   // the link came up (push the certificate)
+    this.skew = 0;                      // the agent's clock minus this machine's (ms)
+    this.clock = null;                  // the last reading: {skew, at, from: "status"|"refusal"|"date"}
+  }
+  // the time in the agent's clock: what signatures to and from it are made in
+  agentNow() { return Date.now() + this.skew; }
+  // a reading of the agent's clock (its time when it answered, and when we asked and heard)
+  noteClock(remote, t0, t1, from) {
+    if (!(remote > 1e12)) return null;
+    const skew = Math.round(remote - (t0 + t1) / 2);
+    this.clock = { skew, at: t1, from, rtt: t1 - t0 };
+    // a few seconds either way is noise (and a Date header only has seconds)
+    if (Math.abs(skew - this.skew) > 5000) {
+      if (Math.abs(skew) > 5000 || this.skew) this.log(`relay: the clock on ${this.state.vps?.host || "the VPS"} is ${Math.round(skew / 1000)} s ${skew > 0 ? "ahead of" : "behind"} this machine's; signing in its time`);
+      this.skew = Math.abs(skew) > 5000 ? skew : 0;
+    }
+    return skew;
   }
   save() {
     writeFileSync(this.file + ".tmp", JSON.stringify(this.state, null, 1), { mode: 0o600 });
@@ -204,14 +225,32 @@ export class RelayLink {
 
   // ------------------------------------------------------------ talking to the agent
   // body: an object (sent as JSON), or a Buffer (sent as it is: the standby's files)
-  control(method, path, body, timeout = 10000) {
+  // A refusal that came with the agent's time, far from ours, is tried once more in its time.
+  async control(method, path, body, timeout = 10000) {
+    const was = this.skew;
+    try { return await this.controlOnce(method, path, body, timeout); }
+    catch (e) {
+      if (e.status === 401 && this.skew !== was) return this.controlOnce(method, path, body, timeout);
+      throw e;
+    }
+  }
+  controlOnce(method, path, body, timeout) {
     return new Promise((resolve, reject) => {
       if (!this.localCtl || !this.configured()) return reject(new Error("no link"));
       const raw = Buffer.isBuffer(body), data = raw ? body : body ? JSON.stringify(body) : null;
+      const t0 = Date.now();
       const r = httpRequest({ host: "127.0.0.1", port: this.localCtl, method, path, timeout,
-        headers: { "x-aegis-relay": sign(this.keyBuf(), { host: "agent", ip: "-", method, url: path }),
+        headers: { "x-aegis-relay": sign(this.keyBuf(), { host: "agent", ip: "-", method, url: path, ts: this.agentNow() }),
                    ...(data != null ? { "content-type": raw ? "application/octet-stream" : "application/json", "content-length": Buffer.byteLength(data) } : {}) } }, (res) => {
-        let b = ""; res.on("data", (d) => { b += d; }); res.on("end", () => { try { const j = JSON.parse(b); res.statusCode < 400 ? resolve(j) : reject(new Error(j.error || `HTTP ${res.statusCode}`)); } catch { reject(new Error(`HTTP ${res.statusCode}`)); } });
+        let b = ""; res.on("data", (d) => { b += d; }); res.on("end", () => {
+          const t1 = Date.now();
+          let j = null; try { j = JSON.parse(b); } catch { /* not JSON */ }
+          // its time: in the answer (1.6+), else its Date header (whole seconds)
+          if (j?.now) this.noteClock(Number(j.now), t0, t1, res.statusCode === 401 ? "refusal" : "status");
+          else if (res.statusCode === 401 && res.headers.date) this.noteClock(Date.parse(res.headers.date) + 500, t0, t1, "date");
+          if (j && res.statusCode < 400) return resolve(j);
+          const e = new Error(j?.error || `HTTP ${res.statusCode}`); e.status = res.statusCode; reject(e);
+        });
       });
       r.on("timeout", () => r.destroy(new Error("timeout")));
       r.on("error", reject);
@@ -300,7 +339,7 @@ export class RelayLink {
     if (!this.configured()) return null;
     const ip = String(req.headers["x-aegis-relay-ip"] || "");
     if (!isIP(ip)) return null;
-    return verify(this.keyBuf(), req.headers["x-aegis-relay"], { host, ip, method: req.method, url: req.url }) ? ip : null;
+    return verify(this.keyBuf(), req.headers["x-aegis-relay"], { host, ip, method: req.method, url: req.url }, this.agentNow()) ? ip : null;
   }
 
   view() {
@@ -309,7 +348,7 @@ export class RelayLink {
              agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, zones: this.agent.zones || null, features: this.agent.features || [],
                                    stats: this.agent.stats, at: this.agent.at, outdated: this.outdated() } : null,
              pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION,
-             checked: this.checked, machine: this.machine() };
+             checked: this.checked, machine: this.machine(), clock: this.clock ? { ...this.clock, used: this.skew } : null };
   }
 }
 

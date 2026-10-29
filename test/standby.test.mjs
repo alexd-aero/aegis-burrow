@@ -61,7 +61,7 @@ async function sendSite(A, files = SITE, cfg = {}) {
 }
 
 test("agent 1.5: standby is a feature; home answers while it can", async () => {
-  assert.equal(VERSION, "1.5.0");
+  assert.ok(VERSION.split(".").map(Number).reduce((a, x) => a * 1000 + x, 0) >= 1005000, VERSION);
   assert.ok(FEATURES.includes("standby"));
   const A = await setup();
   try {

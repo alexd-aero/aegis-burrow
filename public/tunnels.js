@@ -209,6 +209,19 @@ function subtabs() {
   </nav>`;
 }
 
+// The tunnels may be live here and still not reach anyone (the relay doctor's last run says so)
+function reachCut() {
+  const d = S.reach?.last;
+  return d && !d.ok && !d.idle && Date.now() - d.at < 30 * 60e3 ? d : null;
+}
+function reachCard(d) {
+  const bad = d.checks.filter((c) => !c.ok), top = bad.find((c) => c.id.startsWith("path:")) || bad[0];
+  return `<div class="card panel note-err"><b>Visitors can't reach your tunnels right now.</b>
+    <span class="muted">${h((top?.detail || "").replace(/^./, (c) => c.toUpperCase()))}.</span>${top?.hint ? `<p class="small" style="margin:8px 0 0">${h(top.hint)}</p>` : ""}
+    ${bad.length > 1 ? `<p class="faint small" style="margin:6px 0 0">${bad.filter((c) => c !== top).map((c) => `${h(c.title)}: ${h(c.detail)}`).join(" · ")}</p>` : ""}
+    <div class="row end" style="gap:8px;margin-top:10px"><span class="faint small">checked ${h(new Date(d.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>
+      <button class="btn sm" data-act="reach-fix" ${S.reachBusy ? "disabled" : ""}>${S.reachBusy ? '<i class="spin"></i> Checking…' : "Check and fix now"}</button></div></div>`;
+}
 function renderList() {
   const L = S.list;
   if (S.off) {
@@ -219,6 +232,7 @@ function renderList() {
   }
   const on = L.filter((t) => t.enabled).length;
   const sum = (f) => L.reduce((a, t) => a + f(t), 0);
+  const cut = reachCut();
   const sites = L.filter(isSite), ports = L.filter((t) => !isSite(t));
   app.innerHTML = `
     <div class="head">
@@ -230,11 +244,12 @@ function renderList() {
     </div>
     ${subtabs()}
     <div class="stats">
-      <div class="card stat"><b>${on}<span class="faint">/${L.length}</span></b><span>tunnels live</span></div>
+      <div class="card stat"><b>${on}<span class="faint">/${L.length}</span></b><span>${cut ? '<i class="dot err"></i> live here, not reachable' : "tunnels live"}</span></div>
       <div class="card stat"><b>${fmtN(sum((t) => t.reqPerMin))}</b><span>requests / min</span><div class="sub">${fmtN(sum((t) => t.totals.requests))} total</div></div>
       <div class="card stat"><b>${fmtN(sum((t) => t.online))}</b><span>clients online</span><div class="sub">${fmtN(sum((t) => t.active))} open connections</div></div>
       <div class="card stat"><b>${fmtB(sum((t) => t.totals.bytesOut))}</b><span>served</span><div class="sub">${fmtB(sum((t) => t.totals.bytesIn))} received</div></div>
     </div>
+    ${cut ? reachCard(cut) : ""}
     ${S.integrations.map(integCard).join("")}
     ${panels()}
     ${!PANELS.has("burrow-pages") && sites.length ? addonUpdCard("burrow-pages") + pagesCard(sites) : ""}
@@ -1189,6 +1204,10 @@ async function refresh() {
       S.list = r.tunnels; S.mode = r.mode; S.pattern = r.pattern;
       S.integrations = (await api("/__gate/api/integrations")).integrations;
       if (Date.now() - S.updAt > 60000) loadUpdates(false);
+      if (Date.now() - (S.reachAt || 0) > 30000) {      // the relay doctor: do visitors really get in? (burrow/relaydoctor.mjs)
+        S.reachAt = Date.now();
+        api("/__gate/api/relay/doctor").then((d) => { S.reach = d; if (S.view === "list") render(); }).catch(() => {});
+      }
       if (Date.now() - (S.shieldAt || 0) > 30000) {     // the Shield tab's count
         S.shieldAt = Date.now();
         api("/__gate/api/shield").then((v) => { S.shield = v; if (S.view === "list") render(); }).catch(() => {});
@@ -1703,6 +1722,12 @@ document.addEventListener("click", async (e) => {
     else if (act === "ad-remove") { await api(`/__gate/api/addons/${el.dataset.id}/remove`, { method: "POST", body: "{}" }); toast("Removed"); S.scan = null; refresh(); }
     else if (act === "ad-share") { el.disabled = true; await api(`/__gate/api/addons/${el.dataset.id}/share`, { method: "POST", body: JSON.stringify({ on: el.dataset.on === "1" }) }); toast(el.dataset.on === "1" ? "Published through Burrow" : "Unpublished"); refresh(); }
     else if (act === "job-cancel") await api(`/__gate/api/addons/jobs/${el.dataset.job}/cancel`, { method: "POST", body: "{}" });
+    else if (act === "reach-fix") {
+      S.reachBusy = true; render();
+      try { S.reach = await api("/__gate/api/relay/doctor", { method: "POST", body: "{}" }); toast(S.reach.last?.ok ? "Visitors get through again" : "Still not reachable: see why below"); }
+      catch (ex) { toast(ex.message); }
+      S.reachBusy = false; render();
+    }
     else if (act === "new") tunnelForm();
     else if (act === "site-new") tunnelForm(null, null, { site: true });
     else if (act === "close") closeModal();

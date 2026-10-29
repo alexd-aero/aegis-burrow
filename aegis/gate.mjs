@@ -54,6 +54,7 @@ import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError, RootError } from "../burrow/addons.mjs";
 import { Standby } from "../burrow/standby.mjs";
+import { RelayDoctor } from "../burrow/relaydoctor.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
 import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
@@ -2024,35 +2025,53 @@ function edgeListen() {
 const relayLink = new RelayLink({ dataDir: DATA, log });
 const RELAY_LINK_PORT = Number(process.env.AEGIS_RELAY_LINK_PORT || EDGE.relayLinkPort || 4302);
 const relayRefused = new Map();
+let relayDoctor = null;                  // burrow/relaydoctor.mjs, below
 let relayMachineBusy = false;            // linking the VPS into Machines (relayMachine below)
+// -> "ok", "unsigned" (no valid signature: a wrong key, or clocks too far apart)
+// or "unknown" (signed, but no tunnel has that name)
 function relayAdmit(req) {
   const host = hostOf(req);
   for (const k of ["cf-connecting-ip", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-aegis-front-host", "x-aegis-front-ip", "x-aegis-front-key"]) delete req.headers[k];
-  const ip = burrow.matchHost(host) !== null ? relayLink.verifyRequest(req, host) : null;
+  const ip = relayLink.verifyRequest(req, host);
   delete req.headers["x-aegis-relay"]; delete req.headers["x-aegis-relay-ip"];
   if (!ip) {
     const k = String(req.socket.remotePort), last = relayRefused.get(k) || 0;
-    if (Date.now() - last > 60000) { relayRefused.set(k, Date.now()); log("relay: refused a request without a valid signature for", host || "(no host)"); }
+    if (Date.now() - last > 60000) { relayRefused.set(k, Date.now()); log("relay: refused a request without a valid signature for", host || "(no host)"); relayDoctor?.soon("a request arrived unsigned"); }
     if (relayRefused.size > 1000) relayRefused.clear();
-    return false;
+    return "unsigned";
   }
+  if (burrow.matchHost(host) === null) return "unknown";
   req.headers["cf-connecting-ip"] = ip;
   req.headers["x-forwarded-proto"] = "https";
-  return true;
+  return "ok";
 }
+const relayRefuse = (res, why, host) => {
+  res.writeHead(why === "unknown" ? 404 : 403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Aegis-Relay": why === "unknown" ? "no-tunnel" : "bad-signature" });
+  res.end(why === "unknown" ? `No tunnel is called ${host} here.` : "Not signed by your relay.");
+};
 const relayServer = createHttpServer((req, res) => {
   // the agent met someone new at a public tunnel: scan them first in line (their request stayed on the VPS)
   if (req.url === "/__aegis-relay/scan" && req.method === "POST") {
     const ip = String(req.headers["x-aegis-relay-ip"] || "");
-    const ok = relayLink.configured() && isIP(ip) && relayVerify(relayLink.keyBuf(), req.headers["x-aegis-relay"], { host: "scan", ip, method: "POST", url: req.url });
+    const ok = relayLink.configured() && isIP(ip) && relayVerify(relayLink.keyBuf(), req.headers["x-aegis-relay"], { host: "scan", ip, method: "POST", url: req.url }, relayLink.agentNow());
     if (ok) { try { guardExt?.scan?.(ip); } catch { /* the addon's business */ } }
     res.writeHead(ok ? 204 : 403); return res.end();
   }
-  if (relayAdmit(req)) return handler(req, res);
-  res.writeHead(403, { "Content-Type": "text/plain" }); res.end("Not signed by your relay.");
+  // the relay doctor's ping (burrow/relaydoctor.mjs): any name under a zone the VPS carries, through
+  // the whole way a visitor's request takes; it echoes the nonce it was sent and nothing else
+  if (req.url.startsWith("/__aegis-relay/ping?")) {
+    const host = hostOf(req), why = relayAdmit(req);
+    if (why === "unsigned") return relayRefuse(res, why, host);
+    const n = /[?&]n=([A-Za-z0-9_-]{8,40})(?:&|$)/.exec(req.url)?.[1] || "";
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Aegis-Relay": "ok" });
+    return res.end(JSON.stringify({ n, at: Date.now() }));
+  }
+  const why = relayAdmit(req);
+  if (why === "ok") return handler(req, res);
+  relayRefuse(res, why, hostOf(req));
 });
 relayServer.on("upgrade", (req, socket, head) => {
-  if (relayAdmit(req)) server.emit("upgrade", req, socket, head);
+  if (relayAdmit(req) === "ok") server.emit("upgrade", req, socket, head);
   else socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
 });
 relayServer.keepAliveTimeout = 65000;
@@ -2223,6 +2242,35 @@ function standbyWhy(t) {
 const standby = new Standby({ tunnels, link: relayLink, log, eligible: standbyWhy, hostsOf: standbyHosts });
 burrow.standby = standby;
 standby.start();
+// The relay doctor: checks the way in from the outside (HTTPS to the VPS, a name
+// of ours, back through the link to this gate) and fixes what it can.
+relayDoctor = new RelayDoctor({
+  link: relayLink, dataDir: DATA, log, wanted: relayWanted, bringUp: () => verifyRelay(),
+  zones: () => {
+    const z = (relayLink.agent?.zones || []).map((x) => x.suffix).filter(Boolean);
+    return z.length ? z : tunnels.wildcard ? ["." + tunnels.wbase] : [];
+  },
+  pushCerts: async ({ force } = {}) => {
+    if (tunnels.edge.cur) await relayLink.pushCert({ ...tunnels.edge.cur, force }).catch((e) => log("relay doctor: certificate:", e.message));
+    await burrow.domains.pushAll();
+  },
+  tunnels: () => [...tunnels.tunnels.values()].filter((t) => t.enabled && t.kind !== "site" && t.kind !== "clone")
+    .map((t) => ({ port: t.port, name: t.name || t.sub || null, host: tunnels.hostFor(t.port), targetHost: t.targetHost, targetPort: t.targetPort })),
+  // the VPS in Machines (2.28 links it in as root): what fixes it when the link can't
+  root: () => {
+    const id = relayLink.machine()?.id, m = id && fleet.list().find((x) => x.id === id);
+    return m ? { run: (script) => fleet.ssh(m, script, { timeout: 60000 }) } : null;
+  },
+  updateAgent: () => relayUp(),
+  notify: (n) => notify("relay", n),
+  resolved: (key) => {
+    let changed = false;
+    for (const x of noticesLoad()) if (x.source === "relay" && x.key === key && !x.read) { x.read = true; changed = true; }
+    if (changed) noticesSave();
+  },
+});
+relayDoctor.start();
+setTimeout(() => { if (relayWanted()) relayDoctor.run({ reason: "start" }).catch(() => {}); }, 120e3).unref();
 async function relayRoute(method, path, readJson) {
   const ok = (json) => ({ status: 200, json });
   try {
@@ -2242,6 +2290,9 @@ async function relayRoute(method, path, readJson) {
       relayLink.forget(); superviseRelay(); return ok(relayLink.view());
     }
     if (path === "/relay/push" && method === "POST") return ok(await relayLink.pushCert({ ...tunnels.edge.cur, force: true }) || {});
+    // the doctor: its last report, or a run now ({fix: false} only looks)
+    if (path === "/relay/doctor" && method === "GET") return ok(relayDoctor.view());
+    if (path === "/relay/doctor" && method === "POST") { const b = await readJson().catch(() => ({})); return ok({ last: await relayDoctor.run({ fix: b?.fix !== false, reason: "asked" }), running: false }); }
   } catch (e) { return { status: 400, json: { error: e.message } }; }
   return null;
 }
