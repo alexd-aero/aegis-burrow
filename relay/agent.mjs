@@ -37,6 +37,16 @@
 // POST /clock (signed) switches NTP on here, and failing that sets the clock
 // from the time your Aegis read off the web.
 //
+// sshd (agent 1.6.1+): the link's forward must listen on loopback only, and a
+// link that died must let go of its port. A server-wide `GatewayPorts yes` made
+// it listen everywhere and, with an old session holding 127.0.0.1, sent the
+// visitors to whoever held it; with `ClientAliveInterval 0` a dead session held
+// it for good. So, as root, the agent adds a `Match User aegis-relay` block
+// (GatewayPorts no, ClientAliveInterval 20) to sshd_config when sshd would
+// give that user anything else, checks it with `sshd -t` and reloads sshd;
+// nothing else in sshd_config is touched, and a block that doesn't check out
+// is taken back out.
+//
 // Standby (agent 1.5+): your Aegis can hand this agent a stand-in for a tunnel
 // (a copy of a folder, or a message page), kept in /etc/aegis-relay/standby/<host>/.
 // While your Aegis answers, nothing changes. When it doesn't (the link is down,
@@ -59,7 +69,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname, sep, extname } from "node:path";
 
-export const VERSION = "1.6.0";
+export const VERSION = "1.6.1";
 export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock"];
 export const STANDBY_LIMITS = { files: 2000, bytes: 50 * 1024 * 1024 };
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
@@ -153,7 +163,27 @@ button{font:inherit;font-weight:600;padding:10px 12px;border-radius:10px;border:
 }
 
 // ------------------------------------------------------------------ the agent
+// sshd's settings for the aegis-relay user, set right (-> what it did, or null when nothing was needed)
+const SSHD_BLOCK = "\n# Aegis Relay: its link listens on loopback only (whatever GatewayPorts says for everyone else),\n# and a dead link lets go of its port within a minute\nMatch User aegis-relay\n\tGatewayPorts no\n\tClientAliveInterval 20\n\tClientAliveCountMax 3\n";
+export function ensureSshd({ file = "/etc/ssh/sshd_config", run = execFileSync, log = () => {} } = {}) {
+  const env = { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" };
+  const sh = (cmd, args) => String(run(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], timeout: 15000 }));
+  let eff;
+  try { eff = sh("sshd", ["-T", "-C", "user=aegis-relay,host=localhost,addr=127.0.0.1"]); } catch { return null; }
+  const val = (k) => (new RegExp(`^${k} (\\S+)`, "mi").exec(eff) || [])[1];
+  if (val("gatewayports") === "no" && Number(val("clientaliveinterval")) > 0) return null;
+  const before = readFileSync(file, "utf8");
+  if (/^\s*Match\s+User\s+aegis-relay\s*$/mi.test(before)) { log("sshd: a Match User aegis-relay block is there but doesn't give loopback only: left it to you"); return null; }
+  writeFileSync(file, before.replace(/\n*$/, "\n") + SSHD_BLOCK);
+  try { sh("sshd", ["-t"]); }
+  catch (e) { writeFileSync(file, before); log("sshd: the aegis-relay block didn't check out, taken back out:", String(e.stderr || e.message).trim().split("\n").pop()); return null; }
+  for (const unit of ["ssh", "sshd"]) { try { sh("systemctl", ["reload", unit]); break; } catch { /* the other name */ } }
+  log(`sshd: aegis-relay's forward now listens on loopback only (was GatewayPorts ${val("gatewayports")}), and a dead link lets go (was ClientAliveInterval ${val("clientaliveinterval")})`);
+  return { gatewayports: val("gatewayports"), clientaliveinterval: val("clientaliveinterval") };
+}
+
 export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOString(), ...a) } = {}) {
+  if (cfg.sshd !== false && process.getuid?.() === 0) { try { ensureSshd({ log }); } catch (e) { log("sshd:", e.message); } }
   const key = Buffer.from(cfg.key, "base64url");
   const suffix = String(cfg.suffix).toLowerCase();                    // ".tunnel.example.com": the first zone, from the install
   const stats = { requests: 0, ws: 0, refused: 0, upstreamErrors: 0, edgeChecks: 0, edgeBlocked: 0, standby: 0, since: Date.now(), lastOk: 0 };

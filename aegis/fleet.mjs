@@ -985,7 +985,7 @@ rm -rf "$HOME/.config/aegis-fleet"' >/dev/null 2>&1 </dev/null &`, { timeout: 25
     Promise.resolve().then(() => work(job))
       .then((res) => Object.assign(job, { state: "done", result: res || null, progress: 1, phase: "Done." }))
       .catch((e) => { Object.assign(job, { state: "error", error: e.message }); job.log(e.message, "err"); })
-      .finally(() => { job.finished = Date.now(); this.log(`fleet ${kind}: ${job.state}`); });
+      .finally(() => { job.finished = Date.now(); this.log(`fleet ${kind}: ${job.state}${job.state === "error" ? `: ${job.error}` : ""}`); });
     return job.view();
   }
   job(jid) {

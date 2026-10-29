@@ -40,7 +40,7 @@ import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces, tmpdir } from "node:os";
 import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
-         createCipheriv, createDecipheriv, createHash } from "node:crypto";
+         createCipheriv, createDecipheriv, createHash, createHmac } from "node:crypto";
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Devices, DEVICE_TTL_S } from "./devices.mjs";
@@ -2026,6 +2026,10 @@ const relayLink = new RelayLink({ dataDir: DATA, log });
 const RELAY_LINK_PORT = Number(process.env.AEGIS_RELAY_LINK_PORT || EDGE.relayLinkPort || 4302);
 const relayRefused = new Map();
 let relayDoctor = null;                  // burrow/relaydoctor.mjs, below
+// this process, for the doctor's ping: an HMAC of the nonce with a key only this
+// running gate has (a copy of this gate's data elsewhere doesn't share it)
+const RELAY_GATE_KEY = randomBytes(32);
+const relayGateId = (n) => createHmac("sha256", RELAY_GATE_KEY).update(String(n)).digest("base64url").slice(0, 22);
 let relayMachineBusy = false;            // linking the VPS into Machines (relayMachine below)
 // -> "ok", "unsigned" (no valid signature: a wrong key, or clocks too far apart)
 // or "unknown" (signed, but no tunnel has that name)
@@ -2064,7 +2068,8 @@ const relayServer = createHttpServer((req, res) => {
     if (why === "unsigned") return relayRefuse(res, why, host);
     const n = /[?&]n=([A-Za-z0-9_-]{8,40})(?:&|$)/.exec(req.url)?.[1] || "";
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Aegis-Relay": "ok" });
-    return res.end(JSON.stringify({ n, at: Date.now() }));
+    // which gate answered: another copy with the same keys (a standby that took over) echoes the nonce too
+    return res.end(JSON.stringify({ n, at: Date.now(), gate: relayGateId(n), standby: process.env.AEGIS_STANDBY === "1" }));
   }
   const why = relayAdmit(req);
   if (why === "ok") return handler(req, res);
@@ -2245,7 +2250,13 @@ standby.start();
 // The relay doctor: checks the way in from the outside (HTTPS to the VPS, a name
 // of ours, back through the link to this gate) and fixes what it can.
 relayDoctor = new RelayDoctor({
-  link: relayLink, dataDir: DATA, log, wanted: relayWanted, bringUp: () => verifyRelay(),
+  link: relayLink, dataDir: DATA, log, wanted: relayWanted, bringUp: () => verifyRelay(), gateId: relayGateId,
+  // a standby that took over and holds the link: a refresh from here hands it back (fleet-ops standbySetup)
+  standbyBack: () => {
+    const m = fleet.list().find((x) => x.standby);
+    if (!m) return null;
+    try { standbyRefresh(fleet, m.id); return m.name; } catch (e) { log("relay doctor: standby refresh:", e.message); return null; }
+  },
   zones: () => {
     const z = (relayLink.agent?.zones || []).map((x) => x.suffix).filter(Boolean);
     return z.length ? z : tunnels.wildcard ? ["." + tunnels.wbase] : [];

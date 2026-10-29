@@ -612,12 +612,17 @@ WantedBy=default.target
 `;
   return `set -eu
 D="$HOME/.aegis-standby"
-# the clone is running (it took over): never unpack a new copy under it
-if [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null && [ -f "$D/id_ed25519.pub" ]; then
-  rm -f ${sq(remote)}
-  echo "  the clone here is running (it took over): left it as it is"
-  echo "standby-key=$(cat "$D/id_ed25519.pub")"
-  exit 0
+# the clone is running (it took over), but the main host is the one asking for
+# this refresh, so it's back: the clone steps aside (two copies with the same
+# keys and domain only fight over the tunnels and the VPS link)
+if [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null; then
+  kill "$(cat "$D/clone.pid")" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$(cat "$D/clone.pid")" 2>/dev/null || break; sleep 1; done
+  kill -9 "$(cat "$D/clone.pid")" 2>/dev/null || true
+  rm -f "$D/clone.pid"
+  sed -i 's/"handedBack": null/"handedBack": '"$(date +%s)"'000/' "$D/home/data/takeover.json" 2>/dev/null || true
+  printf '%s %s\n' "$(date -Is)" "handed back: the main host asked for a refresh, so it's up" >> "$D/watch.log"
+  echo "  the clone here had taken over: stopped it (the main host is back)"
 fi
 mkdir -p "$D/home"
 rm -rf "$D/home.old" 2>/dev/null || true
@@ -655,7 +660,7 @@ ${hasSystemd ? `mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/aegis-standby.service" <<'UNIT'
 ${unit}UNIT
 systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable --now aegis-standby.service 2>/dev/null && echo "  watcher running as a user service" || {
+{ systemctl --user enable aegis-standby.service && systemctl --user restart aegis-standby.service; } 2>/dev/null && echo "  watcher running as a user service" || {
   nohup "$D/watch.sh" >> "$D/watch.log" 2>&1 & echo $! > "$D/watch.pid"; echo "  watcher running (nohup)"; }
 loginctl enable-linger "$(id -un)" 2>/dev/null || true`
   : `pkill -f "$D/watch.sh" 2>/dev/null || true
@@ -726,6 +731,16 @@ revive_out() {   # the same, and say what the restart script said
 miss=0; back=0; taken=0; tries=0; why=""
 say "watching $MAIN_NAME at $MAIN_URL every $INTERVAL""s"
 while true; do
+  # Taken over: is the other one back? Asked on that machine itself (its gate
+  # answering there), not at the shared address: the clone answers there too
+  # (same domain, same tunnel), so from outside the two can't be told apart.
+  if [ "$taken" = 1 ] && tcp "$MAIN_HOST" "$MAIN_SSH_PORT"; then
+    case "$(revive_out)" in
+      *"already up"*|*revived*) say "$MAIN_NAME's own gate answers again"; stop_clone; taken=0; back=0; tries=0; miss=0
+        sed -i 's/"handedBack": null/"handedBack": '"$(date +%s)"'000/' "$CLONE/data/takeover.json" 2>/dev/null || true
+        sleep "$INTERVAL"; continue ;;
+    esac
+  fi
   if web; then
     miss=0
     if [ "$taken" = 1 ]; then

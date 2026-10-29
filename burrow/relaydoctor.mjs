@@ -17,7 +17,9 @@
 //   path    per zone the VPS carries: HTTPS to the VPS's address, a random name
 //           under that zone, /__aegis-relay/ping: Caddy (or the agent on 443),
 //           the certificate, the agent, the link, the signature and this gate,
-//           all in one; the answer must echo our nonce
+//           all in one; the answer must echo our nonce, MACed with a key only
+//           this running gate has (a standby copy with the same data answers
+//           too, and was once the whole outage)
 //   dns     that name, at 1.1.1.1 and 8.8.8.8, points at the VPS
 //   apps    each live tunnel's own port answers on this machine (a tunnel can
 //           be "live" while the app behind it refuses connections)
@@ -60,7 +62,8 @@ export async function webClock(sources = TIME_SOURCES, { timeout = 6000 } = {}) 
 
 // HTTPS to the VPS's address with a name of ours: what does a visitor get?
 // -> {kind, status?, code?, detail}
-export function probePath({ ip, port = 443, host, nonce, timeout = 15000, ca } = {}) {
+// gateId(nonce): this gate's answer for that nonce; another copy of it answers differently
+export function probePath({ ip, port = 443, host, nonce, timeout = 15000, ca, gateId } = {}) {
   return new Promise((resolve) => {
     const r = httpsRequest({ host: ip, port, servername: host, method: "GET", path: `/__aegis-relay/ping?n=${nonce}`, timeout,
       headers: { host, "user-agent": "aegis-relay-doctor", accept: "application/json" }, ...(ca ? { ca } : {}) }, (res) => {
@@ -69,7 +72,12 @@ export function probePath({ ip, port = 443, host, nonce, timeout = 15000, ca } =
       res.on("end", () => {
         const mark = String(res.headers["x-aegis-relay"] || "");
         let j = null; try { j = JSON.parse(b); } catch { /* not ours */ }
-        if (res.statusCode === 200 && mark === "ok" && j?.n === nonce) return resolve({ kind: "ok", status: 200, detail: "a visitor's request reaches this Aegis" });
+        if (res.statusCode === 200 && mark === "ok" && j?.n === nonce) {
+          if (!gateId || j.gate === gateId(nonce)) return resolve({ kind: "ok", status: 200, detail: "a visitor's request reaches this Aegis" });
+          return resolve({ kind: "other-aegis", status: 200, standby: !!j.standby,
+                           detail: j.standby ? "your standby copy (it took over once) holds the VPS link and gets the visitors, not this Aegis"
+                                             : "another copy of this Aegis (same keys, another machine) holds the VPS link and gets the visitors" });
+        }
         if (mark === "bad-signature" || /Not signed by your relay/.test(b)) return resolve({ kind: "bad-signature", status: res.statusCode, detail: "this Aegis turned the VPS's request away: its signature didn't check out" });
         if (mark === "home-offline" || /The home end isn.t connected/.test(b)) return resolve({ kind: "home-offline", status: res.statusCode, detail: "the VPS can't reach this machine: the link's forward isn't there on its side" });
         if (res.statusCode === 421) return resolve({ kind: "zone-missing", status: 421, detail: `the VPS doesn't carry ${host.replace(/^[^.]+/, "*")}` });
@@ -108,9 +116,10 @@ export class RelayDoctor {
   //   tunnels() -> [{port, host, targetHost, targetPort, name}] (live ones)
   //   root() -> null | {run(script) -> {code, out, err}} (the VPS in Machines, as root)
   //   updateAgent() -> relayUp()                         notify(n) / resolved(key)
-  constructor({ link, dataDir, log, wanted, bringUp, zones, pushCerts, tunnels, root, updateAgent, notify, resolved,
+  constructor({ link, dataDir, log, wanted, bringUp, zones, pushCerts, tunnels, root, updateAgent, notify, resolved, gateId, standbyBack,
                 clock = webClock, probe = probePath, answers = portAnswers, dns, ca } = {}) {
     Object.assign(this, { link, log: log || console.log, wanted, bringUp, zones, pushCerts, tunnels: tunnels || (() => []), root: root || (() => null),
+                          gateId, standbyBack: standbyBack || (() => null),
                           updateAgent: updateAgent || (async () => {}), notify: notify || (() => {}), resolved: resolved || (() => {}),
                           clock, probe, answers, ca });
     this.dns = dns || ((name) => this.lookup(name));
@@ -222,11 +231,19 @@ export class RelayDoctor {
     for (const zone of zones) {
       const c = add({ id: `path:${zone}`, ok: false, title: `Visitors at *${zone}` });
       let host = `aegis-check-${randomBytes(3).toString("hex")}${zone}`;
-      let r = await this.probe({ ip: vps, host, nonce: randomBytes(9).toString("base64url"), ca: this.ca });
+      let r = await this.probe({ ip: vps, host, nonce: randomBytes(9).toString("base64url"), ca: this.ca, gateId: this.gateId });
       if (r.kind !== "ok" && fix) {
         const before = r.kind;
         if ((r.kind === "cert" || r.kind === "zone-missing") && link.ok && !pushed) { pushed = true; await this.pushCerts({ force: true }).catch(() => {}); c.fixed = "pushed the certificates to the VPS again"; }
-        else if (r.kind === "home-offline" || r.kind === "other-aegis") {
+        else if (r.kind === "other-aegis" && !restarted) {
+          // another copy of this gate answered (this one always signs its answer; an older copy
+          // signs nothing): if it is our standby, a refresh from here makes it step aside
+          const name = this.standbyBack();
+          if (name) { c.fixed = `asked the standby on ${name} to step aside`; await sleep(this.standbyWait ?? 20000); }
+          restarted = true; if (await this.clearStaleForward()) c.fixed = `${c.fixed ? c.fixed + "; " : ""}cleared its session on the VPS`;
+          L.stop(); await this.bringUp(); c.fixed ||= "restarted the link";
+        }
+        else if (r.kind === "home-offline") {
           if (!cleared) { cleared = true; if (await this.clearStaleForward()) c.fixed = "cleared an old session that held the forward on the VPS"; }
           if (!restarted) { restarted = true; L.stop(); await this.bringUp(); c.fixed ||= "restarted the link"; }
         } else if (r.kind === "bad-signature" && !restarted) {
@@ -238,7 +255,7 @@ export class RelayDoctor {
         if (c.fixed) {
           await sleep(1500);
           host = `aegis-check-${randomBytes(3).toString("hex")}${zone}`;
-          r = await this.probe({ ip: vps, host, nonce: randomBytes(9).toString("base64url"), ca: this.ca });
+          r = await this.probe({ ip: vps, host, nonce: randomBytes(9).toString("base64url"), ca: this.ca, gateId: this.gateId });
           if (r.kind !== "ok") c.fixed = `${c.fixed}, but that didn't help (was: ${before})`;
         }
       }
@@ -337,7 +354,7 @@ const AS_ROOT = 'S=; [ "$(id -u)" = 0 ] || S="sudo -n"\n';
 const HINTS = {
   "bad-signature": "The VPS's agent and this Aegis don't share the same key (or their clocks are far apart). If the clocks are right: Settings → Domain → Your VPS → Reinstall, and run the new command on the VPS.",
   "home-offline": "The VPS's agent can't reach this machine through the link. Aegis restarts the link by itself; if it stays like this, check that no other Aegis uses the same VPS.",
-  "other-aegis": "Another Aegis (an old install, or a copy on another machine) is linked to the same VPS and gets the visitors. Stop it, or forget the VPS there.",
+  "other-aegis": "Another copy of this Aegis (a standby that took over, an old install, or a restored backup) holds the VPS link and gets the visitors. Stop it there; Aegis 2.37.1+ standbys step aside by themselves once this machine is back.",
   "zone-missing": "The VPS doesn't have this zone's certificate yet: it's pushed when the link is up.",
   "cert": "The VPS has an old or wrong certificate. Aegis pushes its own again when the link is up.",
   "front-down": "Nothing answers on the VPS's port 443. On the VPS: systemctl restart aegis-relay-agent caddy (or add the VPS to Machines so Aegis can).",
