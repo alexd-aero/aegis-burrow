@@ -256,4 +256,20 @@ test("the standby's scripts: a refresh from the main host stops a clone that too
   assert.doesNotMatch(setup, /left it as it is/);
   assert.match(setup, /systemctl --user restart aegis-standby\.service/, "the new watcher runs, not the old one");
   assert.match(WATCH, /"\$taken" = 1 \] && tcp "\$MAIN_HOST"[\s\S]*already up[\s\S]*stop_clone/);
+  // a clone that restarted itself (an update) outlived its pid file: found by what it runs
+  assert.match(WATCH, /clone_pids\(\) \{ pgrep -u "\$\(id -u\)" -f "\$CLONE\/app\/aegis\/server\.mjs"/);
+  assert.match(WATCH, /"\$taken" = 0 \] && \[ -n "\$\(clone_pids\)" \][\s\S]*stop_clone/);
+  assert.match(setup, /pgrep -u "\$\(id -u\)" -f "\$D\/home\/app\/aegis\/server\.mjs"/);
+});
+
+test("a standby clone never updates itself (it came back as a process its watcher didn't know)", async () => {
+  const { Updater } = await import("../aegis/updater.mjs");
+  const was = process.env.AEGIS_STANDBY;
+  process.env.AEGIS_STANDBY = "1";
+  try {
+    const u = Object.create(Updater.prototype);
+    u.job = null;
+    const j = await u.apply();
+    assert.equal(j.state, "error"); assert.match(j.error, /standby copy/);
+  } finally { if (was === undefined) delete process.env.AEGIS_STANDBY; else process.env.AEGIS_STANDBY = was; }
 });

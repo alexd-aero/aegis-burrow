@@ -196,7 +196,7 @@ export class Updater {
   async tick() {
     try {
       await this.check();
-      if (this.state.available && this.auto && !this.job && !this.held(this.state.latest)) { this.log("update: applying", this.state.latest, "by itself (auto-update is on)"); await this.apply(); }
+      if (this.state.available && this.auto && !this.job && !this.held(this.state.latest) && process.env.AEGIS_STANDBY !== "1") { this.log("update: applying", this.state.latest, "by itself (auto-update is on)"); await this.apply(); }
     } catch { /* noted in state */ }
     this.timer = setTimeout(() => this.tick(), CHECK_EVERY);
     this.timer.unref?.();
@@ -275,6 +275,9 @@ export class Updater {
   // the process exits a moment later.
   async apply() {
     if (this.job?.state === "running") return this.job;
+    // a standby clone (fleet-ops standbyOn) gets its app from the main host's refresh. Updating
+    // itself, it came back as another process its watcher didn't know, and lived on after handing back
+    if (process.env.AEGIS_STANDBY === "1") return (this.job = { state: "error", phase: "standby", error: "This is a standby copy: it's updated from the main host, not by itself.", at: Date.now(), to: null });
     const job = this.job = { state: "running", phase: "checking", error: null, at: Date.now(), to: null };
     const work = join(DATA, "update");
     try {

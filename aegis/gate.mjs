@@ -1579,7 +1579,7 @@ setInterval(() => { try { takeoverNotice(notify); } catch (e) { log("fleet:", e.
 
 // Keep the standby's copy current, a few times a day, quietly.
 setInterval(() => {
-  if (!fleet.enabled()) return;
+  if (!fleet.enabled() || process.env.AEGIS_STANDBY === "1") return;      // a clone has no fleet key: it can't refresh anyone
   for (const m of fleet.list()) {
     if (!m.standby) continue;
     const age = Date.now() - (m.standbyState?.at || 0);

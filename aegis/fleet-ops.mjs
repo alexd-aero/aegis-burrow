@@ -615,10 +615,12 @@ D="$HOME/.aegis-standby"
 # the clone is running (it took over), but the main host is the one asking for
 # this refresh, so it's back: the clone steps aside (two copies with the same
 # keys and domain only fight over the tunnels and the VPS link)
-if [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null; then
-  kill "$(cat "$D/clone.pid")" 2>/dev/null || true
-  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$(cat "$D/clone.pid")" 2>/dev/null || break; sleep 1; done
-  kill -9 "$(cat "$D/clone.pid")" 2>/dev/null || true
+# (by what it runs: a clone that once updated itself outlived its pid file)
+running="$( { cat "$D/clone.pid" 2>/dev/null; pgrep -u "$(id -u)" -f "$D/home/app/aegis/server.mjs" 2>/dev/null; } | sort -u | tr '\n' ' ')"
+if [ -n "$(echo $running)" ]; then
+  kill $running 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$(id -u)" -f "$D/home/app/aegis/server.mjs" >/dev/null 2>&1 || break; sleep 1; done
+  pkill -9 -u "$(id -u)" -f "$D/home/app/aegis/server.mjs" 2>/dev/null || true
   rm -f "$D/clone.pid"
   sed -i 's/"handedBack": null/"handedBack": '"$(date +%s)"'000/' "$D/home/data/takeover.json" 2>/dev/null || true
   printf '%s %s\n' "$(date -Is)" "handed back: the main host asked for a refresh, so it's up" >> "$D/watch.log"
@@ -703,15 +705,21 @@ report() {  # report <reason> <reachable> <attempts>
 JSON
 }
 
+# the clone's processes, by what they run (a pid file alone missed one that restarted itself)
+clone_pids() { pgrep -u "$(id -u)" -f "$CLONE/app/aegis/server.mjs" 2>/dev/null; }
 start_clone() {
   [ -f "$D/clone.pid" ] && kill -0 "$(cat "$D/clone.pid")" 2>/dev/null && return 0
+  p=$(clone_pids | head -1); [ -n "$p" ] && { echo "$p" > "$D/clone.pid"; return 0; }
   ( cd "$CLONE" && AEGIS_HOME="$CLONE" AEGIS_STANDBY=1 AEGIS_NO_DEFAULT_ADDONS=1 nohup "$(node_bin)" "$CLONE/app/aegis/server.mjs" >> "$D/clone.log" 2>&1 & echo $! > "$D/clone.pid" )
   say "took over: started the clone (pid $(cat "$D/clone.pid"))"
 }
 stop_clone() {
-  [ -f "$D/clone.pid" ] || return 0
-  kill "$(cat "$D/clone.pid")" 2>/dev/null || true
+  pids="$(cat "$D/clone.pid" 2>/dev/null) $(clone_pids)"
   rm -f "$D/clone.pid"
+  [ -n "$(echo $pids)" ] || return 0
+  kill $pids 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(clone_pids)" ] || break; sleep 1; done
+  [ -z "$(clone_pids)" ] || kill -9 $(clone_pids) 2>/dev/null || true
   say "handed back: stopped the clone"
 }
 
@@ -743,6 +751,8 @@ while true; do
   fi
   if web; then
     miss=0
+    # not taken over, yet a clone runs (left behind by an older watcher): the main host answers, so it goes
+    if [ "$taken" = 0 ] && [ -n "$(clone_pids)" ]; then say "a clone was still running while $MAIN_NAME answers: stopping it"; stop_clone; fi
     if [ "$taken" = 1 ]; then
       back=$((back+1))
       if [ "$back" -ge "$BACK" ]; then
