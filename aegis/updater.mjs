@@ -59,7 +59,13 @@ export function writeBoot(b) { try { mkdirSync(DATA, { recursive: true }); write
 
 // Every module parses with this Node.js: a download that was cut short or
 // mangled is refused before it replaces anything.
-export function syntaxCheck(dir) {
+// Each .mjs of a download parses (`node --check`), else nothing changes. A file the
+// same as the running one's (`same`, the app in use) needs no check: it runs already.
+// A check that ran out of time is tried once more with longer; still out of time, it
+// is let through (logged): the boot guard (server.mjs) rolls back a version that
+// doesn't start. On a swapping Pi 3 ~40 Node launches took longer than 20 s each,
+// and an unchanged gate.mjs was refused as "doesn't parse".
+export function syntaxCheck(dir, { same = APP, log = () => {} } = {}) {
   const files = [];
   const walk = (d, depth = 0) => {
     let list = [];
@@ -71,11 +77,16 @@ export function syntaxCheck(dir) {
     }
   };
   for (const d of ["aegis", "burrow", "bin"]) walk(d);
+  let checked = 0;
   for (const f of files) {
-    const r = spawnSync(process.execPath, ["--check", join(dir, f)], { encoding: "utf8", timeout: 20000 });
+    if (same) { try { if (readFileSync(join(dir, f)).equals(readFileSync(join(same, f)))) continue; } catch { /* new or unreadable: check it */ } }
+    let r = spawnSync(process.execPath, ["--check", join(dir, f)], { encoding: "utf8", timeout: 20000 });
+    if (r.error?.code === "ETIMEDOUT" || r.signal) r = spawnSync(process.execPath, ["--check", join(dir, f)], { encoding: "utf8", timeout: 90000 });
+    if (r.error?.code === "ETIMEDOUT" || r.signal) { log(`update: couldn't check ${f} in time (a busy machine); the boot guard covers it`); continue; }
     if (r.status !== 0) throw new Error(`${f} in the download doesn't parse (${(r.stderr || "").split("\n").find((l) => /Error/.test(l)) || "syntax error"}); nothing was changed.`);
+    checked++;
   }
-  return files.length;
+  return checked;
 }
 
 const newer = (a, b) => { const x = versionTuple(a), y = versionTuple(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
@@ -297,7 +308,7 @@ export class Updater {
       if (pkg.name !== "aegis-burrow" || !newer(pkg.version, VERSION)) throw new Error(`The download is ${pkg.name} ${pkg.version}, not a newer Aegis × Burrow; nothing was changed.`);
       job.to = pkg.version;          // what is really installed (the check may have seen an older one)
       job.phase = "checking the download";
-      syntaxCheck(src);
+      syntaxCheck(src, { log: this.log });
       for (const d of ["bin", "forge"]) {
         try { for (const n of readdirSync(join(src, d))) chmodSync(join(src, d, n), 0o755); } catch { /* no such folder */ }
       }
@@ -368,7 +379,7 @@ export class Updater {
         if (pkg.name !== "aegis-burrow" || pkg.version !== v) throw new Error(`That commit is ${pkg.name} ${pkg.version}, not Aegis × Burrow ${v}; nothing was changed.`);
         for (const f of ["aegis/server.mjs", "burrow/index.mjs", "bin/aegis"]) if (!existsSync(join(src, f))) throw new Error(`v${v}'s download is missing ${f}; nothing was changed.`);
         job.phase = "checking the download";
-        syntaxCheck(src);
+        syntaxCheck(src, { log: this.log });
         for (const d of ["bin", "forge"]) { try { for (const n of readdirSync(join(src, d))) chmodSync(join(src, d, n), 0o755); } catch { /* none */ } }
         job.phase = `installing v${v}`;
         this.swap(src, v);

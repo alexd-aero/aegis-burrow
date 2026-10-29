@@ -87,9 +87,16 @@ test("the gate keeps its versions, holds the one it leaves, and checks downloads
   const dl = tmp();
   mkdirSync(join(dl, "aegis"), { recursive: true });
   writeFileSync(join(dl, "aegis", "a.mjs"), "export const ok = 1;\n");
-  assert.equal(U.syntaxCheck(dl), 1);
+  assert.equal(U.syntaxCheck(dl, { same: null }), 1);
   writeFileSync(join(dl, "aegis", "b.mjs"), "export const = cut sho");
-  assert.throws(() => U.syntaxCheck(dl), /b\.mjs in the download doesn't parse/);
+  assert.throws(() => U.syntaxCheck(dl, { same: null }), /b\.mjs in the download doesn't parse/);
+  // a file the same as the running app's needs no check (it runs already); a changed one does
+  const run = tmp(); mkdirSync(join(run, "aegis"), { recursive: true });
+  writeFileSync(join(run, "aegis", "a.mjs"), "export const ok = 1;\n");
+  rmSync(join(dl, "aegis", "b.mjs"));
+  assert.equal(U.syntaxCheck(dl, { same: run }), 0, "unchanged: nothing to check");
+  writeFileSync(join(dl, "aegis", "a.mjs"), "export const ok = 2;\n");
+  assert.equal(U.syntaxCheck(dl, { same: run }), 1);
 
   await assert.rejects(Promise.resolve(u.rollback(VERSION)).then((j) => { if (j.state === "error") throw new Error(j.error); }), /is the one running/);
 });
