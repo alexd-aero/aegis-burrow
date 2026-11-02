@@ -238,6 +238,9 @@ function bucket(list, key, value, max) {
   return b;
 }
 
+// browsers won't open these ("unsafe ports"); below 1024 is the system's
+const UNSAFE_PORTS = new Set([1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080]);
+
 export class TunnelManager {
   constructor({ dataDir, domain, quick, forbiddenPorts, log, naming, edge, onNaming }) {
     this.dataDir = dataDir;
@@ -310,7 +313,7 @@ export class TunnelManager {
   onExtra(t, d) { return d.root && (!d.picked || (t.domains || []).includes(d.zone)); }
   // a tunnel's names on the other domains: [{zone, host, url, hidden?}]
   alsoFor(t) {
-    if (!this.domain) return [];
+    if (!this.domain || t.parent != null) return [];
     const out = [];
     for (const d of this.extras) {
       for (const [name, port] of Object.entries(d.fixed)) if (port === t.port) { const host = `${name}.${d.zone}`; out.push({ zone: d.zone, host, url: `https://${host}`, sub: name }); }
@@ -361,7 +364,10 @@ export class TunnelManager {
   get wbase() { return this.naming.prefix ? `${this.naming.prefix}.${this.parent}` : this.parent; }
   wildcardName() { return `*.${this.wbase}`; }
   hostFor(port) {
-    const sub = this.tunnels.get(Number(port))?.sub;
+    const me = this.tunnels.get(Number(port));
+    // a port of another tunnel's address: name:8080 (its parent's name, whatever that becomes)
+    if (me?.parent != null) { const h = this.tunnels.has(me.parent) ? this.hostFor(me.parent) : null; return h ? `${h}:${me.publicPort}` : null; }
+    const sub = me?.sub;
     if (this.wildcard) return `${sub || Number(port)}.${this.wbase}`;
     if (this.domain) return sub ? `${sub}.${this.parent}` : `tunnel-${port}-${this.label}.${this.parent}`;
     return this.quick?.host(port) || null;
@@ -371,7 +377,45 @@ export class TunnelManager {
     if (this.wildcard) return `NAME.${this.wbase}`;
     return this.domain ? `tunnel-PORT-${this.label}.${this.parent}` : "a random name on trycloudflare.com";
   }
+  // Which tunnel a name is. A tunnel on a port of another's address has no name
+  // of its own: it's found from its parent, by the port (portChild).
   matchHost(host) {
+    const p = this.matchName(host);
+    return p != null && this.tunnels.get(p)?.parent != null ? null : p;
+  }
+  portChild(parent, publicPort) {
+    for (const t of this.tunnels.values()) if (t.parent === parent && t.publicPort === publicPort) return t.port;
+    return null;
+  }
+  // Another port on a tunnel's address (name:8080) takes a listener of its own, with
+  // the wildcard certificate: here, or on the relay. A certificate at Cloudflare
+  // (the Worker, cloudflared) only ever answers on Cloudflare's ports.
+  portsSupport() {
+    if (!this.selfCerts) return { ok: false, why: "Ports on an address need your tunnels on your own wildcard certificate (Settings → Domain). Through Cloudflare only its own ports answer." };
+    return { ok: true, via: this.naming.route === "vps" && this.naming.relay ? "relay" : "direct" };
+  }
+  // the public ports that should answer: any enabled tunnel on one
+  publicPorts() {
+    const out = new Set();
+    for (const t of this.tunnels.values()) if (t.parent != null && t.enabled && this.tunnels.has(t.parent)) out.add(t.publicPort);
+    return [...out].sort((a, b) => a - b);
+  }
+  checkPublicPort(parent, publicPort, { self = null, app = null } = {}) {
+    const p = this.tunnels.get(Number(parent));
+    if (!p) throw new Error("That address isn't a tunnel here (any more).");
+    if (p.parent != null) throw new Error("A port goes on an address, not on another port.");
+    if ((p.app || null) !== (app || null)) throw new Error("That address belongs to something else.");
+    const sup = this.portsSupport();
+    if (!sup.ok) throw new Error(sup.why);
+    const n = Number(publicPort);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) throw new Error("Pick a port from 1024 to 65535.");
+    if (UNSAFE_PORTS.has(n)) throw new Error(`Browsers refuse to open port ${n}. Pick another, like 8080.`);
+    if (this.forbidden.has(n)) throw new Error(`Port ${n} is Aegis's own.`);
+    const taken = this.portChild(p.port, n);
+    if (taken != null && taken !== self) throw new Error(`${this.hostFor(p.port)} already has port ${n}.`);
+    return { parent: p.port, publicPort: n };
+  }
+  matchName(host) {
     const name = String(host || "").toLowerCase().split(":")[0];
     if (this.domain && this.extras.length) { const p = this.matchExtra(name); if (p != null) return p; }
     if (this.wildcard) {
@@ -485,9 +529,10 @@ export class TunnelManager {
     if (!/^[a-zA-Z0-9.\-:\[\]]{1,253}$/.test(targetHost)) throw new Error("That target host does not look right.");
     const targetPort = Number(spec.targetPort || port);
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error("Target port must be 1-65535.");
-    const sub = await this.checkSub(port, spec.sub);
+    const on = spec.parent != null ? this.checkPublicPort(spec.parent, spec.publicPort, { app: spec.app }) : null;
+    const sub = on ? null : await this.checkSub(port, spec.sub);
     const t = {
-      sub,
+      sub, ...(on || {}),
       port, targetHost, targetPort,
       scheme: ["http", "https"].includes(spec.scheme) ? spec.scheme : await this.detectScheme(targetHost, targetPort),
       name: String(spec.name || "").slice(0, 60),
@@ -562,6 +607,7 @@ export class TunnelManager {
     this.save();
     await this.publish(port);
     this.save();
+    if (t.parent != null) this.onPorts?.();
     this.refreshFavicon(port, true);
     this.healthOne(port);
     this.log("tunnels: created", port, "->", t.site ? t.site.url : t.clone ? `clone of ${t.clone.url}` : `${t.scheme}://${t.targetHost}:${t.targetPort}`, t.access);
@@ -587,6 +633,8 @@ export class TunnelManager {
       t.enabled = !!patch.enabled;
       if (!t.enabled) this.kick(port, null);
     }
+    if ("publicPort" in patch && t.parent != null) t.publicPort = this.checkPublicPort(t.parent, patch.publicPort, { self: t.port, app: t.app }).publicPort;
+    if (t.parent != null && ("enabled" in patch || "publicPort" in patch)) this.onPorts?.();
     if ("access" in patch || patch.password || (patch.lockFrom != null && patch.lockFrom !== "")) {
       const { access, lock } = this.checkAccess(t, patch);
       if (lock !== t.lock) this.log("tunnels:", t.port, "has a new password; whoever had the old one is out");
@@ -650,6 +698,8 @@ export class TunnelManager {
   async remove(port) {
     const t = this.get(port);
     if (!t) throw new Error("No such tunnel.");
+    // the ports on its address go with it
+    for (const c of [...this.tunnels.values()]) if (c.parent === t.port) await this.remove(c.port);
     if (t.lock) {
       for (const [k, v] of this.retired) if (Date.now() - v.at > 15 * 60e3) this.retired.delete(k);
       this.retired.set(t.port, { lock: t.lock, at: Date.now() });
@@ -660,7 +710,8 @@ export class TunnelManager {
     this.live.delete(t.port);
     try { if (existsSync(this.file(`favicons/${t.port}`))) unlinkSync(this.file(`favicons/${t.port}`)); } catch { /* ignore */ }
     this.save();
-    const dns = await this.unpublish(t.port, host);
+    const dns = t.parent != null ? "none" : await this.unpublish(t.port, host);
+    if (t.parent != null) this.onPorts?.();
     this.log("tunnels: removed", t.port, host || "", "dns", dns);
     return { removed: t.port, dns };
   }
@@ -670,6 +721,7 @@ export class TunnelManager {
   async publish(port) {
     const t = this.get(port);
     if (!t) return;
+    if (t.parent != null) { t.dns = { name: this.hostFor(port), ok: true, port: true }; return; }          // its parent's name: nothing to publish
     if (!this.domain) { t.dns = null; this.quick?.start(port); return; }
     try {
       if (this.frontMode) {
@@ -992,6 +1044,7 @@ export class TunnelManager {
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
       clone: t.clone ? { url: t.clone.url, host: t.clone.host, access: t.clone.access, name: t.clone.name, lost: t.clone.lost || null } : null,
       target: t.site ? t.site.url : t.clone ? t.clone.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
+      parent: t.parent ?? null, publicPort: t.publicPort ?? null,
       scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost, ipChecks: t.ipChecks !== false,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       // if this machine is down (burrow/standby.mjs): never the fallback's own password hash
@@ -1360,8 +1413,8 @@ h1{font-size:17px;margin:0 0 6px}p{margin:0;color:#8a8f97}code{font:12px ui-mono
         }
       }
     }
-    candidates.push("/favicon.ico", "/favicon.svg", "/favicon.png");
-    for (const path of candidates.slice(0, 6)) {
+    candidates.push("/favicon.ico", "/favicon.svg", "/favicon.png", "/apple-touch-icon.png", "/favicon-32x32.png", "/icon.png");
+    for (const path of candidates.slice(0, 9)) {
       const r = await this.fetchTarget(t, path, 2);
       if (!r || r.status >= 400 || !r.body.length || r.body.length > 512000) continue;
       const type = r.type.split(";")[0].trim();

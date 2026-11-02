@@ -256,6 +256,7 @@ const origin = () => ({ url: `${TLS ? "https" : "http"}://${ORIGIN_HOST}:${LISTE
 const EDGE = { host: "0.0.0.0", upnp: true, ...settings.get("edge") };
 if (process.env.AEGIS_EDGE_PORT) EDGE.port = Number(process.env.AEGIS_EDGE_PORT);
 const EDGE_PORTS = EDGE.port ? [Number(EDGE.port)] : [443, 8443, 18443];
+const STD_PORTS = new Set([80, 443, LISTEN.port, ...EDGE_PORTS]);
 const burrow = new Burrow({ settings, dataDir: DATA, home: HOME, origin, forbiddenPorts: [LISTEN.port, ...EDGE_PORTS], log, version: VERSION,
                             edge: { port: EDGE_PORTS[0], upnp: EDGE.upnp } });
 const { tunnels, cloudflare } = burrow;
@@ -347,6 +348,7 @@ function extContext(rec) {
       create: (spec) => tunnels.create({ ...spec, app: id }),
       update: (port, patch) => { own(port); return tunnels.update(port, patch); },
       remove: (port) => { own(port); return tunnels.remove(port); },
+      ports: () => portsView(),
     },
     // your other machines (Machines), and a port of one answering here: forward(machine, port)
     // -> {host: "127.0.0.1", port, state}; kept up until release(machine, port) or the addon unloads
@@ -534,6 +536,20 @@ const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const unb64u = (s) => Buffer.from(String(s ?? ""), "base64url");
 const sha256 = (s) => createHash("sha256").update(s).digest();
 const hostOf = (req) => String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
+// The public port a request names when it isn't one of ours as usual (name:8080): a
+// tunnel can sit on a port of another's address (Burrow's portChild).
+const publicPortOf = (req) => { const m = /:(\d{1,5})$/.exec(String(req.headers.host || "")), p = m ? Number(m[1]) : 0; return p && !STD_PORTS.has(p) ? p : 0; };
+const hostWithPort = (req) => (publicPortOf(req) ? `${hostOf(req)}:${publicPortOf(req)}` : hostOf(req));
+// Which tunnel a request is for: its name, then that port. A port some other address
+// has and this one doesn't is nothing here (-1: no tunnel), not the address's own site.
+function tunnelFor(req, host) {
+  const base = burrow.matchHost(host);
+  if (base === null) return null;
+  const pub = publicPortOf(req);
+  if (!pub) return base;
+  const child = tunnels.portChild(base, pub);
+  return child != null ? child : tunnels.publicPorts().includes(pub) ? -1 : base;
+}
 const isLoopback = (a) => /^(127\.|::1$|::ffff:127\.)/.test(String(a || ""));
 // This machine: loopback, or any of its own addresses. When we listen on a
 // LAN or Tailscale address, cloudflared's connection arrives from whichever
@@ -580,7 +596,8 @@ function parseCookies(header) {
 function stripGateCookie(header) {
   if (!header) return header;
   const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK, DEVICE, "__Host-" + DEVICE].map((n) => n + "=");
-  const kept = header.split(";").map((p) => p.trim()).filter((p) => p && !ours.some((n) => p.startsWith(n)));
+  const portUnlock = new RegExp(`^(__Host-)?${UNLOCK}-\\d+=`);             // the password of a tunnel on a port (unlockName)
+  const kept = header.split(";").map((p) => p.trim()).filter((p) => p && !ours.some((n) => p.startsWith(n)) && !portUnlock.test(p));
   return kept.length ? kept.join("; ") : undefined;
 }
 
@@ -666,7 +683,8 @@ function renewalCookie(req) {
 // the scrypt hash, t.lock) or with the Aegis login. The cookie is bound to the
 // tunnel, its host and the password's epoch: a new password locks everyone out.
 
-const unlockName = (req) => (isSecure(req) ? "__Host-" + UNLOCK : UNLOCK);
+// (one per public port: cookies ignore ports, and name:8080 is a tunnel with a password of its own)
+const unlockName = (req) => (isSecure(req) ? "__Host-" + UNLOCK : UNLOCK) + (publicPortOf(req) ? `-${publicPortOf(req)}` : "");
 const unlockCookie = (req, t) => `${unlockName(req)}=${seal({ p: t.port, h: hostOf(req), e: t.lock.epoch, exp: Date.now() + sessionTtl() }, UNLOCK)}; ${cookieAttrs(req, sessionTtl() / 1000)}`;
 function unlocked(req, t) {
   const s = t.lock && unseal(parseCookies(req.headers.cookie)[unlockName(req)] || "", UNLOCK);
@@ -915,7 +933,7 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/login" && req.method === "GET") {
     if (isAuthed(req)) return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/") });
     // With a domain, tunnel hosts sign in through the dashboard, so one login covers them all.
-    if (!isMain && hasDomain) return send(res, 302, "", { Location: ssoUrl(host, url.searchParams.get("next")) });
+    if (!isMain && hasDomain) return send(res, 302, "", { Location: ssoUrl(hostWithPort(req), url.searchParams.get("next")) });
     return page(res, "login.html");
   }
   if (path === "/__gate/auth" && req.method === "POST") {
@@ -961,7 +979,7 @@ async function handleGate(req, res, path, url, host, isMain) {
 
   // ---- dashboard: hand a login tunnel a ticket (asks for the login first if needed) ----
   if (path === "/__gate/sso" && req.method === "GET") {
-    const to = String(url.searchParams.get("to") || "").toLowerCase().split(":")[0];
+    const rawTo = String(url.searchParams.get("to") || "").toLowerCase(), to = rawTo.split(":")[0], toPort = Number(/:(\d{1,5})$/.exec(rawTo)?.[1] || 0);
     // a login tunnel, or another of your dashboards (the dashboards menu: other domains' dashboards)
     const toDash = to !== host && isWebDash(to);
     const port = !toDash && burrowOn() ? tunnels.matchHost(to) : null;
@@ -972,7 +990,9 @@ async function handleGate(req, res, path, url, host, isMain) {
     const s = sessionOf(req);
     if (!s) return send(res, 302, "", { Location: "/__gate/login?next=" + encodeURIComponent(req.url) });
     const next = safeNext(url.searchParams.get("next"), "/");
-    return send(res, 302, "", { Location: `https://${to}/__gate/sso/callback?t=${sealTicket(to, s.sid, deviceOf(req))}&next=${encodeURIComponent(next)}` });
+    // a port of that tunnel's address: only one it really has (the ticket is for the name, as cookies are)
+    const dest = port !== null && toPort && tunnels.portChild(port, toPort) != null ? `${to}:${toPort}` : to;
+    return send(res, 302, "", { Location: `https://${dest}/__gate/sso/callback?t=${sealTicket(to, s.sid, deviceOf(req))}&next=${encodeURIComponent(next)}` });
   }
 
   // ---- linking a machine ----
@@ -1775,7 +1795,7 @@ async function tunnelRequest(port, req, res, path, url, host) {
     if (!wantsHtml) return sendJson(res, 401, { error: t.access === "password" ? "password required" : "login required" }, why);
     const next = encodeURIComponent(safeNext(req.url, "/"));
     if (t.access === "password") return send(res, 302, "", { Location: "/__gate/unlock?next=" + next, ...why });
-    return send(res, 302, "", { Location: mainHost() ? ssoUrl(host, req.url) : "/__gate/login?next=" + next, ...why });
+    return send(res, 302, "", { Location: mainHost() ? ssoUrl(hostWithPort(req), req.url) : "/__gate/login?next=" + next, ...why });
   }
   tunnels.proxy(port, req, res, { stripCookie: stripGateCookie });
 }
@@ -1805,7 +1825,7 @@ function shieldStop(req, path, host) {
   // one of your devices (its device key): yours for sure, whatever the address
   const dev = deviceOf(req);
   if (dev) devices.seen(dev, { ip, ua: req.headers["user-agent"], host });
-  const port = burrow.matchHost(host), ipChecks = port === null || tunnels.get(port)?.ipChecks !== false;
+  const port = tunnelFor(req, host), ipChecks = port === null || tunnels.get(port)?.ipChecks !== false;
   if (guardExt) {
     const H = req.headers;
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
@@ -1848,7 +1868,7 @@ async function handler(req, res) {
       }
       return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close", ...(stop.retry ? { "Retry-After": String(stop.retry) } : {}) });
     }
-    const port = burrow.matchHost(host);
+    const port = tunnelFor(req, host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
     // Once a domain is linked, the serveo link forwards page loads to it,
     // carrying a signed-in session along (a 60 s single-use ticket).
@@ -1921,7 +1941,7 @@ server.on("upgrade", (req, socket, head) => {
   const stop = shieldStop(req, new URL(req.url || "/", "http://x").pathname, host);
   if (req._guard) { req._guard.info.ws = true; observeDone(req, null, { status: stop ? stop.status : 101 }); }
   if (stop) { socket.end(`HTTP/1.1 ${stop.status} ${stop.status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`); return; }
-  const port = burrow.matchHost(host);
+  const port = tunnelFor(req, host);
   if (port !== null) {
     const t = tunnels.get(port);
     if (!t || !t.enabled) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
@@ -1979,12 +1999,76 @@ const relayIn = createNetServer((sock) => {
 relayIn.on("error", (e) => log(`edge: the relay port 127.0.0.1:${RELAY_PORT}:`, e.message));
 relayIn.listen(RELAY_PORT, "127.0.0.1");
 let edgeServer = null;
+const edgeTls = () => ({
+  SNICallback: (name, cb) => { const ctx = tunnels.edge.context(name); if (ctx) cb(null, ctx); else cb(new Error("not a tunnel name")); },
+  minVersion: "TLSv1.2",
+});
+// ---------- other ports on a tunnel's address (name:8080) ----------
+// A listener per port in use, with the wildcard certificate: here when visitors reach
+// this machine, on the VPS when they reach that (POST /ports to its agent). Who it's
+// for is the port it arrived on, never what the Host header says about a port.
+const portServers = new Map();           // port -> {srv, state, error}
+let relayPorts = { key: null, at: 0, ports: {}, error: null, busy: false, updating: false };
+function portListen(p) {
+  const srv = createHttpsServer(edgeTls(), (req, res) => {
+    req.headers.host = `${hostOf(req)}:${p}`;
+    if (edgeAdmit(req)) return handler(req, res);
+    res.writeHead(421, { "Content-Type": "text/plain" }); res.end("Misdirected request");
+  });
+  srv.on("upgrade", (req, socket, head) => {
+    req.headers.host = `${hostOf(req)}:${p}`;
+    if (edgeAdmit(req)) server.emit("upgrade", req, socket, head);
+    else socket.end("HTTP/1.1 421 Misdirected Request\r\n\r\n");
+  });
+  srv.on("tlsClientError", () => { /* scanners, names we don't serve */ });
+  srv.keepAliveTimeout = 65000;
+  const rec = { srv, state: "starting", error: null, at: Date.now() };
+  portServers.set(p, rec);
+  srv.on("error", (e) => { rec.state = "error"; rec.error = e.code === "EADDRINUSE" ? `Something else on this machine uses port ${p}.` : e.code === "EACCES" ? `This machine won't let Aegis use port ${p}.` : e.message; log(`ports: ${p}:`, rec.error); });
+  srv.once("listening", () => { rec.state = "listening"; log(`ports: tunnels answer on ${EDGE.host}:${p} too`); });
+  srv.listen(p, EDGE.host);
+}
+function portsSync() {
+  const sup = tunnels.portsSupport(), want = sup.ok ? tunnels.publicPorts() : [];
+  const here = sup.via === "direct" && tunnels.edge.ready() ? want : [];
+  for (const [p, r] of portServers) {
+    if (here.includes(p) && (r.state !== "error" || Date.now() - r.at < 60e3)) continue;      // one that failed is tried again each minute
+    try { r.srv.close(); r.srv.closeAllConnections?.(); } catch { /* it never listened */ }
+    portServers.delete(p);
+  }
+  for (const p of here) if (!portServers.has(p)) portListen(p);
+  if (sup.via === "relay") relayPortsSync(want);
+}
+async function relayPortsSync(want) {
+  const R = relayPorts, key = want.join(",");
+  if (R.busy || relayLink.link.state !== "up") return;
+  if (!relayLink.can("ports")) {
+    if (!want.length) return;
+    // an older agent: your Aegis sends the newer one, as it does when the link starts
+    if (relayLink.outdated() === "update" && !R.updating) { R.updating = true; relayLink.updateAgent().catch((e) => { R.error = e.message; }).finally(() => { setTimeout(() => { R.updating = false; }, 30e3); }); }
+    else if (relayLink.outdated() === "reinstall") R.error = "The agent on your VPS is too old to update itself: run the install command again (Settings → Domain → Your VPS).";
+    return;
+  }
+  if (key === R.key && Date.now() - R.at < 60e3) return;
+  R.busy = true;
+  try { const r = await relayLink.syncPorts(want); Object.assign(R, { key, at: Date.now(), ports: r.ports || {}, error: null }); }
+  catch (e) { Object.assign(R, { key: null, at: Date.now(), error: e.message }); log("relay: couldn't set the ports on the VPS:", e.message); }
+  finally { R.busy = false; }
+}
+// for addons (Burrow Pages' Ports tab): {ok, why, via, ports: {8080: {state, error}}}
+function portsView() {
+  const sup = tunnels.portsSupport(), ports = {};
+  for (const p of sup.ok ? tunnels.publicPorts() : []) {
+    if (sup.via === "direct") { const r = portServers.get(p); ports[p] = r ? { state: r.state, error: r.error } : { state: "starting", error: null }; }
+    else ports[p] = relayPorts.ports[p] || { state: "starting", error: relayPorts.error };
+  }
+  return { ...sup, ports, ...(sup.via === "relay" ? { error: relayPorts.error, host: relayLink.state?.vps?.host || null } : {}) };
+}
+tunnels.onPorts = () => { relayPorts.key = null; portsSync(); };
+setInterval(portsSync, 10000).unref();
 function edgeListen() {
   if (edgeServer || !tunnels.edge.ready()) return;
-  edgeServer = createHttpsServer({
-    SNICallback: (name, cb) => { const ctx = tunnels.edge.context(name); if (ctx) cb(null, ctx); else cb(new Error("not a tunnel name")); },
-    minVersion: "TLSv1.2",
-  }, (req, res) => {
+  edgeServer = createHttpsServer(edgeTls(), (req, res) => {
     // the edge's check from the outside (through Cloudflare): answer with its token
     if (hostOf(req) === tunnels.edge.checkName) {
       const ok = new URL(req.url || "/", "http://x").pathname === CHECK_PATH;
@@ -2037,7 +2121,8 @@ let relayMachineBusy = false;            // linking the VPS into Machines (relay
 function relayAdmit(req) {
   const host = hostOf(req);
   for (const k of ["cf-connecting-ip", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-aegis-front-host", "x-aegis-front-ip", "x-aegis-front-key"]) delete req.headers[k];
-  const ip = relayLink.verifyRequest(req, host);
+  // signed as the agent sent it: with the port, when it came in on one of a tunnel's own (agent 1.7+)
+  const ip = relayLink.verifyRequest(req, String(req.headers.host || "").toLowerCase());
   delete req.headers["x-aegis-relay"]; delete req.headers["x-aegis-relay-ip"];
   if (!ip) {
     const k = String(req.socket.remotePort), last = relayRefused.get(k) || 0;

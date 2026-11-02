@@ -280,6 +280,12 @@ export class RelayLink {
     if (this.agent?.zones) this.agent.zones = this.agent.zones.filter((z) => z.suffix !== suffix);
     return r;
   }
+  // the other ports the agent answers on, for tunnels on a port of an address: -> {ports: {8080: {state, error}}}
+  async syncPorts(ports) {
+    const r = await this.control("POST", "/ports", { ports });
+    this.agent = { ...(this.agent || {}), ports: r.ports };
+    return r;
+  }
   // who may pass, to the agent: {on, hosts, cleared, banned}; only what changed when it can
   async syncEdge(want) {
     if (this.link.state !== "up" || !this.can("edge")) return null;

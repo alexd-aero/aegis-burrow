@@ -47,6 +47,13 @@
 // nothing else in sshd_config is touched, and a block that doesn't check out
 // is taken back out.
 //
+// Ports (agent 1.7+): a tunnel can sit on another port of an address (name:8080).
+// POST /ports (signed) says which: the agent answers those itself, with TLS of its
+// own, so Caddy's config and whatever else this server runs are never touched. A
+// port something else here uses stays that thing's, and comes back as an error. The
+// request goes home signed as name:port. Ports opened in ufw or firewalld by this
+// are closed again by it. A cloud provider's own firewall is yours to open.
+//
 // Standby (agent 1.5+): your Aegis can hand this agent a stand-in for a tunnel
 // (a copy of a folder, or a message page), kept in /etc/aegis-relay/standby/<host>/.
 // While your Aegis answers, nothing changes. When it doesn't (the link is down,
@@ -69,8 +76,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname, sep, extname } from "node:path";
 
-export const VERSION = "1.6.1";
-export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock"];
+export const VERSION = "1.7.0";
+export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock", "ports"];
 export const STANDBY_LIMITS = { files: 2000, bytes: 50 * 1024 * 1024 };
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
@@ -206,7 +213,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   // the visitor's address: Caddy in front says it in x-aegis-client (only believed from this machine)
   const visitor = (req) => {
     const peer = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-    if (cfg.mode === "caddy") return /^(127\.|::1$)/.test(peer) ? String(req.headers["x-aegis-client"] || "").split(",")[0].trim() || null : null;
+    if (cfg.mode === "caddy" && !req.aegisPort) return /^(127\.|::1$)/.test(peer) ? String(req.headers["x-aegis-client"] || "").split(",")[0].trim() || null : null;
     return peer;
   };
   const upstreamHeaders = (req, host, ip) => {
@@ -334,8 +341,10 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     });
   }
 
+  // the name, with the port when it came in on one of the other ports (the listener's, not what Host says)
+  const hostFrom = (req) => { const h = ours(req.headers.host); return h && req.aegisPort ? `${h}:${req.aegisPort}` : h; };
   function onRequest(req, res) {
-    const host = ours(req.headers.host), ip = visitor(req);
+    const host = hostFrom(req), ip = visitor(req);
     if (!host || !ip) { stats.refused++; res.writeHead(421, { "Content-Type": "text/plain" }); return res.end("Misdirected request"); }
     const stop = edgeStop(req, host, ip);
     if (stop) return turnAway(res, stop, ip);
@@ -385,7 +394,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     req.pipe(up);
   }
   function onUpgrade(req, socket, head) {
-    const host = ours(req.headers.host), ip = visitor(req);
+    const host = hostFrom(req), ip = visitor(req);
     if (!host || !ip) { stats.refused++; return socket.end("HTTP/1.1 421 Misdirected Request\r\n\r\n"); }
     if (edgeStop(req, host, ip)) return socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     stats.ws++;
@@ -422,6 +431,66 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   front.keepAliveTimeout = 65000;
   front.listen(cfg.mode === "tls" ? cfg.tlsPort || 443 : cfg.httpPort, cfg.mode === "tls" ? "0.0.0.0" : "127.0.0.1",
                () => log(`aegis relay agent ${VERSION}: ${cfg.mode === "tls" ? "TLS on :" + (cfg.tlsPort || 443) : "behind Caddy on 127.0.0.1:" + cfg.httpPort} -> 127.0.0.1:${cfg.upstreamPort}, names ${zones().map((z) => "*" + z).join(" ")}`));
+
+  // the other ports (POST /ports): TLS here, whichever mode the main port is in
+  const portsFile = cfg.portsFile || join(dirname(cfg.certDir), "ports.json");
+  const extraPorts = new Map();         // port -> {srv, state, error, opened}
+  const reserved = new Set([cfg.controlPort, cfg.upstreamPort, cfg.httpPort, cfg.tlsPort || 443, 80, 443].filter(Boolean));
+  const fwEnv = { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" };
+  const fwRun = (cmd, args) => String(execFileSync(cmd, args, { env: fwEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 15000 }));
+  // -> true when a firewall here needed this port opened
+  function firewallOpen(p) {
+    if (cfg.firewall === false || process.getuid?.() !== 0) return false;
+    try {
+      if (/Status: active/.test(fwRun("ufw", ["status"])) ) { fwRun("ufw", ["allow", `${p}/tcp`]); return "ufw"; }
+    } catch { /* no ufw */ }
+    try {
+      fwRun("firewall-cmd", ["--state"]);
+      fwRun("firewall-cmd", ["-q", "--permanent", `--add-port=${p}/tcp`]); fwRun("firewall-cmd", ["-q", "--reload"]);
+      return "firewalld";
+    } catch { /* no firewalld */ }
+    return false;
+  }
+  function firewallClose(p, how) {
+    try {
+      if (how === "ufw") fwRun("ufw", ["delete", "allow", `${p}/tcp`]);
+      if (how === "firewalld") { fwRun("firewall-cmd", ["-q", "--permanent", `--remove-port=${p}/tcp`]); fwRun("firewall-cmd", ["-q", "--reload"]); }
+    } catch (e) { log(`firewall: couldn't close ${p}:`, e.message); }
+  }
+  const portOpen = (p) => new Promise((done) => {
+    const srv = httpsServer({ SNICallback: (name, cb) => { const c = ctxs.get(zoneOf(name)); c ? cb(null, c) : cb(new Error("not ours")); }, minVersion: "TLSv1.2" },
+                            (req, res) => { req.aegisPort = p; onRequest(req, res); });
+    srv.on("upgrade", (req, socket, head) => { req.aegisPort = p; onUpgrade(req, socket, head); });
+    srv.on("tlsClientError", () => {});
+    srv.keepAliveTimeout = 65000;
+    const rec = { srv, state: "starting", error: null, opened: false };
+    extraPorts.set(p, rec);
+    srv.once("error", (e) => { rec.state = "error"; rec.error = e.code === "EADDRINUSE" ? `Something else on this server uses port ${p}.` : e.message; done(); });
+    srv.once("listening", () => {
+      srv.on("error", (e) => log(`port ${p}:`, e.message));
+      rec.state = "listening"; rec.opened = firewallOpen(p);
+      log(`port ${p}: answering for the tunnels${rec.opened ? ` (opened in ${rec.opened})` : ""}`); done();
+    });
+    srv.listen(p, "0.0.0.0");
+  });
+  const portsView = () => Object.fromEntries([...extraPorts].map(([p, r]) => [p, { state: r.state, error: r.error }]));
+  async function setPorts(list) {
+    const want = new Set(list.map(Number).filter((p) => Number.isInteger(p) && p >= 1024 && p <= 65535));
+    for (const [p, r] of extraPorts) {
+      if (want.has(p) && r.state === "listening") continue;
+      if (r.state === "listening") { r.srv.close(); r.srv.closeAllConnections?.(); if (r.opened) firewallClose(p, r.opened); log(`port ${p}: closed`); }
+      extraPorts.delete(p);
+    }
+    for (const p of want) {
+      if (extraPorts.has(p)) continue;
+      if (reserved.has(p)) { extraPorts.set(p, { state: "error", error: `Port ${p} is the relay's own.` }); continue; }
+      await portOpen(p);
+    }
+    try { mkdirSync(dirname(portsFile), { recursive: true }); writeFileSync(portsFile + ".tmp", JSON.stringify([...want])); renameSync(portsFile + ".tmp", portsFile); } catch (e) { log("ports:", e.message); }
+    return portsView();
+  }
+  // the ones it answered on before it restarted
+  try { setPorts(JSON.parse(readFileSync(portsFile, "utf8"))).catch(() => {}); } catch { /* none yet */ }
 
   // the certificate, as Caddy wants it (files + a site), or for the agent's own TLS
   // one site block per zone that has its certificate. TLS 1.3 only, post-quantum key
@@ -648,7 +717,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
       return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, now: Date.now(), cert: certInfo(suffix),
                           zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), stats,
                           edge: { on: edge.on, epoch: edge.epoch, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size },
-                          standby: { sites: sites.size } });
+                          standby: { sites: sites.size }, ports: portsView() });
     }
     const su = new URL(req.url, "http://agent");
     const sm = /^\/standby(?:\/([^/]+))?(\/file|\/commit)?$/.exec(su.pathname);
@@ -680,6 +749,12 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
           for (const k of ["cleared", "banned"]) { for (const ip of list(b.add?.[k])) edge[k].add(ip); for (const ip of list(b.del?.[k])) edge[k].delete(ip); }
         }
         reply(200, { ok: true, epoch: edge.epoch, on: edge.on, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size });
+      });
+    }
+    if (req.method === "POST" && req.url === "/ports") {
+      return body(64 * 1024, ({ ports }) => {
+        if (!Array.isArray(ports) || ports.length > 64) return reply(400, { error: "ports is a list of up to 64" });
+        setPorts(ports).then((v) => reply(200, { ok: true, ports: v }), (e) => reply(500, { error: e.message }));
       });
     }
     if (req.method === "POST" && req.url === "/zones/remove") {
@@ -744,7 +819,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     return { before, after, how };
   }
   control.listen(cfg.controlPort, "127.0.0.1");
-  return { front, control, stats, installCert, removeZone, zones, sites, close: () => { front.close(); control.close(); } };
+  return { front, control, stats, installCert, removeZone, zones, sites, setPorts, portsView, close: () => { front.close(); control.close(); for (const r of extraPorts.values()) { r.srv?.close(); r.srv?.closeAllConnections?.(); } } };
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

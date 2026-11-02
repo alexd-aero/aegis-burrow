@@ -321,6 +321,15 @@ burrow off / on                     # the module switch (tunnels are kept)
 
 Each tunnel gets its own DNS record. *Change the name* moves the dashboard to another subdomain on the same tunnel (tunnels named `tunnel-PORT-…` move with it), and *Unlink* removes the records, the tunnel and the files. A domain routed by a cloudflared service you set up yourself can be renamed too: Aegis reads that service's config first and only goes ahead when its ingress already sends the new name here (a `*.<zone>` rule does).
 
+### Another port on a tunnel's address
+
+A tunnel can sit on another port of an address: `nex2.tunnel.example.com:8080` is its own tunnel, with its own target, access and numbers. Burrow Pages uses it for its **Ports** tab; an addon asks with `ctx.tunnels.create({port, parent, publicPort, ...})` and reads what's answering from `ctx.tunnels.ports()`.
+
+- It needs your tunnels on your own wildcard certificate (**Settings → Domain**). Through Cloudflare's certificates only Cloudflare's ports answer, and Aegis says so instead of pretending.
+- **Through your VPS**, the relay agent (1.7+) answers the port itself, with TLS of its own and the same signed way home. Caddy's config isn't touched, a port something else on that server uses stays theirs and comes back as an error, and `ufw` or `firewalld` are opened and closed for you. A cloud provider's own firewall is yours to open.
+- **On this machine**, Aegis listens on the port. Visitors from outside need it forwarded on your router; Aegis doesn't ask for that.
+- Ports from 1024 up, except the ones browsers refuse to open. Which tunnel a request is for comes from the port it arrived on, never from what its Host header claims, and a tunnel's own password or login holds on each port separately.
+
 ## ⬆️ Updates
 
 <p align="center"><img src="docs/screenshots/update.png" alt="An update waiting: the green card" width="100%"></p>
