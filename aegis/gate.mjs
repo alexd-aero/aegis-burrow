@@ -1805,16 +1805,17 @@ function shieldStop(req, path, host) {
   // one of your devices (its device key): yours for sure, whatever the address
   const dev = deviceOf(req);
   if (dev) devices.seen(dev, { ip, ua: req.headers["user-agent"], host });
+  const port = burrow.matchHost(host), ipChecks = port === null || tunnels.get(port)?.ipChecks !== false;
   if (guardExt) {
-    const H = req.headers, port = burrow.matchHost(host);
+    const H = req.headers;
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
+                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
-  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), trusted: () => !!dev || isAuthed(req) });
+  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), ipChecks, trusted: () => !!dev || isAuthed(req) });
 }
 // the guard addon's log line, once the response is done (never in the request's way)
 function observeDone(req, res, extra = {}) {
@@ -2205,7 +2206,7 @@ let edgeLast = null, edgeBusy = false, edgeWait = 0;
 function publicHosts() {
   const out = new Set();
   for (const t of tunnels.list()) {
-    if (t.access !== "public" || !t.enabled) continue;
+    if (t.access !== "public" || !t.enabled || t.ipChecks === false) continue;   // no address check: nothing to hold them for on the VPS
     if (t.host) out.add(t.host.toLowerCase());
     for (const a of t.also || []) if (!a.hidden) out.add(a.host.toLowerCase());
   }
@@ -2214,15 +2215,16 @@ function publicHosts() {
 setInterval(async () => {
   if (edgeBusy || Date.now() < edgeWait || relayLink.link.state !== "up" || !relayLink.can("edge")) return;
   const hosts = publicHosts(), ver = guardExt?.edgeVersion?.() ?? -1;
-  const key = `${ver}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
+  const openN = tunnels.list().filter((t) => t.enabled && t.ipChecks === false).length;
+  const key = `${ver}|${openN}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
   if (key === edgeLast) return;
   edgeBusy = true;
   try {
-    const e = guardExt?.edge?.() || null;
+    const e = guardExt?.edge?.({ openTunnels: tunnels.list().some((t) => t.enabled && t.ipChecks === false) }) || null;
     // without a guard addon nothing is checked there (the built-in shield still works here)
     const want = e ? { on: !!e.on, hosts, cleared: e.cleared, banned: e.banned } : { on: false, hosts, cleared: [], banned: [] };
     await relayLink.syncEdge(want);
-    edgeLast = `${ver}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
+    edgeLast = `${ver}|${openN}|${hosts.join(",")}|${relayLink.agent?.edge?.epoch || ""}`;
   } catch (err) { log("relay: couldn't update who may pass on the VPS:", err.message); edgeLast = null; edgeWait = Date.now() + 30e3; }
   finally { edgeBusy = false; }
 }, 1000).unref();

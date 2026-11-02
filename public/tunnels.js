@@ -934,6 +934,7 @@ function renderDetail() {
           ${d.kind === "site" || d.clone?.access === "password" ? "" : `<button data-act="access" data-v="public" class="${d.access === "public" ? "on" : ""}">Public</button>`}
         </div>
         ${d.access === "password" ? `<button class="btn sm" data-act="password">${ICON.key} Change password</button>` : ""}
+        ${d.access === "public" ? `<label class="check" title="Off: anyone can open it from any address, even one that's on a blocklist. Attacks and scanners are still stopped by what they send."><input type="checkbox" data-act="ip-checks" ${d.ipChecks !== false ? "checked" : ""}> Check visitors' addresses</label>` : ""}
         <label class="switch" title="On/off"><input type="checkbox" data-act="toggle" data-port="${d.port}" ${d.enabled ? "checked" : ""} aria-label="Tunnel on or off"><i></i></label>
         <a class="btn sm" href="${h(d.url)}" target="_blank" rel="noopener">${ICON.ext} Open</a>
         <button class="btn sm" data-act="edit">${ICON.edit} Edit</button>
@@ -1741,6 +1742,10 @@ document.addEventListener("click", async (e) => {
       toast(v === "public" ? "Anyone with the link can open it" : v === "password" ? "It opens with its own password (or your login)" : "Login required"); refresh();
     }
     else if (act === "password") passwordForm(S.detail);
+    else if (act === "ip-checks") {
+      await patch(port, { ipChecks: el.checked });
+      toast(el.checked ? "Visitors' addresses are checked again" : "Addresses aren't checked: attacks and scanners are still stopped"); refresh();
+    }
     else if (act.startsWith("fb-")) await fbClick(act, el);
     else if (act === "pick-domain") {
       const z = el.dataset.zone, on = el.checked, cur = new Set(S.detail.domains || []);

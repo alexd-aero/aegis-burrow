@@ -593,6 +593,7 @@ export class TunnelManager {
       t.access = access; t.lock = lock;
     }
     if ("name" in patch) t.name = String(patch.name || "").slice(0, 60);
+    if ("ipChecks" in patch) t.ipChecks = patch.ipChecks !== false;
     if ("meta" in patch && t.app) t.meta = cleanMeta(t.app, patch.meta).meta;
     if (t.kind === "site") {
       if ("site" in patch) {
@@ -991,7 +992,7 @@ export class TunnelManager {
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
       clone: t.clone ? { url: t.clone.url, host: t.clone.host, access: t.clone.access, name: t.clone.name, lost: t.clone.lost || null } : null,
       target: t.site ? t.site.url : t.clone ? t.clone.url : `${t.scheme}://${t.targetHost}:${t.targetPort}`, targetHost: t.targetHost, targetPort: t.targetPort,
-      scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost,
+      scheme: t.scheme, name: t.name, sub: t.sub || null, title: rt.title, access: t.access, preserveHost: t.preserveHost, ipChecks: t.ipChecks !== false,
       locked: !!t.lock, lockSet: t.lock?.set || null, app: t.app || null, meta: t.meta || null,
       // if this machine is down (burrow/standby.mjs): never the fallback's own password hash
       fallback: t.fallback ? { kind: t.fallback.kind, dir: t.fallback.dir || "", title: t.fallback.title || "", message: t.fallback.message || "",

@@ -22,7 +22,7 @@
 //                                     or {site, sub, name?, access?, password?}: a GitHub/GitLab
 //                                     Pages site behind a password (needs the Burrow Pages addon)
 //   GET    /tunnels/PORT             details: stats, charts, clients, recent requests
-//   PATCH  /tunnels/PORT             any of {name, sub, access, password, enabled, targetHost, targetPort, scheme, site}
+//   PATCH  /tunnels/PORT             any of {name, sub, access, password, enabled, targetHost, targetPort, scheme, site, ipChecks}
 //
 // access is "login" (the Aegis login, the default), "password" (its own
 // password; Burrow keeps only a scrypt hash) or "public".

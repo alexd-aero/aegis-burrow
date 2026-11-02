@@ -338,8 +338,9 @@ export class Shield {
       return tr;
     };
     const now = Date.now();
+    const open = info.ipChecks === false;                               // this tunnel judges requests, not addresses
     const ban = this.state.bans[ip];
-    if (ban && (!ban.until || ban.until > now)) {
+    if (ban && (!ban.until || ban.until > now) && !(open && ban.source !== "manual" && !(ban.source === "payload" && now - (ban.at || 0) < 3600e3))) {
       if (ban.source !== "manual" && trusted()) return null;           // trust() lifted it
       ban.hits = (ban.hits || 0) + 1; ban.last = now;
       this.state.stats.blocked++; this.dirty = true;
@@ -348,7 +349,7 @@ export class Shield {
     }
     const s = this.settings;
     const probe = classify(info.path);
-    const lists = this.lookup(ip);
+    const lists = open ? [] : this.lookup(ip);
     if (!s.auto) {
       if (probe === 3 && s.drop && !trusted()) return this.drop(ip, info);
       return null;
