@@ -300,6 +300,7 @@ async function domains(op = "list", ...rest) {
     const a = rest[i];
     if (a === "--token-stdin") flags.tokenStdin = true;
     else if (/^--(cert|tunnels|route|label)$/.test(a)) flags[a.slice(2)] = rest[++i] ?? "";
+    else if (a === "--wildcard" || a === "--drop-sub") (flags[a === "--wildcard" ? "wild" : "drop"] ||= []).push(String(rest[++i] ?? "").toLowerCase());
     else if (a.startsWith("--")) { out(red(`  ✗ unknown option ${a}`)); return 2; }
     else pos.push(a);
   }
@@ -308,6 +309,7 @@ async function domains(op = "list", ...rest) {
     if (!v.domains.length) out(dim("  no other domains" + (v.main ? ` (main: ${v.main})` : "")));
     for (const d of v.domains) {
       out(`  ${bold(d.zone)}  tunnels: ${d.tunnels}${d.tunnels === "none" ? "" : ` through ${d.route}`}${d.dashboard ? `, dashboard ${d.dashboard}` : ""}`);
+      for (const x of d.subs || []) out(dim(`    subdomain: ${x.host}${x.wildcard ? "" : ` → port ${x.port}`}`));
       if (d.cert) out(dim(`    certificate: ${d.cert.error ? red(d.cert.error) : d.cert.issuing ? "being issued" : d.cert.notAfter ? "until " + new Date(d.cert.notAfter).toISOString().slice(0, 10) : "none yet"}`));
     }
     if (v.pending) out(yellow(`  ready to add: ${v.pending.zone} (with ${v.pending.via})`));
@@ -334,7 +336,19 @@ async function domains(op = "list", ...rest) {
       show(await call("POST", "/domains", JSON.stringify(spec()), 600000));
       return 0;
     }
-    if (op === "set") { show(await call("PATCH", `/domains/${encodeURIComponent(pos[0] || "")}`, JSON.stringify(spec()), 600000)); return 0; }
+    if (op === "set") {
+      const zone = String(pos[0] || "").toLowerCase(), body = spec();
+      // --wildcard NAME: *.NAME.<zone> carries its tunnels too; --drop-sub NAME takes a subdomain away
+      if (flags.wild || flags.drop) {
+        const cur = (await call("GET", "/domains", null, 20000)).domains.find((d) => d.zone === zone);
+        if (!cur) { out(red(`  ✗ ${zone || "that"} isn't one of your other domains (aegis domains list)`)); return 2; }
+        const subs = (cur.subs || []).map(({ name, wildcard, port }) => (wildcard ? { name, wildcard: true } : { name, wildcard: false, port }))
+          .filter((x) => !(flags.drop || []).includes(x.name));
+        for (const w of flags.wild || []) if (!subs.some((x) => x.name === w)) subs.push({ name: w, wildcard: true });
+        body.subs = subs;
+      }
+      show(await call("PATCH", `/domains/${encodeURIComponent(zone)}`, JSON.stringify(body), 600000)); return 0;
+    }
     if (op === "remove") { show(await call("DELETE", `/domains/${encodeURIComponent(pos[0] || "")}`, null, 120000)); return 0; }
     if (op === "tunnel") {
       const port = Number(pos[0]);

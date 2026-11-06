@@ -113,7 +113,7 @@ Everything the browser does, the terminal does too. It talks to the running gate
 | `aegis setup` | Your login, the pack, a domain: step by step |
 | `aegis tunnels` | Pick a tunnel with the arrow keys: change its subdomain, choose who can open it (your login, its own password, anyone), pause it, open it, unpublish it. **+ Publish a port** lists what's listening; **+ Secure reverse tunneling** appears when that experiment is on |
 | `aegis domain [link \| rename NAME \| unlink]` | Cloudflare from the terminal: it prints the authorization link (open it on any device) and waits |
-| `aegis domains [list \| add ZONE \| set ZONE \| remove ZONE \| tunnel PORT ZONE…]` | **Other domains** from the terminal, the same steps as Settings → Domain: `add other.net --cert cert.pem` (a `cloudflared tunnel login` certificate) or `--token-stdin`, with `--tunnels all\|picked\|none --route vps\|cloudflare --label NAME`; `tunnel 8080 other.net` puts a tunnel on a picked domain |
+| `aegis domains [list \| add ZONE \| set ZONE \| remove ZONE \| tunnel PORT ZONE…]` | **Other domains** from the terminal, the same steps as Settings → Domain: `add other.net --cert cert.pem` (a `cloudflared tunnel login` certificate) or `--token-stdin`, with `--tunnels all\|picked\|none --route vps\|cloudflare --label NAME`; `set other.net --wildcard apps` adds `*.apps.other.net` (tunnels can then live at `NAME.apps.other.net`), `--drop-sub apps` takes it away; `tunnel 8080 other.net` puts a tunnel on a picked domain |
 | `aegis passwd` | A new login; every browser signs in again |
 | `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
 | `aegis versions` · `aegis rollback [VERSION]` | The versions kept here; go back to one (works with the gate down) |
@@ -326,7 +326,7 @@ Each tunnel gets its own DNS record. *Change the name* moves the dashboard to an
 
 ### Which domain a tunnel lives on
 
-With **other domains** that carry tunnels (Settings → Domain → Other domains), every tunnel picks its domain: the **Domain** dropdown beside its address in *New tunnel* and *Edit*, or in its Target panel. Its address there becomes its link everywhere (cards, Open, addons); its name on the main domain keeps answering and is listed under it. On a domain whose tunnels are *picked*, choosing it picks the tunnel there too. Addons get the same choice: `ctx.tunnels.domains()` lists them (the main one first) and `create`/`update` take `{domain: zone}` ("" = the main one). Burrow Pages and Noxia have the dropdown in their own forms.
+With **other domains** that carry tunnels (Settings → Domain → Other domains), every tunnel picks its domain: the **Domain** dropdown beside its address in *New tunnel* and *Edit*, or in its Target panel. Its address there becomes its link everywhere (cards, Open, addons); its name on the main domain keeps answering and is listed under it. A domain's wildcard subdomains are choices too (`*.apps.other.net` → `NAME.apps.other.net`). Noxia's own names for its tunnels (`nx-NAME.other.net`, `nx-NAME.apps.other.net`) keep answering on a domain Aegis holds, picked or not. On a domain whose tunnels are *picked*, choosing it picks the tunnel there too. Addons get the same choice: `ctx.tunnels.domains()` lists them (the main one first) and `create`/`update` take `{domain: zone}` ("" = the main one). Burrow Pages and Noxia have the dropdown in their own forms.
 
 ### Another port on a tunnel's address
 

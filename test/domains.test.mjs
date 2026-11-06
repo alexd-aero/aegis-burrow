@@ -282,6 +282,35 @@ test("subdomains: a wildcard one through your VPS (its own certificate), a singl
   assert.ok(removed.includes(".other.net"));
 });
 
+test("a tunnel can live under a wildcard subdomain of another domain; Noxia's nx- names answer there too", async () => {
+  const relay = { configured: () => true, host: () => "203.0.113.7", ip: async () => "203.0.113.7", outdated: () => null, version: () => "1.2.0",
+                  ready: async () => ({ ok: true }), push: async () => {}, remove: async () => {} };
+  const { D, tm, authorize } = setup([], { relay });
+  await authorize();
+  await D.add({ label: "", tunnels: "picked", route: "vps" });
+  await D.update("other.net", { subs: [{ name: "apps", wildcard: true }] });
+  assert.deepEqual(tm.domainChoices().map((d) => d.zone), ["example.com", "other.net", "apps.other.net"]);
+  let t = await tm.create({ port: 3000, sub: "chat", domain: "apps.other.net" });
+  assert.equal(t.host, "chat.apps.other.net");
+  assert.deepEqual(tm.get(3000).domains, ["other.net"], "picked on the domain the subdomain is on");
+  assert.deepEqual(t.also.map((a) => a.host), ["chat.example.com", "chat.other.net"]);
+  assert.equal(tm.matchHost("chat.apps.other.net"), 3000);
+  t = await tm.update(3000, { domain: "other.net" });
+  assert.equal(t.host, "chat.other.net");
+  assert.deepEqual(tm.get(3000).domains, ["other.net"]);
+  t = await tm.update(3000, { domain: "" });
+  assert.equal(t.host, "chat.example.com");
+  assert.equal(tm.get(3000).domains, undefined);
+  // Noxia's tunnels: nx-<sub> under the domain and its wildcard subdomains, picked or not; nobody else's
+  await tm.create({ port: 4000, sub: "radio", app: "noxia" });
+  await tm.create({ port: 5000, sub: "plain" });
+  assert.equal(tm.matchHost("nx-radio.apps.other.net"), 4000);
+  assert.equal(tm.matchHost("nx-radio.other.net"), 4000);
+  assert.equal(tm.matchHost("radio.other.net"), null, "its own name stays picked-only");
+  assert.equal(tm.matchHost("nx-plain.apps.other.net"), null);
+  assert.equal(tm.matchHost("nx-nope.apps.other.net"), null);
+});
+
 test("subdomains through Cloudflare: a single one is a proxied record and a rule before the wildcard; a wildcard one is refused", async () => {
   const { D, tm, recs, authorize } = setup();
   await authorize();

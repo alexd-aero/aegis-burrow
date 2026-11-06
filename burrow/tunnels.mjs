@@ -48,8 +48,11 @@
 // t.domains. One wildcard record per domain, so nothing is made per tunnel.
 // A domain's subdomains add more: a wildcard one (*.apps.<zone>) puts the same
 // tunnels at <sub|PORT>.apps.<zone>; a single one (blog.<zone>) is one tunnel's.
-// A tunnel can live on one of them (t.home = its zone): its address is then
-// <sub|PORT>.<zone>, and its name on the main domain still answers, listed with the rest.
+// A tunnel can live on one of them (t.home = its zone, or a wildcard subdomain of it
+// like apps.<zone>): its address is then <sub|PORT>.<home>, and its name on the main
+// domain still answers, listed with the rest.
+// Noxia's own names for its tunnels (nx-<name>.<zone>, nx-<name>.<wildcard sub>) answer
+// too, whatever is picked: Noxia used to serve them itself, before Aegis held the zone.
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -316,8 +319,11 @@ export class TunnelManager {
   domainChoices() {
     if (!this.domain) return [];
     return [{ zone: this.wildcard ? this.wbase : this.parent, main: true },
-            ...this.extras.filter((d) => d.root).map((d) => ({ zone: d.zone, picked: d.picked }))];
+            ...this.extras.filter((d) => d.root).flatMap((d) => [{ zone: d.zone, picked: d.picked },
+              ...d.wilds.map((w) => ({ zone: `${w}.${d.zone}`, picked: d.picked, of: d.zone }))])];
   }
+  // the other domain a home is on: apps.other.net -> other.net
+  zoneOfHome(home) { return this.domainChoices().find((d) => d.zone === home)?.of || home; }
   // "" or the main domain -> null; another domain that carries tunnels -> its zone; else throws
   homeOf(zone) {
     const z = String(zone || "").trim().toLowerCase().replace(/^\*?\./, "");
@@ -328,14 +334,14 @@ export class TunnelManager {
     return z;
   }
   // a new tunnel's fields for living on `zone` ({} on the main domain)
-  homeFields(zone) { const z = this.homeOf(zone); return z ? { home: z, domains: [z] } : {}; }
+  homeFields(zone) { const z = this.homeOf(zone); return z ? { home: z, domains: [this.zoneOfHome(z)] } : {}; }
   // move it: on a domain whose tunnels are picked, the tunnel is picked there too (and unpicked from the one it leaves)
   setHome(t, zone) {
     const z = this.homeOf(zone), was = t.home || null;
     if (z === was) return false;
     const picks = new Set(t.domains || []);
-    if (was) picks.delete(was);
-    if (z) { t.home = z; picks.add(z); } else delete t.home;
+    if (was) picks.delete(this.zoneOfHome(was));
+    if (z) { t.home = z; picks.add(this.zoneOfHome(z)); } else delete t.home;
     if (picks.size) t.domains = [...picks]; else delete t.domains;
     return true;
   }
@@ -380,6 +386,8 @@ export class TunnelManager {
       let t = null;
       for (const x of this.tunnels.values()) if (x.sub && x.sub === left) t = x;
       if (!t && /^\d{1,5}$/.test(left)) { const x = this.tunnels.get(Number(left)); if (x && !x.sub) t = x; }
+      // Noxia's own name for one of its tunnels: answers whatever is picked (see the top)
+      if (!t && left.startsWith("nx-") && d.root) for (const x of this.tunnels.values()) if (x.app === "noxia" && x.sub === left.slice(3)) return x.port;
       return t && this.onExtra(t, d) ? t.port : null;
     }
     return null;
@@ -705,7 +713,8 @@ export class TunnelManager {
       const known = new Set(this.extraZones());
       t.domains = [...new Set((Array.isArray(patch.domains) ? patch.domains : []).map((z) => String(z).toLowerCase()))].filter((z) => known.has(z));
       if (!t.domains.length) delete t.domains;
-      if (t.home && !(t.domains || []).includes(t.home) && this.extras.find((d) => d.zone === t.home)?.picked) delete t.home;   // unpicked where it lived: back to the main domain
+      const hz = t.home && this.zoneOfHome(t.home);
+      if (hz && !(t.domains || []).includes(hz) && this.extras.find((d) => d.zone === hz)?.picked) delete t.home;   // unpicked where it lived: back to the main domain
     }
     if ("domain" in patch && t.parent == null && this.setHome(t, patch.domain)) this.log("tunnels:", t.port, "now lives on", t.home || "the main domain");
     if ("sub" in patch) {
