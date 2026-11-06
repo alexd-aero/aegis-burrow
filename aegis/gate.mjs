@@ -349,6 +349,8 @@ function extContext(rec) {
       update: (port, patch) => { own(port); return tunnels.update(port, patch); },
       remove: (port) => { own(port); return tunnels.remove(port); },
       ports: () => portsView(),
+      // where a tunnel can live: [{zone, main?}], the main domain first; create/update take {domain: zone}
+      domains: () => tunnels.domainChoices(),
     },
     // your other machines (Machines), and a port of one answering here: forward(machine, port)
     // -> {host: "127.0.0.1", port, state}; kept up until release(machine, port) or the addon unloads

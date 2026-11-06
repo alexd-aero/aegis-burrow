@@ -338,6 +338,9 @@ body.home { display: grid; place-items: center; min-height: 100vh; padding: 16px
 .addr { display: flex; align-items: center; background: var(--field); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
 .addr .input { border: 0; box-shadow: none; width: 180px; flex: none; border-radius: 0; }
 .addr .zone { padding: 0 12px; color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.addr .zone-pick { flex: 1; min-width: 0; width: auto; border: 0; border-left: 1px solid var(--line-2); border-radius: 0; box-shadow: none; padding: 0 10px; height: 40px; color: var(--text); background-color: transparent; cursor: pointer; text-overflow: ellipsis; }
+.addr .zone-pick:focus { box-shadow: none; }
+.addr .zone-pick option { background: var(--card); color: var(--text); }
 .addr:focus-within { border-color: var(--line-hi); box-shadow: 0 0 0 3px rgba(255,255,255,.06); }
 .ilist { display: grid; gap: 8px; margin-bottom: 12px; }
 .irow { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
@@ -1075,6 +1078,7 @@ a.nt-row:hover .nt-two .nt-sub { color: var(--muted); }
 .od-add .err-msg:empty { display: none; }
 .d-picks { align-items: flex-end; }
 .d-picks input { accent-color: #d7dade; }
+.kv .d-home { width: auto; max-width: 100%; height: 30px; padding: 0 8px; font: 12.5px var(--mono); }
 .od-check { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* a domain's subdomains */
 .od-subs { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; width: 100%; }

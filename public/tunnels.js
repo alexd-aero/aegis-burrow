@@ -140,8 +140,11 @@ function alsoRows(d) {
   return rows.length ? `<div class="d-also">${rows.join("")}</div>` : "";
 }
 function pickRows(d) {
-  if (!(d.pickable || []).length) return "";
-  return `<dt>Other domains</dt><dd class="d-picks">${d.pickable.map((z) => `<label class="check"><input type="checkbox" data-act="pick-domain" data-zone="${h(z)}" ${d.domains.includes(z) ? "checked" : ""}><span class="mono">${h(d.sub || d.port)}.${h(z)}</span></label>`).join("")}</dd>`;
+  const homes = d.homes || [];
+  const lives = homes.length > 1 ? `<dt>Domain</dt><dd><select class="input sm d-home" data-act="home" aria-label="Domain it lives on">${homes.map((x) => `<option value="${x.main ? "" : h(x.zone)}" ${(x.main ? !d.home : d.home === x.zone) ? "selected" : ""}>${h(d.sub || d.port)}.${h(x.zone)}</option>`).join("")}</select></dd>` : "";
+  const picks = (d.pickable || []).filter((z) => z !== d.home);
+  if (!picks.length) return lives;
+  return `${lives}<dt>Also on</dt><dd class="d-picks">${picks.map((z) => `<label class="check"><input type="checkbox" data-act="pick-domain" data-zone="${h(z)}" ${d.domains.includes(z) ? "checked" : ""}><span class="mono">${h(d.sub || d.port)}.${h(z)}</span></label>`).join("")}</dd>`;
 }
 function card(t) {
   return `<article class="card tcard${t.enabled ? "" : " off"}" data-act="open" data-port="${t.port}">
@@ -1202,7 +1205,7 @@ async function refresh() {
     } else {
       const r = await api("/__gate/api/tunnels").catch((e) => { if (/switched off/.test(e.message)) return { off: true, tunnels: [] }; throw e; });
       S.off = !!r.off;
-      S.list = r.tunnels; S.mode = r.mode; S.pattern = r.pattern;
+      S.list = r.tunnels; S.mode = r.mode; S.pattern = r.pattern; S.domains = r.domains || [];
       S.integrations = (await api("/__gate/api/integrations")).integrations;
       if (Date.now() - S.updAt > 60000) loadUpdates(false);
       if (Date.now() - (S.reachAt || 0) > 30000) {      // the relay doctor: do visitors really get in? (burrow/relaydoctor.mjs)
@@ -1270,6 +1273,10 @@ function openModal(html, onReady) {
   onReady?.(scrim);
 }
 
+// Where a tunnel lives: the main domain, or another one that carries tunnels (Settings → Domain → Other domains)
+const domainPick = (cur) => (S.domains || []).length > 1
+  ? `<select class="input mono zone zone-pick" id="fDomain" aria-label="Domain">${S.domains.map((d) => `<option value="${d.main ? "" : h(d.zone)}" ${(d.main ? !cur : cur === d.zone) ? "selected" : ""}>.${h(d.zone)}</option>`).join("")}</select>`
+  : `<span class="mono zone">.${h(zoneName() || "your-domain")}</span>`;
 // "tunnel-PORT-aegis.example.com" -> "example.com" and "tunnel-3000-aegis"
 const zoneName = () => S.mode === "domain" && S.pattern ? S.pattern.split(".").slice(1).join(".") : "";
 const defaultLabel = (port) => (S.pattern.split(".")[0] || "tunnel-PORT").replace("PORT", port || "PORT");
@@ -1327,7 +1334,7 @@ const WHO = { public: "public", password: "a password of its own", login: "its o
 
 async function tunnelForm(edit, preset, opts = {}) {
   const t = edit || { access: "login", targetHost: "127.0.0.1", scheme: "auto", preserveHost: false, ...(preset || {}) };
-  if (!S.pattern) { try { const r = await api("/__gate/api/tunnels"); S.mode = r.mode; S.pattern = r.pattern; } catch { /* the form still works */ } }
+  if (!S.pattern || !S.domains) { try { const r = await api("/__gate/api/tunnels"); S.mode = r.mode; S.pattern = r.pattern; S.domains = r.domains || []; } catch { /* the form still works */ } }
   const isSite = edit && t.kind === "site", isClone = edit && t.kind === "clone";
   const managed = edit && !!t.app && !isSite;      // an addon's: it decides where it points
   const siteOnly = !edit && !!opts.site;
@@ -1364,7 +1371,7 @@ async function tunnelForm(edit, preset, opts = {}) {
       </div>
       <label class="field"><span>Name <span class="faint">(optional; the page title is used otherwise)</span></span><input class="input" id="fName" maxlength="60" value="${h(t.name || "")}"></label>
       <label class="field"><span>Address <span class="faint" id="fSubHint"></span></span>
-        <div class="addr"><input class="input mono" id="fSub" maxlength="40" value="${h(t.sub || "")}" placeholder="${h(S.mode === "domain" ? defaultLabel(t.port) : "grafana")}" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(zoneName() || "your-domain")}</span></div></label>
+        <div class="addr"><input class="input mono" id="fSub" maxlength="40" value="${h(t.sub || "")}" placeholder="${h(S.mode === "domain" ? defaultLabel(t.port) : "grafana")}" spellcheck="false" autocapitalize="none">${domainPick(t.home)}</div></label>
       <div class="field"><span>Who can open it</span><div id="fAccessBox">${accessSeg("fAccess", st.access, noPublic())}</div></div>
       ${pwFields(!!t.locked)}
       <details class="adv" id="fAdv" ${st.mode === "port" ? "" : "hidden"}><summary>Advanced</summary>
@@ -1437,9 +1444,11 @@ async function tunnelForm(edit, preset, opts = {}) {
         if (r.access === "password") m.querySelector("#fSrcPw").focus();
       }, 450);
     };
+    const domEl = m.querySelector("#fDomain");
     const upd = () => {
-      const sub = subEl.value.trim().toLowerCase(), pv = m.querySelector("#fPreview");
-      const at = S.mode === "domain" ? (sub ? `https://<b>${h(sub)}</b>.${h(zoneName())}` : `https://<b>…</b>.${h(zoneName())}`) : "a random <b>https://….trycloudflare.com</b> address";
+      const sub = subEl.value.trim().toLowerCase(), pv = m.querySelector("#fPreview"), dom = domEl?.value || "";
+      const zone = dom || zoneName();
+      const at = S.mode === "domain" ? (sub ? `https://<b>${h(sub)}</b>.${h(zone)}` : `https://<b>…</b>.${h(zone)}`) : "a random <b>https://….trycloudflare.com</b> address";
       const who = st.access === "public" ? "open to anyone" : st.access === "password" ? "behind its own password" : "behind your Aegis login";
       if (st.mode === "site") {
         const g = siteGuess(siteEl.value);
@@ -1448,7 +1457,8 @@ async function tunnelForm(edit, preset, opts = {}) {
       } else if (st.mode === "clone") {
         const p = st.probe && !st.probe.error ? st.probe : null;
         pv.innerHTML = `${at} <span class="faint">clones</span> ${p ? `<span class="mono">${h(p.host)}</span>` : "the link"} <span class="faint">· ${who}</span>`;
-      } else pv.innerHTML = previewText(edit ? t.port : (portEl?.value || "").trim() || "PORT", sub);
+      } else if (dom) pv.innerHTML = `https://<b>${h(sub || (edit ? t.port : (portEl?.value || "").trim() || "PORT"))}</b>.${h(dom)}`;
+      else pv.innerHTML = previewText(edit ? t.port : (portEl?.value || "").trim() || "PORT", sub);
     };
     m.querySelector("#fKind")?.addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
@@ -1465,6 +1475,7 @@ async function tunnelForm(edit, preset, opts = {}) {
     });
     portEl?.addEventListener("input", upd);
     subEl.addEventListener("input", upd);
+    domEl?.addEventListener("change", upd);
     siteEl.addEventListener("input", upd);
     if (!isClone) cloneEl.addEventListener("input", probe);
     draw();
@@ -1504,6 +1515,7 @@ async function tunnelForm(edit, preset, opts = {}) {
         const ownOptional = !edit && st.mode === "clone" && st.probe?.access === "password" && !!srcPw;
         const pw = st.access === "password" ? await sealedPw(m, !(t.locked && edit) && !ownOptional) : {};
         let body = { name: m.querySelector("#fName").value.trim(), access: st.access, sub, ...pw };
+        if (domEl && (!edit || domEl.value !== (t.home || ""))) body.domain = domEl.value;
         if (srcPw) {
           if (!window.AegisSeal) throw new Error("The sealing script didn't load. Reload the page.");
           body.sealedSourcePassword = await window.AegisSeal({ password: srcPw });
@@ -1806,6 +1818,13 @@ document.addEventListener("change", async (e) => {
   if (sw) {
     try { S.shield = await api("/__gate/api/shield", { method: "PUT", body: JSON.stringify({ [sw.dataset.k]: sw.checked }) }); render(); }
     catch (ex) { sw.checked = !sw.checked; toast(ex.message); }
+    return;
+  }
+  const hm = e.target.closest('[data-act="home"]');
+  if (hm && S.detail) {
+    hm.disabled = true;
+    try { const r = await patch(S.detail.port, { domain: hm.value }); toast(`Now at ${r?.host || (hm.value ? `${S.detail.sub || S.detail.port}.${hm.value}` : "its main address")}`); refresh(); }
+    catch (ex) { hm.disabled = false; toast(ex.message); }
     return;
   }
   const el = e.target.closest('[data-act="toggle"]');

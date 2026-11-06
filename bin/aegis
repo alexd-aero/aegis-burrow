@@ -20,7 +20,7 @@
 #   aegis doctor [--fix]             check (and fetch) Node and cloudflared; your VPS from outside
 #   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
 #   aegis addons [add LINK | update|install|uninstall|check ID | action ID ACTION] [--here]   Burrow's addons, from the terminal
-#   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME
+#   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME | move PORT ZONE
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
 #   app/          the code (aegis/, burrow/, public/, bin/), copied from a checkout
@@ -523,7 +523,7 @@ tunnel_password() {
 tunnel_json() { env "$@" "$NODE" -e '
   const e = process.env, o = {};
   for (const k of ["port", "targetPort"]) if (e["T_" + k]) o[k] = +e["T_" + k];
-  for (const k of ["targetHost", "name", "access", "password", "site", "clone", "sourcePassword"]) if (e["T_" + k]) o[k] = e["T_" + k];
+  for (const k of ["targetHost", "name", "access", "password", "site", "clone", "sourcePassword", "domain"]) if (e["T_" + k]) o[k] = e["T_" + k];
   if ("T_sub" in e) o.sub = e.T_sub || null;
   process.stdout.write(JSON.stringify(o));'; }
 
@@ -541,11 +541,11 @@ cmd_burrow() {
       out="$(burrow_call POST /module "{\"burrow\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"
       ok "Burrow is $1" ;;
     publish)
-      local port="${2:-}" name="" access=login host=127.0.0.1 sub="" pw=""; shift 2 || true
-      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]"
-      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --public) access=public ;; --password) access=password ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
+      local port="${2:-}" name="" access=login host=127.0.0.1 sub="" pw="" dom=""; shift 2 || true
+      [[ "$port" =~ ^[0-9]+$ ]] || die "aegis burrow publish PORT [--name N] [--sub NAME] [--domain ZONE] [--public | --password] [--host H]"
+      while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift ;; --sub) sub="$2"; shift ;; --domain) dom="$2"; shift ;; --public) access=public ;; --password) access=password ;; --host) host="$2"; shift ;; *) die "unknown option $1" ;; esac; shift; done
       if [ "$access" = password ]; then pw="$(tunnel_password)" || exit 1; fi
-      out="$(tunnel_json T_port="$port" T_targetHost="$host" T_targetPort="$port" T_name="$name" T_access="$access" T_sub="$sub" T_password="$pw" | burrow_call POST /tunnels -)" || die "$out"
+      out="$(tunnel_json T_port="$port" T_targetHost="$host" T_targetPort="$port" T_name="$name" T_access="$access" T_sub="$sub" T_password="$pw" T_domain="$dom" | burrow_call POST /tunnels -)" || die "$out"
       ok "published: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write(t.url||"(the address is on its way: aegis burrow list)")' "$out")" ;;
     site)
       local url="${2:-}" name="" access=login sub="" pw=""; shift 2 || true
@@ -590,6 +590,11 @@ cmd_burrow() {
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow unpublish PORT"
       out="$(burrow_call DELETE "/tunnels/$2")" || die "$out"
       ok "tunnel $2 removed" ;;
+    move)
+      # the domain a tunnel lives on: one of your other domains, or "main" (aegis domains list)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] && [ -n "${3:-}" ] || die "aegis burrow move PORT ZONE|main   (ZONE: another domain that carries tunnels, aegis domains list)"
+      out="$(burrow_call PATCH "/tunnels/$2" "$("$NODE" -e 'process.stdout.write(JSON.stringify({domain:process.argv[1]==="main"?"":process.argv[1]}))' "$3")")" || die "$out"
+      ok "tunnel $2: $("$NODE" -e 'const t=JSON.parse(process.argv[1]);process.stdout.write((t.url||"(the address is on its way)")+(t.home&&t.mainHost?`  (${t.mainHost} still answers)`:""))' "$out")" ;;
     rename)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || die "aegis burrow rename PORT NAME   (NAME \"\" goes back to tunnel-PORT-…)"
       out="$(burrow_call PATCH "/tunnels/$2" "$("$NODE" -e 'process.stdout.write(JSON.stringify({sub:process.argv[1]||null}))' "${3:-}")")" || die "$out"
@@ -628,7 +633,7 @@ cmd_burrow() {
           console.log("  "+(s.error?"! "+s.error:s.syncedAt?`on your VPS${f.kind==="folder"?`: ${s.files} files, ${mb(s.bytes)}`:""} (synced ${new Date(s.syncedAt).toLocaleString()})`:"not on your VPS yet"));
           console.log("  served at "+(f.hosts||[]).join(", ")+(f.access==="public"?" (public)":f.access==="password"?" (the tunnel password)":" (its own password)"));
         }' "$out" ;;
-    *) die "aegis burrow status | list | on | off | publish PORT | site URL | clone LINK | password PORT | access PORT WHO | unpublish PORT | rename PORT NAME | fallback PORT …" ;;
+    *) die "aegis burrow status | list | on | off | publish PORT | site URL | clone LINK | password PORT | access PORT WHO | unpublish PORT | rename PORT NAME | move PORT ZONE | fallback PORT …" ;;
   esac
 }
 
@@ -1158,7 +1163,8 @@ usage() {
 
   ${B}Burrow, the tunnel engine${NC}  (also: burrow …)
     aegis burrow status | list | on | off
-    aegis burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]
+    aegis burrow publish PORT [--name N] [--sub NAME] [--domain ZONE] [--public | --password] [--host H]
+    aegis burrow move PORT ZONE|main   the domain its address is on (the main name still answers)
     aegis burrow password PORT   its own password (asked, or read from stdin)
     aegis burrow access PORT login|password|public
     aegis burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (Burrow Pages addon)

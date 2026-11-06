@@ -112,6 +112,48 @@ test("picked tunnels only, the dashboard only, and removing a domain takes only 
   assert.equal(existsSync(join(D.dir, "other.net")), false);
 });
 
+test("a tunnel can live on another domain: its address there, the main name listed with the rest, and back", async () => {
+  const { D, tm, authorize } = setup();
+  await authorize();
+  await D.add({ label: "", tunnels: "picked" });
+  assert.deepEqual(tm.domainChoices(), [{ zone: "example.com", main: true }, { zone: "other.net", picked: true }]);
+  // made there: picked there too, its address is the other domain's name
+  let t = await tm.create({ port: 3000, sub: "chat", domain: "other.net" });
+  assert.equal(t.home, "other.net");
+  assert.equal(t.host, "chat.other.net");
+  assert.equal(t.url, "https://chat.other.net");
+  assert.equal(t.mainHost, "chat.example.com");
+  assert.deepEqual(t.also.map((a) => a.host), ["chat.example.com"], "the main name still answers, listed with the others");
+  assert.deepEqual(tm.get(3000).domains, ["other.net"]);
+  assert.equal(tm.matchHost("chat.other.net"), 3000);
+  assert.equal(tm.matchHost("chat.example.com"), 3000);
+  // a domain that doesn't carry tunnels is refused, before anything is made
+  await assert.rejects(tm.create({ port: 4000, domain: "nope.org" }), /doesn't carry tunnels/);
+  assert.equal(tm.get(4000), undefined);
+  // the main domain by name or "" is the same thing
+  t = await tm.create({ port: 4000, domain: "example.com" });
+  assert.equal(t.home, null);
+  assert.equal(t.host, "tunnel-4000-aegis.example.com");
+  // moving: onto the other domain, then back (unpicked there again)
+  t = await tm.update(4000, { domain: "other.net" });
+  assert.equal(t.host, "4000.other.net");
+  t = await tm.update(3000, { domain: "" });
+  assert.equal(t.home, null);
+  assert.equal(t.host, "chat.example.com");
+  assert.equal(tm.get(3000).domains, undefined);
+  assert.equal(tm.matchHost("chat.other.net"), null);
+  // unpicking it where it lives sends it home too
+  t = await tm.update(4000, { domains: [] });
+  assert.equal(t.home, null);
+  // the domain stops carrying tunnels: the main name is its address again, the choice kept for later
+  await tm.update(3000, { domain: "other.net" });
+  await D.update("other.net", { label: "aegis", tunnels: "none" });
+  t = tm.summary(tm.get(3000));
+  assert.equal(t.home, "other.net");
+  assert.equal(t.host, "chat.example.com");
+  assert.deepEqual(tm.domainChoices(), [{ zone: "example.com", main: true }]);
+});
+
 test("never takes over someone else's record; a failed add gives the authorization back", async () => {
   const { D, recs, calls, authorize } = setup([{ id: "x", name: "*.other.net", type: "A", content: "198.51.100.9" }]);
   await authorize();

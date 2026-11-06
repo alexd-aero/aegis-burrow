@@ -48,6 +48,8 @@
 // t.domains. One wildcard record per domain, so nothing is made per tunnel.
 // A domain's subdomains add more: a wildcard one (*.apps.<zone>) puts the same
 // tunnels at <sub|PORT>.apps.<zone>; a single one (blog.<zone>) is one tunnel's.
+// A tunnel can live on one of them (t.home = its zone): its address is then
+// <sub|PORT>.<zone>, and its name on the main domain still answers, listed with the rest.
 //
 // Without a domain every tunnel gets its own random *.trycloudflare.com
 // address instead (QuickTunnels): no account, but a new name after a restart.
@@ -310,6 +312,39 @@ export class TunnelManager {
     if (taken) this.taken = taken;
   }
   extraZones() { return this.extras.filter((d) => d.root).map((d) => d.zone); }
+  // the domains a tunnel can live on: the main one first, then each other domain that carries tunnels
+  domainChoices() {
+    if (!this.domain) return [];
+    return [{ zone: this.wildcard ? this.wbase : this.parent, main: true },
+            ...this.extras.filter((d) => d.root).map((d) => ({ zone: d.zone, picked: d.picked }))];
+  }
+  // "" or the main domain -> null; another domain that carries tunnels -> its zone; else throws
+  homeOf(zone) {
+    const z = String(zone || "").trim().toLowerCase().replace(/^\*?\./, "");
+    const all = this.domainChoices();
+    if (!z || all[0]?.zone === z) return null;
+    if (!this.domain) throw new Error("Link a domain first (Settings → Domain).");
+    if (!all.some((d) => d.zone === z)) throw new Error(`${z} doesn't carry tunnels here. Add it, or let it carry tunnels, under Settings → Domain → Other domains.`);
+    return z;
+  }
+  // a new tunnel's fields for living on `zone` ({} on the main domain)
+  homeFields(zone) { const z = this.homeOf(zone); return z ? { home: z, domains: [z] } : {}; }
+  // move it: on a domain whose tunnels are picked, the tunnel is picked there too (and unpicked from the one it leaves)
+  setHome(t, zone) {
+    const z = this.homeOf(zone), was = t.home || null;
+    if (z === was) return false;
+    const picks = new Set(t.domains || []);
+    if (was) picks.delete(was);
+    if (z) { t.home = z; picks.add(z); } else delete t.home;
+    if (picks.size) t.domains = [...picks]; else delete t.domains;
+    return true;
+  }
+  // its address on the domain it lives on, while that name answers for it; null = the main name
+  homeHost(t) {
+    if (!t?.home || t.parent != null || !this.domain) return null;
+    const want = `${t.sub || t.port}.${t.home}`;
+    return this.alsoFor(t).some((a) => a.host === want && !a.hidden) ? want : null;
+  }
   onExtra(t, d) { return d.root && (!d.picked || (t.domains || []).includes(d.zone)); }
   // a tunnel's names on the other domains: [{zone, host, url, hidden?}]
   alsoFor(t) {
@@ -531,8 +566,9 @@ export class TunnelManager {
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error("Target port must be 1-65535.");
     const on = spec.parent != null ? this.checkPublicPort(spec.parent, spec.publicPort, { app: spec.app }) : null;
     const sub = on ? null : await this.checkSub(port, spec.sub);
+    const home = on ? {} : this.homeFields(spec.domain);
     const t = {
-      sub, ...(on || {}),
+      sub, ...(on || {}), ...home,
       port, targetHost, targetPort,
       scheme: ["http", "https"].includes(spec.scheme) ? spec.scheme : await this.detectScheme(targetHost, targetPort),
       name: String(spec.name || "").slice(0, 60),
@@ -558,10 +594,11 @@ export class TunnelManager {
     const port = this.freeKey();
     if (this.domain && !spec.sub) throw new Error("Give the site an address of its own, like docs.");
     const sub = await this.checkSub(port, spec.sub);
+    const home = this.homeFields(spec.domain);
     const { access, lock } = this.checkAccess({ kind: "site" }, spec);
     await this.checkSite(site);
     return this.add({
-      sub, port, kind: "site", site, targetHost: site.host, targetPort: 443, scheme: "https",
+      sub, ...home, port, kind: "site", site, targetHost: site.host, targetPort: 443, scheme: "https",
       name: String(spec.name || "").slice(0, 60) || `${site.host}${site.base.slice(0, -1)}`,
       access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
       ...cleanMeta(spec.app, spec.meta),
@@ -585,6 +622,7 @@ export class TunnelManager {
     if (this.domain && !spec.sub) throw new Error("Give the clone an address of its own, like radio.");
     const port = this.freeKey();
     const sub = await this.checkSub(port, spec.sub);
+    const home = this.homeFields(spec.domain);
     const want = spec.access ? accessOf(spec.access) : info.access;
     const own = { ...spec, access: want };
     if (want === "password" && !spec.password && !spec.lockFrom && spec.sourcePassword) own.password = spec.sourcePassword;
@@ -592,7 +630,7 @@ export class TunnelManager {
     let key = null;
     if (info.access === "password") key = await this.cloneApi.key(info.host, spec.sourcePassword);
     return this.add({
-      sub, port, kind: "clone", targetHost: info.host, targetPort: 443, scheme: "https",
+      sub, ...home, port, kind: "clone", targetHost: info.host, targetPort: 443, scheme: "https",
       clone: { host: info.host, url: info.url, access: info.access, key, name: info.name, aegis: info.aegis, at: now(), lost: null },
       name: String(spec.name || "").slice(0, 60) || info.name || info.host,
       access, lock, preserveHost: false, enabled: true, created: now(), blocked: [], dns: null,
@@ -667,7 +705,9 @@ export class TunnelManager {
       const known = new Set(this.extraZones());
       t.domains = [...new Set((Array.isArray(patch.domains) ? patch.domains : []).map((z) => String(z).toLowerCase()))].filter((z) => known.has(z));
       if (!t.domains.length) delete t.domains;
+      if (t.home && !(t.domains || []).includes(t.home) && this.extras.find((d) => d.zone === t.home)?.picked) delete t.home;   // unpicked where it lived: back to the main domain
     }
+    if ("domain" in patch && t.parent == null && this.setHome(t, patch.domain)) this.log("tunnels:", t.port, "now lives on", t.home || "the main domain");
     if ("sub" in patch) {
       const sub = await this.checkSub(t.port, patch.sub);
       if (sub !== (t.sub || null)) {
@@ -1038,8 +1078,12 @@ export class TunnelManager {
     for (let i = 59; i >= 0; i--) spark.push(byMin.get(m - i)?.req || 0);
     const online = [...rt.clients.values()].filter((c) => c.active > 0 || now() - c.last < 120000).length;
     const quick = this.domain ? null : this.quick?.status(t.port);
+    // where it lives: its name there is its address, and the main domain's name joins the others
+    const home = this.homeHost(t), main = this.hostFor(t.port);
+    const also = home ? [{ zone: this.domainChoices()[0].zone, host: main, url: `https://${main}`, main: true }, ...this.alsoFor(t).filter((a) => a.host !== home)] : this.alsoFor(t);
     return {
-      port: t.port, url: this.urlFor(t.port), host: this.hostFor(t.port), mode: this.mode,
+      port: t.port, url: home ? `https://${home}` : this.urlFor(t.port), host: home || main, mode: this.mode,
+      home: t.home || null, mainHost: main,
       quick: quick ? { state: quick.state, error: quick.error } : null,
       kind: t.kind || "port", site: t.site ? { provider: t.site.provider, url: t.site.url } : null,
       clone: t.clone ? { url: t.clone.url, host: t.clone.host, access: t.clone.access, name: t.clone.name, lost: t.clone.lost || null } : null,
@@ -1051,7 +1095,7 @@ export class TunnelManager {
       fallback: t.fallback ? { kind: t.fallback.kind, dir: t.fallback.dir || "", title: t.fallback.title || "", message: t.fallback.message || "",
                                hasPassword: !!t.fallback.lock, status: t.fallback.status || null } : null,
       enabled: t.enabled, created: t.created, blocked: t.blocked, dns: t.dns,
-      also: this.alsoFor(t), domains: t.domains || [], pickable: this.domain ? this.extras.filter((d) => d.picked).map((d) => d.zone) : [],
+      also, domains: t.domains || [], pickable: this.domain ? this.extras.filter((d) => d.picked).map((d) => d.zone) : [],
       favicon: rt.favicon ? `/__gate/api/tunnels/${t.port}/favicon?v=${rt.favicon.at}` : null,
       health: { up: rt.health.up, ms: rt.health.ms, checked: rt.health.checked },
       totals: { requests: rt.stats.requests, bytesIn: rt.stats.bytesIn, bytesOut: rt.stats.bytesOut,
@@ -1084,6 +1128,7 @@ export class TunnelManager {
       latency: { p50: percentile(rt.lat, 50), p95: percentile(rt.lat, 95), p99: percentile(rt.lat, 99) },
       minutes, seconds, clientList: clients, recent: rt.recent.slice(-100).reverse(),
       healthHistory: rt.health.history.slice(-40), healthSince: rt.health.since,
+      homes: t.parent == null ? this.domainChoices() : [],
     };
   }
 

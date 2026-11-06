@@ -2,17 +2,18 @@
 # burrow: Burrow, the tunnel engine of Aegis × Burrow, on the command line.
 #
 #   burrow status | list | on | off
-#   burrow publish PORT [--name N] [--sub NAME] [--public | --password] [--host H]
+#   burrow publish PORT [--name N] [--sub NAME] [--domain ZONE] [--public | --password] [--host H]
 #   burrow password PORT             its own password (asked, or the first line of stdin)
 #   burrow access PORT login|password|public
 #   burrow site URL --sub NAME [--password]   a GitHub/GitLab Pages site (Burrow Pages addon)
 #   burrow clone LINK --sub NAME     another Aegis × Burrow link (public, or its password) on a name of yours
 #   burrow rename PORT NAME          its own address: NAME.<zone> ("" = tunnel-PORT-…)
+#   burrow move PORT ZONE|main       the domain its address is on (aegis domains list); the main name still answers
 #   burrow unpublish PORT
 #   burrow fallback PORT --folder PATH | --message TEXT [--title T] | --off | --sync | --status
 #                                    if this machine is down, your VPS serves this (Aegis Relay 1.5+)
 #
 # The same as `aegis burrow …`; it talks to data/control.sock.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-case "${1:-}" in -h|--help|help) sed -n '2,15p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help|help) sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 exec "$(dirname "$SELF")/aegis" burrow "$@"

@@ -135,7 +135,7 @@ export class Burrow {
     // a tunnel's fallback on the relay VPS (burrow/standby.mjs, wired by Aegis)
     if (this.standby && /^\/tunnels\/\d+\/fallback/.test(path)) { const r = await this.standby.route(method, path, readJson); if (r) return r; }
     const T = this.tunnels;
-    if (path === "/tunnels" && method === "GET") return ok({ tunnels: T.list(), now: Date.now(), mode: T.mode, pattern: T.pattern() });
+    if (path === "/tunnels" && method === "GET") return ok({ tunnels: T.list(), now: Date.now(), mode: T.mode, pattern: T.pattern(), domains: T.domainChoices() });
     if (path === "/tunnels" && method === "POST") {
       const spec = await readJson();
       if (spec.site && !this.sitesAllowed()) {

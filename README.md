@@ -310,6 +310,8 @@ burrow password 8080                # change it; burrow access 8080 login|passwo
 burrow site github.com/you/project --sub docs --password   # a Pages site (experimental)
 burrow clone radio.tunnel.friend.dev --sub radio            # another Aegis × Burrow link (public or password)
 burrow rename 3000 dashboards       # move it; "" goes back to tunnel-3000-…
+burrow publish 3000 --sub chat --domain other.net   # its address on another of your domains
+burrow move 3000 other.net          # or later; "main" brings it back (the main name always answers)
 burrow unpublish 8790
 burrow off / on                     # the module switch (tunnels are kept)
 ```
@@ -321,6 +323,10 @@ burrow off / on                     # the module switch (tunnels are kept)
 3. runs `cloudflared --post-quantum` itself.
 
 Each tunnel gets its own DNS record. *Change the name* moves the dashboard to another subdomain on the same tunnel (tunnels named `tunnel-PORT-…` move with it), and *Unlink* removes the records, the tunnel and the files. A domain routed by a cloudflared service you set up yourself can be renamed too: Aegis reads that service's config first and only goes ahead when its ingress already sends the new name here (a `*.<zone>` rule does).
+
+### Which domain a tunnel lives on
+
+With **other domains** that carry tunnels (Settings → Domain → Other domains), every tunnel picks its domain: the **Domain** dropdown beside its address in *New tunnel* and *Edit*, or in its Target panel. Its address there becomes its link everywhere (cards, Open, addons); its name on the main domain keeps answering and is listed under it. On a domain whose tunnels are *picked*, choosing it picks the tunnel there too. Addons get the same choice: `ctx.tunnels.domains()` lists them (the main one first) and `create`/`update` take `{domain: zone}` ("" = the main one). Burrow Pages and Noxia have the dropdown in their own forms.
 
 ### Another port on a tunnel's address
 
