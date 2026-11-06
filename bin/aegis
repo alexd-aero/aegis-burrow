@@ -8,6 +8,8 @@
 #   aegis start | stop | restart
 #   aegis tunnels                    manage tunnels with arrow keys
 #   aegis domain [link | rename NAME | unlink]
+#   aegis domains [list | add ZONE [--cert FILE | --token-stdin] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]
+#                 | set ZONE … | remove ZONE | tunnel PORT [ZONE…]]   other domains (Settings → Domain)
 #   aegis passwd                     a new login (every browser is signed out)
 #   aegis update [--check] | auto on|off
 #   aegis versions                   the versions kept here, and which is held back
@@ -1237,6 +1239,7 @@ case "$1" in
   open) need_installed; cmd_open ;;
   tunnels) need_installed; cmd_tunnels ;;
   domain) shift; need_installed; cmd_domain "$@" ;;
+  domains) shift; need_installed; ensure_running; cli domains "$@" ;;
   passwd|password) need_installed; cmd_passwd ;;
   install) shift; cmd_install "$@" ;;
   upgrade) shift; cmd_install "$@" ;;

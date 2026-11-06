@@ -2476,6 +2476,35 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/cf/link" && method === "POST") return ok(await cloudflare.link((await readJson()).label));
   if (path === "/cf/rename" && method === "POST") return ok(await cloudflare.rename((await readJson()).label));
   if (path === "/cf/unlink" && method === "POST") return ok(await cloudflare.unlink());
+  // more domains (aegis domains): the same steps as Settings → Domain
+  if (path === "/domains" || path.startsWith("/domains/")) {
+    const D = burrow.domains;
+    try {
+      if (path === "/domains" && method === "GET") return ok(D.view());
+      if (path === "/domains/check" && method === "POST") return ok(await D.check((await readJson()).zone));
+      if (path === "/domains/token" && method === "POST") {
+        const b = await readJson(); const r = await D.useToken(b.zone, b.token); audit("Cloudflare token added", null, { zone: r.pending?.zone, from: "command line" }); return ok(r);
+      }
+      // a `cloudflared tunnel login` certificate made elsewhere ({pem}); it waits as the pending domain
+      if (path === "/domains/cert" && method === "POST") {
+        const pem = String((await readJson()).pem || "");
+        if (!/-----BEGIN ARGO TUNNEL TOKEN-----/.test(pem)) return no(400, "That isn't a cloudflared login certificate (cert.pem).");
+        mkdirSync(D.dir, { recursive: true, mode: 0o700 });
+        const tmp = join(D.dir, `cli-${randomBytes(4).toString("hex")}.pem`);
+        writeFileSync(tmp, pem, { mode: 0o600 });
+        try { await D.takeCert(tmp); } finally { rmSync(tmp, { force: true }); }
+        return ok(D.view());
+      }
+      if (path === "/domains/forget" && method === "POST") return ok(D.forget());
+      if (path === "/domains" && method === "POST") {
+        const r = await D.add(await readJson()); audit("domain added", null, { zone: r.domains.at(-1)?.zone, from: "command line" }); return ok(r);
+      }
+      const dm = /^\/domains\/([a-z0-9.-]{3,253})$/.exec(path);
+      if (dm && method === "PATCH") return ok(await D.update(dm[1], await readJson()));
+      if (dm && method === "DELETE") { const r = await D.remove(dm[1]); audit("domain removed", null, { zone: dm[1], from: "command line" }); return ok(r); }
+    } catch (e) { return no(400, e.message); }
+    return no(404, "No such domains command.");
+  }
   // Termix
   if (path === "/termix" && method === "GET") return ok(await termix.status());
   // updates

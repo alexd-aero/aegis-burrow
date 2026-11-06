@@ -113,6 +113,7 @@ Everything the browser does, the terminal does too. It talks to the running gate
 | `aegis setup` | Your login, the pack, a domain: step by step |
 | `aegis tunnels` | Pick a tunnel with the arrow keys: change its subdomain, choose who can open it (your login, its own password, anyone), pause it, open it, unpublish it. **+ Publish a port** lists what's listening; **+ Secure reverse tunneling** appears when that experiment is on |
 | `aegis domain [link \| rename NAME \| unlink]` | Cloudflare from the terminal: it prints the authorization link (open it on any device) and waits |
+| `aegis domains [list \| add ZONE \| set ZONE \| remove ZONE \| tunnel PORT ZONE…]` | **Other domains** from the terminal, the same steps as Settings → Domain: `add other.net --cert cert.pem` (a `cloudflared tunnel login` certificate) or `--token-stdin`, with `--tunnels all\|picked\|none --route vps\|cloudflare --label NAME`; `tunnel 8080 other.net` puts a tunnel on a picked domain |
 | `aegis passwd` | A new login; every browser signs in again |
 | `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
 | `aegis versions` · `aegis rollback [VERSION]` | The versions kept here; go back to one (works with the gate down) |

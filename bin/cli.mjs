@@ -17,6 +17,7 @@
 //                                           (--password-stdin: the sudo password on stdin, for a root one)
 //   node cli.mjs addon-root ID OP [ACTION]  does OP need root: none|passwordless|password|nosudo, \x1f-separated with
 //                                           the name, the reason, why not, the hint and the homepage (bin/aegis asks)
+//   node cli.mjs domains [list|add|set|remove|tunnel] …   other domains (aegis domains)
 //   node cli.mjs addon-here OP ID [--action A] [--purge]
 //                                           a root one run in this terminal (burrow/terminal.mjs): sudo asks here
 //
@@ -290,6 +291,66 @@ async function addonHere(op, id, ...rest) {
   return 1;
 }
 
+// aegis domains: other domains, the way Settings → Domain adds them
+//   list | add ZONE [--cert FILE | --token-stdin] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]
+//   set ZONE [--tunnels …] [--route …] [--label NAME] | remove ZONE | tunnel PORT [ZONE…]
+async function domains(op = "list", ...rest) {
+  const flags = {}, pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--token-stdin") flags.tokenStdin = true;
+    else if (/^--(cert|tunnels|route|label)$/.test(a)) flags[a.slice(2)] = rest[++i] ?? "";
+    else if (a.startsWith("--")) { out(red(`  ✗ unknown option ${a}`)); return 2; }
+    else pos.push(a);
+  }
+  const spec = () => Object.fromEntries(["label", "tunnels", "route"].filter((k) => k in flags).map((k) => [k, flags[k]]));
+  const show = (v) => {
+    if (!v.domains.length) out(dim("  no other domains" + (v.main ? ` (main: ${v.main})` : "")));
+    for (const d of v.domains) {
+      out(`  ${bold(d.zone)}  tunnels: ${d.tunnels}${d.tunnels === "none" ? "" : ` through ${d.route}`}${d.dashboard ? `, dashboard ${d.dashboard}` : ""}`);
+      if (d.cert) out(dim(`    certificate: ${d.cert.error ? red(d.cert.error) : d.cert.issuing ? "being issued" : d.cert.notAfter ? "until " + new Date(d.cert.notAfter).toISOString().slice(0, 10) : "none yet"}`));
+    }
+    if (v.pending) out(yellow(`  ready to add: ${v.pending.zone} (with ${v.pending.via})`));
+  };
+  try {
+    if (op === "list") { show(await call("GET", "/domains", null, 20000)); return 0; }
+    if (op === "add") {
+      const zone = String(pos[0] || "").toLowerCase();
+      if (!zone) { out(red("  ✗ aegis domains add ZONE [--cert FILE | --token-stdin] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]")); return 2; }
+      let v;
+      if (flags.cert) {
+        const { readFileSync } = await import("node:fs");
+        v = await call("POST", "/domains/cert", JSON.stringify({ pem: readFileSync(flags.cert, "utf8") }), 60000);
+      } else if (flags.tokenStdin) {
+        let token = ""; for await (const x of process.stdin) token += x;
+        v = await call("POST", "/domains/token", JSON.stringify({ zone, token: token.trim() }), 60000);
+      } else v = await call("POST", "/domains/check", JSON.stringify({ zone }), 60000);
+      if (v.pending?.zone !== zone) {
+        if (v.pending?.zone) await call("POST", "/domains/forget", "{}", 10000);
+        out(red(v.pending?.zone ? `  ✗ that certificate is for ${v.pending.zone}, not ${zone}` : `  ✗ nothing Aegis holds can edit ${zone}'s DNS: add --cert FILE (cloudflared tunnel login) or --token-stdin`));
+        return 1;
+      }
+      out(dim(`  ${zone}: reached with ${v.pending.via}; adding (a certificate may take a minute or two)…`));
+      show(await call("POST", "/domains", JSON.stringify(spec()), 600000));
+      return 0;
+    }
+    if (op === "set") { show(await call("PATCH", `/domains/${encodeURIComponent(pos[0] || "")}`, JSON.stringify(spec()), 600000)); return 0; }
+    if (op === "remove") { show(await call("DELETE", `/domains/${encodeURIComponent(pos[0] || "")}`, null, 120000)); return 0; }
+    if (op === "tunnel") {
+      const port = Number(pos[0]);
+      if (!Number.isInteger(port)) { out(red("  ✗ aegis domains tunnel PORT [ZONE…]   (no zones: only its main address)")); return 2; }
+      const t = await call("PATCH", `/tunnels/${port}`, JSON.stringify({ domains: pos.slice(1).map((z) => z.toLowerCase()) }), 60000);
+      out(green(`  ✓ tunnel ${port}: ${t.url || "(its main address is on its way)"}`));
+      for (const x of t.also || []) out(x.hidden ? yellow(`    ${x.host}: not used (${x.hidden})`) : `    also ${x.url}`);
+      const missed = pos.slice(1).filter((z) => !(t.domains || []).includes(z.toLowerCase()));
+      if (missed.length) { out(red(`  ✗ not a picked-tunnels domain here: ${missed.join(" ")}`)); return 1; }
+      return 0;
+    }
+  } catch (e) { out(red(`  ✗ ${e.message}`)); return e.code === "DOWN" ? 3 : 1; }
+  out(red("  ✗ aegis domains list | add | set | remove | tunnel"));
+  return 2;
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 const run = {
   // on failure the message goes to stdout too: bash reads it with out="$(…)" || die "$out"
@@ -306,6 +367,7 @@ const run = {
   get: () => { get(args[0]); return null; },
   addons: addonsList, addon: () => addonOp(...args), "addon-root": () => addonRoot(args[0], args[1], args[2]),
   "addon-here": () => addonHere(...args),
+  domains: () => domains(...args),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },
