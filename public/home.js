@@ -97,6 +97,22 @@ function paintUpds() {
   el.innerHTML = ids.map((id) => addonUpdCard(id, { whatsNew: "/__gate/tunnels#/addons" })).join("");
 }
 
+// before "cols" there was only "columns" (2 by default, so a stored 2 means "never picked"): 3 stays 3
+const colsOf = (home) => home.cols ?? (home.columns === 3 ? 3 : "auto");
+
+// Auto columns: as many tiles in a row as fit (250px each at least), then balanced so
+// the last row isn't one lonely tile (5 tiles that fit 4 wide go 3 + 2)
+function fitTiles() {
+  const inner = document.querySelector(".home-in"), n = opts.querySelectorAll(".opt").length;
+  if (!opts.classList.contains("auto") || !n) { inner.style.maxWidth = ""; opts.style.removeProperty("--cols"); return; }
+  const GAP = 14, MIN = 250, MAX = 330, room = Math.min(innerWidth - (innerWidth > 900 ? 80 : 32), 1560);
+  let cols = Math.max(1, Math.min(n, Math.floor((room + GAP) / (MIN + GAP))));
+  cols = Math.ceil(n / Math.ceil(n / cols));
+  opts.style.setProperty("--cols", cols);
+  inner.style.maxWidth = Math.max(700, Math.min(room, cols * MAX + (cols - 1) * GAP)) + "px";
+}
+addEventListener("resize", fitTiles);
+
 async function render() {
   let me;
   try { me = S.me = await api("/__gate/api/me"); } catch (e) { opts.innerHTML = `<p class="muted">${h(e.message)}</p>`; return; }
@@ -118,8 +134,11 @@ async function render() {
   const tiles = arranged(me, home).filter((t) => !t.hidden);
   opts.innerHTML = tiles.length ? tiles.map(tile).join("")
     : `<div class="card lit empty-home"><p>Every tile is hidden. Use ${GEAR} to bring some back.</p></div>`;
-  opts.classList.toggle("three", (home.columns || 2) === 3);
-  document.querySelector(".home-in").classList.toggle("wide3", (home.columns || 2) === 3);
+  const cols = colsOf(home);
+  opts.classList.toggle("three", cols === 3);
+  opts.classList.toggle("auto", cols === "auto");
+  document.querySelector(".home-in").classList.toggle("wide3", cols === 3);
+  fitTiles();
 
   let html = "";
   if (!me.pack.decided) {
@@ -148,7 +167,7 @@ async function render() {
 function draft() {
   const me = S.me, home = me.home || {};
   return {
-    greeting: home.greeting || "", tagline: home.tagline || "", columns: home.columns || 2, background: home.background || "grid",
+    greeting: home.greeting || "", tagline: home.tagline || "", cols: colsOf(home), background: home.background || "grid",
     showBanners: home.showBanners !== false, links: (home.links || []).map((l) => ({ ...l })),
     tiles: arranged(me, home).map((t) => ({ id: t.id, title: t.title, text: t.text, hidden: t.hidden, link: !!t.link,
                                             base: available(me).find((x) => x.id === t.id) })),
@@ -183,7 +202,7 @@ function panel() {
       <label class="field grow"><span>Tagline</span><input class="input" id="czTag" value="${h(d.tagline)}" placeholder="Where to?" maxlength="80"></label>
     </div>
     <div class="cz-opts">
-      <div class="field"><span>Columns</span>${seg("columns", d.columns, [[2, "Two"], [3, "Three"]])}</div>
+      <div class="field"><span>Columns</span>${seg("cols", d.cols, [["auto", "Fit screen"], [2, "Two"], [3, "Three"]])}</div>
       <div class="field"><span>Background</span>${seg("background", d.background, [["grid", "Grid"], ["glow", "Glow"], ["plain", "Plain"]])}</div>
       <label class="row cz-check"><span class="switch"><input type="checkbox" id="czBanners" ${d.showBanners ? "checked" : ""}><i></i></span><span>Suggestions under the tiles</span></label>
     </div>
@@ -235,7 +254,7 @@ async function save() {
   }
   const bad = d.links.find((l) => !/^(https?:\/\/\S+|\/\S*)$/.test(l.url || ""));
   if (bad) { toast(`"${bad.title}" needs an address (https://… or /path)`); return; }
-  const home = { greeting: d.greeting, tagline: d.tagline, columns: d.columns, background: d.background, showBanners: d.showBanners,
+  const home = { greeting: d.greeting, tagline: d.tagline, cols: d.cols, background: d.background, showBanners: d.showBanners,
                  order: d.tiles.map((t) => t.id), hidden: d.tiles.filter((t) => t.hidden).map((t) => t.id), titles, texts, links: d.links };
   try { await post("/__gate/api/prefs", { home }); closePanel(); toast("Dashboard saved"); render(); }
   catch (e) { toast(e.message); }
@@ -244,7 +263,7 @@ async function save() {
 document.addEventListener("input", (e) => { if (e.target.closest(".cz")) readInputs(); });
 document.addEventListener("click", async (e) => {
   const seg = e.target.closest("[data-seg] button");
-  if (seg && S.draft) { const k = seg.parentElement.dataset.seg; S.draft[k] = k === "columns" ? Number(seg.dataset.v) : seg.dataset.v; repaint(); return; }
+  if (seg && S.draft) { const k = seg.parentElement.dataset.seg; S.draft[k] = k === "cols" && seg.dataset.v !== "auto" ? Number(seg.dataset.v) : seg.dataset.v; repaint(); return; }
   const cz = e.target.closest("[data-cz]");
   if (cz && S.draft) {
     readInputs();

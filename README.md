@@ -164,7 +164,7 @@ Right after you create your login:
 The **gear** on the home page opens **Settings**. There, *Sign-in → Customize the home page* opens *Customize the dashboard*:
 
 - greeting and tagline;
-- two or three columns;
+- columns that fit the screen (or pinned to two or three);
 - background (grid, glow or plain);
 - every tile moved, renamed, re-described or hidden;
 - link tiles of your own, with an emoji or an image;

@@ -1122,7 +1122,8 @@ function cleanHome(h) {
   const map = (o, n) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([k]) => id(k)).map(([k, v]) => [k, str(v, n)]).filter(([, v]) => v));
   return {
     greeting: str(h.greeting, 60), tagline: str(h.tagline, 80),
-    columns: [2, 3].includes(Number(h.columns)) ? Number(h.columns) : 2,
+    // "auto" fits as many tiles in a row as the screen holds; 2 or 3 pin it
+    cols: [2, 3].includes(Number(h.cols)) ? Number(h.cols) : "auto",
     background: ["grid", "glow", "plain"].includes(h.background) ? h.background : "grid",
     order: (Array.isArray(h.order) ? h.order : []).map(id).filter(Boolean).slice(0, 60),
     hidden: (Array.isArray(h.hidden) ? h.hidden : []).map(id).filter(Boolean).slice(0, 60),
