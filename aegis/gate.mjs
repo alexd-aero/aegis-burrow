@@ -1874,7 +1874,8 @@ function shieldStop(req, path, host) {
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) };
+                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req),
+                   headers: H };     // all of them (cookies, X-Forwarded-For, Transfer-Encoding…): attacks hide there too; the guard reads, never keeps them
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
