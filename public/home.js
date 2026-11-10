@@ -27,7 +27,9 @@ function available(me) {
       ? { id: "app:" + i.id, app: i.kind, href: `/__gate/tunnels#/i/${encodeURIComponent(i.id)}`, img: i.logo, title: i.name, text: "Desktops, their links and tunnels, start and stop.", foot: i.version ? `v${i.version}` : "connected" }
       : { id: "app:" + i.id, app: i.kind, href: i.dashboard, ext: true, img: i.logo, title: i.name, text: "Open its dashboard.", foot: i.version ? `v${i.version}` : "connected" });
   }
-  for (const a of (me.apps || [])) out.push({ id: "addon:" + a.id, href: a.href, img: a.logo, title: a.name, text: a.text, foot: "behind your Aegis login" });
+  const FOOT = { starting: "starting…", failed: "didn't start, trying again", off: "not running" };
+  for (const a of (me.apps || [])) out.push({ id: "addon:" + a.id, href: a.href, img: a.logo, title: a.name, text: a.text,
+                                              foot: FOOT[a.state] || "behind your Aegis login", wait: !!a.state });
   for (const l of (me.home?.links || [])) {
     let host = l.url;
     try { host = new URL(l.url, location.href).host; } catch { /* keep */ }
@@ -52,7 +54,7 @@ function iconOf(t) {
 }
 
 function tile(t) {
-  return `<a href="${h(t.href)}" class="card lit opt"${t.app ? ` data-app="${h(t.app)}"` : ""}${t.ext ? ' target="_blank" rel="noopener"' : ""}>
+  return `<a href="${h(t.href)}" class="card lit opt${t.wait ? " wait" : ""}"${t.app ? ` data-app="${h(t.app)}"` : ""}${t.ext ? ' target="_blank" rel="noopener"' : ""}>
     ${iconOf(t)}
     <div><h2>${h(t.title)}</h2>${t.text ? `<p>${h(t.text)}</p>` : ""}</div>
     <div class="go"><span>${h(t.foot || "")}</span>${t.ext ? ICONS.ext : ICONS.arrow}</div>
@@ -139,6 +141,9 @@ async function render() {
   opts.classList.toggle("auto", cols === "auto");
   document.querySelector(".home-in").classList.toggle("wide3", cols === 3);
   fitTiles();
+  // addons still starting (right after a restart): look again until they're up
+  clearTimeout(S.again);
+  if ((me.apps || []).some((a) => a.state === "starting" || a.state === "failed") && !S.draft) S.again = setTimeout(render, (me.apps || []).some((a) => a.state === "starting") ? 4000 : 30000);
 
   let html = "";
   if (!me.pack.decided) {

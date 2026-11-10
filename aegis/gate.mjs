@@ -406,6 +406,16 @@ async function syncExtensions() {
       log(`${id}: unloaded`);
     }
   }
+  // one whose start failed (a busy machine right after a restart) gets another go:
+  // 1, 2, 4… minutes later, at most every 15
+  for (const [id, x] of extensions) {
+    if (!x.error || Date.now() - x.failedAt < Math.min(15, 2 ** (x.tries - 1)) * 60000) continue;
+    extensions.delete(id);
+    try { fleet.releaseAll(id); } catch { /* none */ }
+    try { await x.mod.stop?.(); } catch { /* it never really started */ }
+    retries.set(id, x.tries);
+    log(`${id}: trying its extension again`);
+  }
   for (const rec of Object.values(all)) {
     const b = rec.installed && rec.manifest.burrow;
     if (!b || extensions.has(rec.id)) continue;
@@ -417,9 +427,41 @@ async function syncExtensions() {
       x.ctx = extContext(rec);
       await x.mod.start?.(x.ctx);
       log(`${rec.id}: running inside Burrow${x.mod.guard ? " (guarding every request)" : ""}`);
-    } catch (e) { x.error = e.message; log(`${rec.id}: its extension failed to start:`, e.message); }
+      x.started = true;
+      retries.delete(rec.id);
+    } catch (e) {
+      Object.assign(x, { error: e.message, failedAt: Date.now(), tries: (retries.get(rec.id) || 0) + 1 });
+      log(`${rec.id}: its extension failed to start:`, e.message);
+    }
   }
   useGuard();
+  rememberTiles();
+}
+const retries = new Map();               // id -> failed starts so far
+
+// An addon's home tile comes from its mount(), which it only has once it has
+// started; after a restart on a slow machine that can take minutes, one at a
+// time. The tiles are remembered, so home shows them as starting instead of
+// leaving them out.
+function rememberTiles() {
+  const was = settings.get("appTiles") || {}, now = { ...was };
+  for (const m of mounts()) if (extensions.has(m.id)) now[m.id] = { name: m.name, prefix: m.prefix, text: m.tile?.text || "", commit: m.commit || "" };
+  const all = addons.load();
+  for (const id of Object.keys(now)) if (!all[id]?.installed || !all[id].manifest.burrow?.extension) delete now[id];
+  if (JSON.stringify(now) !== JSON.stringify(was)) settings.set({ appTiles: now });
+}
+function homeApps() {
+  const tileOf = (id, name, prefix, text, commit) => ({ id, name, href: prefix + "/", text: String(text || "Open its dashboard.").slice(0, 120),
+    logo: `/__gate/api/addons/${encodeURIComponent(id)}/image?v=${String(commit || "").slice(0, 12)}` });
+  const live = mounts().filter((m) => extensions.has(m.id));
+  const out = live.map((m) => tileOf(m.id, m.name, m.prefix, m.tile?.text, m.commit));
+  const all = addons.load();
+  for (const [id, t] of Object.entries(settings.get("appTiles") || {})) {
+    if (live.some((m) => m.id === id) || !all[id]?.installed) continue;
+    const x = extensions.get(id);
+    out.push({ ...tileOf(id, t.name, t.prefix, t.text, t.commit), state: x?.error ? "failed" : x?.started ? "off" : "starting" });
+  }
+  return out;
 }
 // the shield in use: a guard addon's (Bulwark) while one is loaded, else the built-in one
 let guardExt = null;
@@ -1101,9 +1143,7 @@ function me(req) {
     update: (({ current, latest, available, checked, title, auto, job, justUpdated }) => ({ current, latest, available, checked, title, auto, job, justUpdated }))(updater.view()),
     notices: noticesView(),
     // addons with an app of their own under the dashboard (Bulwark): a home tile each
-    apps: mounts().filter((m) => extensions.has(m.id)).map((m) => ({ id: m.id, name: m.name, href: m.prefix + "/",
-      logo: `/__gate/api/addons/${encodeURIComponent(m.id)}/image?v=${String(m.commit || "").slice(0, 12)}`,
-      text: String(m.tile?.text || "Open its dashboard.").slice(0, 120) })),
+    apps: homeApps(),
   };
 }
 
