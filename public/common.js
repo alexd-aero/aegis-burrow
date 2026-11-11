@@ -515,5 +515,7 @@ function rootDialog(id, op, body, opts, info0) {
     document.addEventListener("keydown", onKey, true);
     document.body.append(scrim);
     paint();
+    // passwordless sudo: the click was the ask, so it just runs (a first install still confirms)
+    if (state === "confirm" && op !== "install") submit({ preventDefault() {} });
   });
 }

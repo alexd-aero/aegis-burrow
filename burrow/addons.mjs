@@ -43,7 +43,7 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ArchiveError, download, unpack, isArchive } from "./archive.mjs";
 import { rescue as rescueAddon, reports as rescueReports, report as rescueReport } from "./rescue.mjs";
-import { RootAccess, RootError, terminalHint, terminalCommand } from "./root.mjs";
+import { RootAccess, RootError, terminalHint, terminalCommand, OUTSIDE_LAUNCH, envScript, stopUnit } from "./root.mjs";
 
 export const SPEC = 1;
 export const MANIFEST = "forge-addon.json";
@@ -455,7 +455,7 @@ class Job {
   cancel() {
     if (this.state !== "running") return;
     this.cancelled = true;
-    for (const p of this.procs) { try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } }
+    for (const p of this.procs) { p.halt?.("SIGTERM"); try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } }
     this.terminal?.finish?.(130, "cancelled from the dashboard");           // the terminal hears it on its next line
   }
 }
@@ -524,13 +524,27 @@ export class Addons {
       // then outlives this process, which a service manager may stop with
       // everything in its cgroup (KillMode=control-group) on every restart.
       const env = this.env(rec, root, data, extra);
-      const scope = job ? userScope() : null;
-      const [cmd, args] = scope ? ["systemd-run", [...scope.args, "--", "bash", join(root, rel)]] : ["bash", [join(root, rel)]];
-      const p = spawn(cmd, args, { cwd: root, env: scope ? { ...env, ...scope.env } : env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      // A root job where Aegis is sandboxed (NoNewPrivileges…) runs as a
+      // service of the user's systemd manager instead, where sudo works; its
+      // environment goes in on stdin (burrow/root.mjs).
+      const out = job?.root ? this.root.outside : null;
+      const scope = job && !out ? userScope() : null;
+      let p;
+      if (out) {
+        const unit = `aegis-root-${job.id}-${randomBytes(3).toString("hex")}`;
+        p = spawn("systemd-run", [...out.args, `--unit=${unit}`, `--working-directory=${root}`, "-p", "KillMode=process", "--", "bash", "-c", OUTSIDE_LAUNCH, join(root, rel)],
+                  { env: { PATH: env.PATH || process.env.PATH || "/usr/bin:/bin", ...out.env }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+        p.stdin.on("error", () => { /* gone early */ });
+        p.stdin.end(envScript(env));
+        p.halt = (signal) => stopUnit(out, unit, signal);
+      } else {
+        const [cmd, args] = scope ? ["systemd-run", [...scope.args, "--", "bash", join(root, rel)]] : ["bash", [join(root, rel)]];
+        p = spawn(cmd, args, { cwd: root, env: scope ? { ...env, ...scope.env } : env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      }
       job?.procs.add(p);
       const lines = [], dir = { open: null, warn: [] };
       let killed = null, buf = "";
-      const t = setTimeout(() => { killed = `timed out after ${timeout}s`; try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } setTimeout(() => { try { process.kill(-p.pid, "SIGKILL"); } catch { /* */ } }, 5000); }, timeout * 1000);
+      const t = setTimeout(() => { killed = `timed out after ${timeout}s`; p.halt?.("SIGTERM"); try { process.kill(-p.pid, "SIGTERM"); } catch { /* */ } setTimeout(() => { p.halt?.("SIGKILL"); try { process.kill(-p.pid, "SIGKILL"); } catch { /* */ } }, 5000); }, timeout * 1000);
       const feed = (chunk) => {
         buf += chunk;
         let i;

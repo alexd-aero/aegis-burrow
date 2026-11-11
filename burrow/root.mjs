@@ -21,13 +21,21 @@
 //      runs the helper, which asks the control socket (POST /askpass, token in
 //      the body) for the password and prints it.
 //
+// Aegis's own systemd unit may sandbox it (NoNewPrivileges=, ProtectSystem=),
+// and everything it starts inherits that, so sudo can't work from it. This
+// user's systemd manager isn't sandboxed: a transient service it starts
+// (systemd-run --user, not --scope) is the manager's child, not ours. Where
+// Aegis is sandboxed and that manager is there, the sudo checks and the root
+// jobs run that way (see userManager()), so the dashboard can still ask for the
+// password and run the job itself.
+//
 // Only the control socket answers /askpass (mode 600, this user), and only for
 // a token of a job that is still running. The dashboard has no such route.
 // Automatic paths (default addons, the watchdog, rescue) never get a token:
 // they skip what needs root and leave a notice instead.
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,10 +64,74 @@ export function sandboxed({ status = "/proc/self/status", mountinfo = "/proc/sel
   return null;
 }
 
+// ---------------- outside the sandbox
+// The user's systemd manager, when it can run things without our sandbox:
+// {args, env} for `systemd-run` (a transient service, waited for, stdio piped
+// through), or null. A yes is kept; a no is asked again after a minute.
+let outsideSeen = { at: 0, value: null };
+export async function userManager({ now = Date.now() } = {}) {
+  if (outsideSeen.value || now - outsideSeen.at < 60e3 && outsideSeen.at) return outsideSeen.value;
+  let value = null;
+  try {
+    const uid = process.getuid?.();
+    const run = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+    const bin = (process.env.PATH || "/usr/bin:/bin").split(":").map((d) => join(d, "systemd-run")).find((f) => existsSync(f));
+    if (uid != null && bin && existsSync(join(run, "bus"))) {
+      const o = { args: ["--user", "--wait", "--pipe", "--quiet", "--collect", "--setenv=LC_ALL=C"],
+                  env: { XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(run, "bus")}` } };
+      const r = await runOutside(o, ["cat", "/proc/self/status"], { timeout: 10000 });
+      if (r.code === 0 && /^NoNewPrivs:\s*0\s*$/m.test(r.out)) value = o;
+    }
+  } catch { value = null; }
+  outsideSeen = { at: now, value };
+  return value;
+}
+// CMD as a transient service of the user's manager -> {code, out, err, missing}.
+// Killing systemd-run leaves the service running, so a timeout stops the unit.
+export function runOutside(o, cmd, { input = null, timeout = 10000, cwd = null, name = "aegis-sudo" } = {}) {
+  return new Promise((done) => {
+    const unit = `${name}-${randomBytes(4).toString("hex")}`;
+    const args = [...o.args, `--unit=${unit}`, ...(cwd ? [`--working-directory=${cwd}`] : []), "--", ...cmd];
+    let p;
+    try { p = spawn("systemd-run", args, { env: { PATH: process.env.PATH || "/usr/bin:/bin", LC_ALL: "C", ...o.env }, stdio: ["pipe", "pipe", "pipe"], detached: true }); }
+    catch (err) { return done({ code: 127, out: "", err: err.message, missing: true }); }
+    let out = "", err = "", finished = false;
+    const end = (r) => { if (finished) return; finished = true; clearTimeout(t); done(r); };
+    const t = setTimeout(() => { stopUnit(o, unit, "SIGKILL"); try { process.kill(-p.pid, "SIGKILL"); } catch { /* gone */ } end({ code: 124, out, err: err + "\n(timed out)", missing: false }); }, timeout);
+    p.stdout.on("data", (x) => { out += x; });
+    p.stderr.on("data", (x) => { err += x; });
+    p.on("error", (x) => end({ code: 127, out, err: x.message, missing: false }));
+    p.on("close", (code) => end({ code: code ?? 1, out, err, missing: code !== 0 && /Failed to (locate|find) executable|status=203/i.test(err) }));
+    p.stdin.on("error", () => { /* it didn't read it */ });
+    p.stdin.end(input == null ? "" : input);
+  });
+}
+// signal every process of a transient unit (systemctl --user kill)
+export function stopUnit(o, unit, signal = "SIGTERM") {
+  try {
+    const p = spawn("systemctl", ["--user", "kill", `--signal=${signal}`, unit], { env: { PATH: process.env.PATH || "/usr/bin:/bin", ...o.env }, stdio: "ignore", detached: true });
+    p.on("error", () => {}); p.unref();
+  } catch { /* nothing to stop */ }
+}
+// A root job's script, outside: its environment goes in on stdin (never argv,
+// never a file), the launcher evals it, then runs the script with stdin closed.
+export const OUTSIDE_LAUNCH = 'eval "$(cat)"; exec bash -- "$0" </dev/null';
+const BASH_OWN = new Set(["_", "UID", "EUID", "PPID", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_VERSINFO", "GROUPS"]);   // bash's read-only names
+export function envScript(env) {
+  let s = "";
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || BASH_OWN.has(k) || v == null) continue;
+    s += `export ${k}='${String(v).replace(/'/g, "'\\''")}'\n`;
+  }
+  return s;
+}
+
 // The real sudo: `sudo ARGS`, with input on stdin, in a session of its own
 // (detached: no controlling terminal, so it never prompts on one).
 // -> {code, out, err, missing}
-export function runSudo(args, { input = null, timeout = 10000 } = {}) {
+// With outside ({args, env} from userManager()), through the user's manager.
+export function runSudo(args, { input = null, timeout = 10000, outside = null } = {}) {
+  if (outside) return runOutside(outside, ["sudo", ...args], { input, timeout });
   return new Promise((done) => {
     const e = { ...process.env, LC_ALL: "C" };     // English messages, which are matched below
     delete e.SUDO_ASKPASS;
@@ -88,8 +160,12 @@ export class RootError extends Error {
 export class RootAccess {
   // sudo:  (args, {input, timeout}) => Promise<{code, out, err, missing}>  (injectable: tests never run sudo)
   // guard: () => null | "why sudo can't work from here"
-  constructor({ sudo, guard, askpass = ASKPASS, ttl = TOKEN_TTL, now = () => Date.now() } = {}) {
+  // outside: async () => {args, env} | null, a way around the guard (userManager();
+  //          none by default when the guard is injected, so tests never reach systemd)
+  constructor({ sudo, guard, outside, askpass = ASKPASS, ttl = TOKEN_TTL, now = () => Date.now() } = {}) {
     Object.assign(this, { sudo: sudo || ((a, o) => runSudo(a, o)), guard: guard || (() => sandboxed()), askpass, ttl, now });
+    this.findOutside = outside || (guard ? async () => null : () => userManager());
+    this.outside = null;          // set by check(): root work goes through the user's manager
     this.tokens = new Map();      // token -> {password|null, expires, job}
     this.checked = null;          // {at, value}
     this.fails = [];
@@ -101,12 +177,13 @@ export class RootAccess {
   // -> {sudo: bool, passwordless: bool, why: string|null}
   async check(fresh = false) {
     if (!fresh && this.checked && this.now() - this.checked.at < CHECK_TTL) return this.checked.value;
-    let value;
-    const blocked = this.guard();
+    let value, blocked = this.guard();
+    this.outside = null;
+    if (blocked) { const o = await this.findOutside().catch(() => null); if (o) { this.outside = o; blocked = null; } }
     if (blocked) value = { sudo: false, passwordless: false, why: blocked + "." };
     else {
       // -k: never a credential cached by an earlier check or validation
-      const r = await this.sudo(["-k", "-n", "true"], { timeout: 8000 });
+      const r = await this.sudo(["-k", "-n", "true"], { timeout: 8000, outside: this.outside });
       if (r.missing) value = { sudo: false, passwordless: false, why: "sudo isn't installed on this machine." };
       else if (r.code === 0) value = { sudo: true, passwordless: true, why: null };
       else if (/no new privileges/i.test(r.err)) value = { sudo: false, passwordless: false, why: "Aegis runs with NoNewPrivileges (its systemd unit), so nothing it starts can use sudo." };
@@ -125,7 +202,7 @@ export class RootAccess {
     this.fails = this.fails.filter((t) => this.now() - t < FAILS_WINDOW);
     if (this.fails.length >= FAILS_MAX) throw new RootError("Too many wrong passwords. Wait a few minutes and try again.", 429, { badPassword: true });
     // -S: the password on stdin; -k: ask even if cached, and cache nothing; -p '': no prompt text
-    const r = await this.sudo(["-S", "-k", "-p", "", "-v"], { input: pw + "\n", timeout: 15000 });
+    const r = await this.sudo(["-S", "-k", "-p", "", "-v"], { input: pw + "\n", timeout: 15000, outside: this.outside });
     if (r.missing) throw new RootError("sudo isn't installed on this machine.", 403, { noSudo: true, why: "sudo isn't installed on this machine." });
     if (r.code === 0) { this.fails = []; return { ok: true }; }
     if (notAllowed(r.err)) throw new RootError("This user isn't allowed to use sudo.", 403, { noSudo: true, why: "This user isn't allowed to use sudo." });

@@ -293,3 +293,32 @@ test("update: a new version that needs root changes nothing until it's given", a
   ra.stop();
   rmSync(dir, { recursive: true }); rmSync(src, { recursive: true });
 });
+
+test("sandboxed, but the user's systemd manager isn't: sudo is asked through it, and a root job's env goes in on stdin", async () => {
+  const f = fakeSudo(), seen = [];
+  const outside = { args: ["--user"], env: {} };
+  const ra = new R.RootAccess({ sudo: (a, o) => { seen.push(o.outside); return f.sudo(a, o); },
+                                guard: () => "Aegis runs with NoNewPrivileges (its systemd unit), so nothing it starts can use sudo", outside: async () => outside });
+  const c = await ra.check(true);
+  assert.deepEqual(c, { sudo: true, passwordless: false, why: null });
+  assert.equal(ra.outside, outside);
+  assert.deepEqual(await ra.validate(SECRET), { ok: true });
+  assert.ok(seen.length === 2 && seen.every((o) => o === outside), "both sudo calls go outside");
+  const none = new R.RootAccess({ sudo: f.sudo, guard: () => "sandboxed", outside: async () => null });
+  assert.equal((await none.check(true)).sudo, false, "no manager: still the terminal");
+  ra.stop(); none.stop();
+
+  // the launcher evals the env script, then runs the script with stdin closed
+  const d = tmp();
+  writeFileSync(join(d, "s.sh"), 'printf "%s|%s|" "$A" "$B"; read x && echo stdin || echo closed\n');
+  const env = { A: SECRET, B: "two\nlines", "bad-name": "x", UID: "0" };
+  const r = await new Promise((done) => {
+    const p = spawn("bash", ["-c", R.OUTSIDE_LAUNCH, join(d, "s.sh")], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "", err = ""; p.stdout.on("data", (x) => { out += x; }); p.stderr.on("data", (x) => { err += x; });
+    p.on("close", (code) => done({ code, out, err }));
+    p.stdin.end(R.envScript(env));
+  });
+  assert.equal(r.err, "", "no read-only or bad names exported");
+  assert.equal(r.out, `${SECRET}|two\nlines|closed\n`);
+  rmSync(d, { recursive: true });
+});
