@@ -1279,13 +1279,12 @@ case "$1" in
         L(`
   ${m.name || "?"} ${m.version || ""}${m.author ? `  by ${m.author}` : ""}${r.installed ? `  (you have ${r.installed.version})` : ""}`);
         if (m.description) L(`  ${m.description}`);
-        if (r.files) L(`  changes: ${r.files.stylesOnly ? "styles only" : r.files.pages.length ? "draws " + r.files.pages.join(", ") : "styles and scripts"} · ${r.files.replaces.length} files replaced, ${r.files.assets} of its own`);
+        if (r.files) L(`  changes: ${r.files.stylesOnly ? (r.files.layered ? "styles only (theme.css on top of the dashboard styles)" : "styles only") : r.files.pages.length ? "draws " + r.files.pages.join(", ") : "styles and scripts"} · ${r.files.replaces.length} files replaced, ${r.files.assets} of its own`);
         if (r.stability) { L(`  stability: ${r.stability.level}: ${r.stability.title}`); for (const l of (r.stability.lines || []).slice(0, 6)) L(`    ${l}`); }
         if (r.safety) { L(`  safety scan: ${r.safety.level}`); for (const f of r.safety.findings.filter((x) => x.level !== "info")) L(`    ${f.level === "danger" ? "!!" : " !"} ${f.what}${f.file ? ` (${f.file}${f.detail ? ", " + f.detail : ""})` : ""}`); }
         if (m.previews) L(`  previews: ${m.previews.length} (see them in Settings → Themes before you trust it)`);
         for (const e of r.errors || []) L(`  ✗ ${e}`);
-        process.stdout.write("
-" + JSON.stringify({ token: r.token, ok: !!r.ok, danger: r.safety?.level === "danger" }));'
+        process.stdout.write("\n" + JSON.stringify({ token: r.token, ok: !!r.ok, danger: r.safety?.level === "danger" }));'
     }
     case "${1:-list}" in
       list|ls) ensure_running
@@ -1293,8 +1292,7 @@ case "$1" in
           const v = JSON.parse(require("fs").readFileSync(0, "utf8"));
           if (!v.themes.length) { console.log("no themes yet: aegis themes add ZIP|LINK  (or Settings → Themes)"); process.exit(0); }
           for (const t of v.themes) console.log(`${t.active ? "*" : " "} ${t.id.padEnd(22)} ${t.version.padEnd(10)} ${t.stabilityNow.level.padEnd(9)} ${t.safety.padEnd(7)} ${t.name}`);
-          if (!v.active) console.log("
-  (the default look is in use)");' ;;
+          if (!v.active) console.log("\n  (the default look is in use)");' ;;
       add|install) ensure_running
         src="${2:-}"; [ -n "$src" ] || die "aegis themes add FILE.zip | https://… | github.com/you/weft | /a/folder  [--yes] [--trust]"
         yes=0; trust=0; for a in "$@"; do [ "$a" = --yes ] && yes=1; [ "$a" = --trust ] && trust=1; done
@@ -1328,7 +1326,7 @@ case "$1" in
           if (r.m) L(`${r.m.name} ${r.m.version} (${r.m.id}), theme API ${r.m.api}`);
           for (const e of r.errors) L(`  ✗ ${e}`);
           for (const w of r.warnings || []) L(`  ! ${w}`);
-          if (r.sorted) L(`  replaces ${r.sorted.replaces.map((f) => f.rel).join(", ") || "nothing"}; ${r.sorted.assets.length} files of its own${r.sorted.ignored.length ? `; left out: ${r.sorted.ignored.map((f) => f.rel).join(", ")}` : ""}`);
+          if (r.sorted) L(`  ${r.sorted.layered ? "theme.css on top of the dashboard styles; " : ""}replaces ${r.sorted.replaces.map((f) => f.rel).join(", ") || "nothing"}; ${r.sorted.assets.length} files of its own${r.sorted.ignored.length ? `; left out: ${r.sorted.ignored.map((f) => f.rel).join(", ")}` : ""}`);
           if (r.syntax) L(`  syntax: ${r.syntax.scripts} scripts, ${r.syntax.bad.length} broken`);
           if (r.safety) { L(`  safety: ${r.safety.level}`); for (const f of r.safety.findings) L(`    ${f.level.padEnd(6)} ${f.what}${f.file ? ` (${f.file}${f.detail ? ", " + f.detail : ""})` : ""}`); }
           if (r.stability) L(`  stability: ${r.stability.level}: ${r.stability.title}${r.stability.level === "unproven" ? "\n    prove it: install it, then Settings → Themes → Prove it stable (it runs the pages in your browser)" : ""}`);
