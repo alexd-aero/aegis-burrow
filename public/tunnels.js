@@ -1247,11 +1247,16 @@ function go(view, port) {
   if (view === "integ") { S.integ = port; S.integData = null; S.port = null; } else S.port = port || null;
   const want = view === "detail" ? `#/t/${port}` : view === "integ" ? `#/i/${encodeURIComponent(port)}` : view === "forge" ? "#/forge"
     : view === "addons" ? "#/addons" : view === "shield" ? "#/shield" : view === "machines" ? "#/machines" : "#/";
-  if (location.hash !== want) history.pushState(null, "", want);
+  // what the address already said (a load, Back) replaces its entry; a click adds one
+  if (location.hash !== want) (S.replaceNav ? history.replaceState : history.pushState).call(history, null, "", want);
   render(); refresh(); schedule();
   window.scrollTo(0, 0);
 }
 function fromHash() {
+  S.replaceNav = true;
+  try { fromHash0(); } finally { S.replaceNav = false; }
+}
+function fromHash0() {
   if (location.hash === "#/pages") { S.scrollTo = "pagesCard"; history.replaceState(null, "", "#/"); }
   const m = /^#\/t\/(\d+)/.exec(location.hash);
   const i = /^#\/i\/([a-z0-9-]+)/.exec(location.hash);
