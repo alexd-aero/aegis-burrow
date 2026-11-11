@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
 import * as T from "../aegis/themes.mjs";
-import { Backdrops, fetchLink, sniff, isPublic } from "../aegis/backdrops.mjs";
+import { Backdrops, fetchLink, sniff, isPublic, parseSearch, searchWallpapers, thumb } from "../aegis/backdrops.mjs";
 
 const tmp = (p = "aegis-th-") => mkdtempSync(join(tmpdir(), p));
 const PNG = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082", "hex");
@@ -292,4 +292,47 @@ test("theme.css: styles layered on top of ui.css, the easy kind of theme", async
   H.apply(r.token, { confirm: true });
   assert.match(H.file("theme.css").buf.toString(), /#000814/);
   assert.equal(H.file("ui.css"), null, "ui.css stays ours");
+});
+
+test("searching wallpaperflare from here: results, pages, the cache, a browser check, previews", async () => {
+  const li = (slug, id, res, alt, th = `https://c4.wallpaperflare.com/wallpaper/1/2/3/${slug}-hd-wallpaper-preview.jpg`) => `<li itemprop="associatedMedia" itemscope>
+    <a itemprop="url" href="https://www.wallpaperflare.com/${slug}-wallpaper-${id}" target="_blank"><img class="lazy" itemprop="contentUrl" alt="${alt} HD wallpaper" data-src="${th}"></a>
+    <span class="res">${res}</span><meta itemprop="contentSize" content="1.2MB"></li>`;
+  const page = (n) => `<ul>${Array.from({ length: n }, (_, i) => li(`fog-forest-${i}`, `ab${i}`, i % 2 ? "3840x2160px" : "1080x1920px", `Fog &amp; forest ${i}, trees`)).join("")}
+    ${li("bad", "x1", "1x1px", "Off-site preview", "https://evil.example/a.jpg")}${li("fog-forest-0", "ab0", "3840x2160px", "Duplicate")}</ul>`;
+  const items = parseSearch(page(3));
+  assert.equal(items.length, 3, "off-site previews and duplicates are dropped");
+  assert.deepEqual(items[1], { title: "Fog & forest 1, trees", url: "https://www.wallpaperflare.com/fog-forest-1-wallpaper-ab1",
+    thumb: "https://c4.wallpaperflare.com/wallpaper/1/2/3/fog-forest-1-hd-wallpaper-preview.jpg", w: 3840, h: 2160, size: "1.2MB" });
+
+  const asked = [];
+  const getter = async (url) => {
+    asked.push(url);
+    if (/wallpaper=blocked/.test(url)) return { status: 403, buf: Buffer.from("<title>Just a moment...</title>"), url };
+    if (/page=9/.test(url)) return { status: 404, buf: Buffer.from("nope"), url };
+    return { status: 200, buf: Buffer.from(page(/page=2/.test(url) ? 5 : 80)), url };
+  };
+  const cache = new Map();
+  const r = await searchWallpapers("  misty   forest ", { getter, cache });
+  assert.equal(asked[0], "https://www.wallpaperflare.com/search?wallpaper=misty+forest", "this machine asks, not the browser");
+  assert.equal(r.items.length, 80); assert.equal(r.more, true); assert.equal(r.q, "misty forest");
+  await searchWallpapers("Misty Forest", { getter, cache });
+  assert.equal(asked.length, 1, "the same search again comes from memory");
+  const p2 = await searchWallpapers("misty forest", { page: 2, getter, cache });
+  assert.match(asked[1], /&page=2$/); assert.equal(p2.more, false, "a short page is the last");
+  assert.deepEqual((await searchWallpapers("misty forest", { page: 9, getter, cache })).items, [], "past the last page: nothing more");
+  await assert.rejects(searchWallpapers("blocked", { getter, cache }), /browser check/);
+  await assert.rejects(searchWallpapers("   ", { getter, cache }), /Type what you'd like/);
+
+  const dir = tmp("aegis-th-thumb-");
+  let got = 0;
+  const thGetter = async (url, o) => { got++; assert.equal(o.referer, "https://www.wallpaperflare.com/"); return { status: 200, buf: PNG, url }; };
+  const u = "https://c4.wallpaperflare.com/wallpaper/1/2/3/fog-hd-wallpaper-preview.jpg";
+  assert.equal((await thumb(u, dir, { getter: thGetter })).type, "image/png");
+  assert.equal((await thumb(u, dir, { getter: thGetter })).buf.length, PNG.length);
+  assert.equal(got, 1, "a preview is fetched once, then kept");
+  for (const bad of ["https://evil.example/a.jpg", "http://c4.wallpaperflare.com/wallpaper/a.jpg", "https://c4.wallpaperflare.com/wallpaper/a.svg", "https://c4.wallpaperflare.com.evil.io/wallpaper/a.jpg"])
+    await assert.rejects(thumb(bad, dir, { getter: thGetter }), /Not a wallpaperflare preview/, bad);
+  await assert.rejects(thumb("https://c4.wallpaperflare.com/wallpaper/x.jpg", dir, { getter: async (url) => ({ status: 200, buf: Buffer.from("<html>"), url }) }), /didn't come/);
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -174,9 +174,56 @@
     link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+    search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
   };
-  const W = { open: false, step: 0, steps: [], mine: null, busy: {}, filter: "all", err: "", slide: 0 };
+  const W = { open: false, step: 0, steps: [], mine: null, busy: {}, filter: "all", err: "", slide: 0,
+              find: { q: "", items: [], page: 0, more: false, busy: false, err: "", shape: "any" } };
+  // wallpaperflare, searched by this machine (works where the network blocks the site)
+  const IDEAS = ["liminal", "misty forest", "clouds", "night sky", "mountains", "city lights", "ocean", "desert", "snow", "rain", "space", "minimal"];
+  const SHAPES = { any: ["Any", () => true], wide: ["Wide", (x) => x.w >= x.h * 1.3], k4: ["4K+", (x) => x.w >= 3840 || x.h >= 3840], tall: ["Phone", (x) => x.h > x.w] };
+  const SEEN = new Set();                                  // previews already shown (no fade-in again on a repaint)
+  const searchWallpapers = (q, page = 1) => api(`/__gate/api/backdrops/search?q=${encodeURIComponent(q)}&page=${page}`);
+  const thumbOf = (u) => `/__gate/api/backdrops/thumb?u=${encodeURIComponent(u)}`;
+  const resOf = (x) => { const m = Math.max(x.w, x.h), n = Math.min(x.w, x.h); return m >= 7680 ? "8K" : m >= 3840 ? "4K" : n >= 1440 ? "1440p" : n >= 1080 ? "1080p" : x.w ? `${x.w}×${x.h}` : ""; };
+  async function find(q, more = false) {
+    const F = W.find;
+    q = String(q ?? F.q).trim();
+    if (!q || F.busy) return;
+    if (!more || q !== F.q) { F.q = q; F.items = []; F.page = 0; }
+    F.busy = true; F.err = ""; paint();
+    try {
+      const r = await searchWallpapers(q, F.page + 1);
+      if (F !== W.find) return;                              // cleared meanwhile
+      const seen = new Set(F.items.map((x) => x.url));
+      F.items.push(...r.items.filter((x) => !seen.has(x.url)));
+      F.page = r.page; F.more = r.more;
+      if (!F.items.length) F.err = `Nothing for “${q}”. Try other words.`;
+    } catch (ex) { F.err = ex.message; F.more = false; }
+    F.busy = false; paint();
+  }
+  function findSec(mineUrls) {
+    const F = W.find, shown = F.items.filter(SHAPES[F.shape][1]);
+    const pickedUrl = pick?.startsWith("img:") ? (W.mine || []).find((b) => `img:${b.id}` === pick)?.source : null;
+    return `<div class="wh-sec wh-find"><div class="wh-row"><span class="wh-k">Search wallpaperflare</span><span class="wh-grow"></span>
+        <span class="wh-via" title="Your browser only talks to this dashboard: the search and its previews go through this machine, so it works on networks that block the site.">through this machine</span></div>
+      <form class="wh-q" data-find>${ICON.search}<input id="whQ" type="search" placeholder="Search: misty forest, liminal pool, neon city…" autocomplete="off" spellcheck="false" maxlength="80" enterkeyhint="search">
+        <button type="submit" class="wh-btn sm" ${F.busy ? "disabled" : ""}>${F.busy && !F.items.length ? '<i class="wh-spin"></i>' : "Search"}</button></form>
+      ${!F.q ? `<div class="wh-chips wh-ideas">${IDEAS.map((t) => `<button type="button" data-idea="${h(t)}">${h(t)}</button>`).join("")}</div>` : `<div class="wh-row wh-findbar">
+        <span class="wh-muted">${F.items.length ? `${shown.length} of ${F.items.length} for “${h(F.q)}”` : F.busy ? `Searching for “${h(F.q)}”…` : ""}</span><span class="wh-grow"></span>
+        <div class="wh-chips">${Object.entries(SHAPES).map(([k, [label]]) => `<button type="button" class="${F.shape === k ? "on" : ""}" data-shape="${k}">${label}</button>`).join("")}</div>
+        <button type="button" class="wh-x" data-wh="clearfind" title="Clear the search" aria-label="Clear the search">${ICON.x}</button></div>`}
+      ${F.err ? `<p class="wh-err" role="alert">${h(F.err)}</p>` : ""}
+      ${F.items.length ? `<div class="wh-grid wh-results">${shown.map((x) => { const have = mineUrls.has(x.url), busy = W.busy[x.url], r = resOf(x), on = have && pickedUrl === x.url;
+          return `<div class="wh-tile rec found${have ? " have" : ""}${on ? " on" : ""}" role="button" tabindex="0" data-found="${h(x.url)}" data-name="${h(x.title.split(",")[0].slice(0, 60))}" title="${h(x.title)}${x.w ? ` · ${x.w}×${x.h}` : ""}">
+            <img src="${h(thumbOf(x.thumb))}" alt="" loading="lazy" decoding="async"${SEEN.has(x.thumb) ? ' class="ok"' : ""} data-th="${h(x.thumb)}">
+            ${r ? `<span class="wh-res${/K$/.test(r) ? " hi" : ""}">${h(r)}</span>` : ""}
+            <span class="wh-name">${h(x.title.split(",").slice(0, 2).join(","))}</span>${busy ? '<span class="wh-busy"><i class="wh-spin"></i>Getting it…</span>' : have ? '<span class="wh-kind">yours</span>' : ""}${on ? `<span class="wh-on">${ICON.check}</span>` : ""}</div>`; }).join("")
+          || `<span class="wh-muted">None of these are ${h(SHAPES[F.shape][0].toLowerCase())}: load more, or pick Any.</span>`}</div>
+        ${F.more ? `<div class="wh-more"><button type="button" class="wh-btn ghost sm" data-wh="more" ${F.busy ? "disabled" : ""}>${F.busy ? '<i class="wh-spin"></i> Loading' : "Load more"}</button></div>` : ""}` :
+        F.busy ? `<div class="wh-grid wh-results">${'<div class="wh-tile ghost"></div>'.repeat(8)}</div>` : ""}
+    </div>`;
+  }
   function stepsFor(only) {
     if (only === "background") return [{ kind: "background" }];
     const s = [{ kind: "hello" }];
@@ -195,7 +242,12 @@
     W.scrim = scrim;
     scrim.addEventListener("click", onClick);
     scrim.addEventListener("change", onChange);
-    scrim.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.id === "whLink") { e.preventDefault(); scrim.querySelector('[data-wh="link"]')?.click(); } });
+    scrim.addEventListener("load", (e) => { const i = e.target; if (i.dataset?.th) { SEEN.add(i.dataset.th); i.classList.add("ok"); } }, true);
+    scrim.addEventListener("submit", (e) => { if (e.target.matches("[data-find]")) { e.preventDefault(); find(e.target.querySelector("#whQ").value); } });
+    scrim.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.id === "whLink") { e.preventDefault(); scrim.querySelector('[data-wh="link"]')?.click(); }
+      else if ((e.key === "Enter" || e.key === " ") && e.target.matches?.('.wh-tile[role="button"]')) { e.preventDefault(); e.target.click(); }
+    });
     document.addEventListener("keydown", onKey);
     paint();
     if (T.backgrounds) { try { W.mine = (await api("/__gate/api/backdrops")).backdrops; } catch { W.mine = []; } paint(); }
@@ -235,6 +287,7 @@
       <div class="wh-scroll">
         ${B.builtin.length ? `<div class="wh-sec"><span class="wh-k">Built into ${h(T.name)}</span><div class="wh-grid">${B.builtin.map((b) => `<div class="wh-tile sw${pick === `theme:${b.id}` ? " on" : ""}" role="button" tabindex="0" data-pick="theme:${h(b.id)}" style="background:${h(b.swatch)}">
           <span class="wh-name">${h(b.name)}</span>${pick === `theme:${b.id}` ? `<span class="wh-on">${ICON.check}</span>` : ""}</div>`).join("")}</div></div>` : ""}
+        ${findSec(mineUrls)}
         ${rec.length ? `<div class="wh-sec"><div class="wh-row"><span class="wh-k">Recommended by ${h(T.name)}</span><span class="wh-grow"></span>
             ${tags.length > 1 ? `<div class="wh-chips">${["all", ...tags].map((t) => `<button type="button" class="${W.filter === t ? "on" : ""}" data-tag="${h(t)}">${h(t === "all" ? "All" : t)}</button>`).join("")}</div>` : ""}</div>
           <div class="wh-grid">${shown.map((r) => { const have = mineUrls.has(r.url), busy = W.busy[r.url];
@@ -253,7 +306,7 @@
   function paint(moved = false) {
     if (!W.open) return;
     const m = W.scrim.querySelector(".wh-modal"), s = W.steps[W.step];
-    const keepLink = m.querySelector("#whLink")?.value || "";
+    const keepLink = m.querySelector("#whLink")?.value || "", keepQ = m.querySelector("#whQ")?.value ?? W.find.q, qFocus = document.activeElement?.id === "whQ";
     const scroll = m.querySelector(".wh-scroll")?.scrollTop || 0;
     let html;
     if (s.kind === "hello") {
@@ -277,6 +330,7 @@
     m.dataset.step = s.kind;
     if (moved && !REDUCED) { m.classList.remove("wh-in"); void m.offsetWidth; m.classList.add("wh-in"); }
     const li = m.querySelector("#whLink"); if (li && keepLink) li.value = keepLink;
+    const qi = m.querySelector("#whQ"); if (qi) { qi.value = keepQ; if (qFocus) qi.focus(); }
     const sc = m.querySelector(".wh-scroll"); if (sc && !moved) sc.scrollTop = scroll;
   }
   async function onClick(e) {
@@ -288,6 +342,20 @@
     if (act === "finish" || act === "close") return close(true);
     const sl = t.closest("[data-slide]"); if (sl) { W.slide = Number(sl.dataset.slide); return paint(); }
     const tg = t.closest("[data-tag]"); if (tg) { W.filter = tg.dataset.tag; return paint(); }
+    const idea = t.closest("[data-idea]"); if (idea) { const qi = W.scrim.querySelector("#whQ"); if (qi) qi.value = idea.dataset.idea; return find(idea.dataset.idea); }
+    const sh = t.closest("[data-shape]"); if (sh) { W.find.shape = sh.dataset.shape; return paint(); }
+    if (act === "more") return find(W.find.q, true);
+    if (act === "clearfind") { W.find = { q: "", items: [], page: 0, more: false, busy: false, err: "", shape: W.find.shape }; const qi = W.scrim.querySelector("#whQ"); if (qi) qi.value = ""; paint(); W.scrim.querySelector("#whQ")?.focus(); return; }
+    const fd = t.closest("[data-found]");
+    if (fd) {
+      const url = fd.dataset.found, have = (W.mine || []).find((b) => b.source === url);
+      if (have) { await setBackground(`img:${have.id}`, have).catch((ex) => { W.err = ex.message; }); return paint(); }
+      if (W.busy[url]) return;
+      W.busy[url] = true; W.find.err = ""; paint();
+      try { const b = await addLink(url, fd.dataset.name); W.mine = [b, ...(W.mine || [])]; await setBackground(`img:${b.id}`, b); }
+      catch (ex) { W.find.err = `${fd.dataset.name}: ${ex.message}`; }
+      delete W.busy[url]; return paint();
+    }
     const del = t.closest("[data-del]");
     if (del) {
       e.stopPropagation();
@@ -334,7 +402,7 @@
     config: C, errors,
     welcome: () => open(),
     pickBackground: () => open("background"),
-    setBackground, addFile, addLink,
+    setBackground, addFile, addLink, searchWallpapers,
     backgrounds: async () => (await api("/__gate/api/backdrops")).backdrops,
   });
 })();

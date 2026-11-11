@@ -97,6 +97,37 @@ html.weft-has-bg { background: #030304; }
 .wh-chips { display: flex; gap: 4px; flex-wrap: wrap; }
 .wh-chips button { font: 500 11.5px Inter, system-ui, sans-serif; color: rgba(232,236,242,.7); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 99px; padding: 3px 10px; cursor: pointer; text-transform: capitalize; }
 .wh-chips button.on { background: #fff; color: #05070d; border-color: #fff; }
+/* searching wallpaperflare */
+.wh-find { padding: 14px; margin-top: 10px; border-radius: 16px; background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02)); border: 1px solid rgba(255,255,255,.09); }
+.wh-via { font: 500 10.5px ui-monospace, monospace; letter-spacing: .04em; color: rgba(232,236,242,.5); padding: 2px 8px; border-radius: 99px; border: 1px solid rgba(255,255,255,.1); cursor: help; }
+.wh-via::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #3ddc97; box-shadow: 0 0 8px #3ddc97; vertical-align: 1px; }
+.wh-q { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 5px 5px 5px 13px; border-radius: 14px; background: rgba(4,6,10,.65); border: 1px solid rgba(255,255,255,.14);
+  transition: border-color .2s, box-shadow .3s; }
+.wh-q:focus-within { border-color: color-mix(in srgb, var(--wh-accent) 70%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--wh-accent) 18%, transparent); }
+.wh-q svg { width: 17px; height: 17px; flex: none; color: rgba(232,236,242,.5); }
+.wh-q input { flex: 1; min-width: 0; height: 34px; border: 0; outline: none; background: none; color: #eceef0; font: 14px Inter, system-ui, sans-serif; }
+.wh-q input::-webkit-search-cancel-button { display: none; }
+.wh-ideas { margin-top: 10px; }
+.wh-ideas button { transition: background .2s, color .2s, transform .3s cubic-bezier(.34,1.56,.64,1); }
+.wh-ideas button:hover { background: rgba(255,255,255,.12); color: #fff; transform: translateY(-1px); }
+.wh-findbar { margin-top: 10px; }
+.wh-findbar .wh-muted { font-size: 12px; }
+.wh-x { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.05); color: rgba(232,236,242,.7); cursor: pointer; }
+.wh-x svg { width: 12px; height: 12px; }
+.wh-x:hover { color: #fff; background: rgba(255,255,255,.12); }
+.wh-results { max-height: none; }
+.wh-tile.found > img { opacity: 0; transform: scale(1.04); transition: opacity .45s, transform .8s cubic-bezier(.22,1,.36,1); }
+.wh-tile.found > img.ok { opacity: 1; transform: none; }
+.wh-tile.found:hover > img.ok { transform: scale(1.05); }
+.wh-res { position: absolute; z-index: 1; top: 6px; right: 6px; padding: 1px 7px; border-radius: 99px; font: 600 10px ui-monospace, monospace; letter-spacing: .04em;
+  background: rgba(0,0,0,.6); color: rgba(255,255,255,.85); backdrop-filter: blur(6px); }
+.wh-tile.on .wh-res { right: 34px; }
+.wh-res.hi { background: color-mix(in srgb, var(--wh-accent) 85%, #000); color: #fff; }
+.wh-tile.ghost { cursor: default; background: linear-gradient(100deg, rgba(255,255,255,.03) 30%, rgba(255,255,255,.09) 50%, rgba(255,255,255,.03) 70%) 0 0 / 300% 100%; animation: wh-shine 1.3s linear infinite; }
+.wh-tile.ghost::after { display: none; }
+.wh-tile.ghost:hover { transform: none; }
+@keyframes wh-shine { to { background-position: -150% 0; } }
+.wh-more { display: flex; justify-content: center; margin-top: 12px; }
 .wh-err { margin: 10px 0 0; padding: 9px 12px; border-radius: 10px; color: #ffb3ae; background: rgba(255,90,82,.08); border: 1px solid rgba(255,90,82,.3); font-size: 13px; }
 .wh-foot { display: flex; align-items: center; gap: 8px; padding: 14px 20px 18px 26px; border-top: 1px solid rgba(255,255,255,.07); flex: none; }
 .wh-dots { display: flex; gap: 5px; }
@@ -121,4 +152,4 @@ html.weft-has-bg { background: #030304; }
   .wh-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
   .wh-head h2 { font-size: 21px; }
 }
-@media (prefers-reduced-motion: reduce) { .wh-modal, .wh-modal.wh-in > *, .wh-scrim, .wh-bar { animation: none; } .weft-bg-media > img, .weft-bg-media > video { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .wh-modal, .wh-modal.wh-in > *, .wh-scrim, .wh-bar, .wh-tile.ghost { animation: none; } .wh-tile.found > img { opacity: 1; transform: none; transition: none; } .weft-bg-media > img, .weft-bg-media > video { transition: none; } }

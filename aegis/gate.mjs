@@ -54,7 +54,7 @@ import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
 import { Addons, AddonError, RootError, parseSource, fetchSource } from "../burrow/addons.mjs";
 import { Themes, ThemeError } from "./themes.mjs";
-import { Backdrops, BackdropError, fetchLink } from "./backdrops.mjs";
+import { Backdrops, BackdropError, fetchLink, searchWallpapers, thumb as wallpaperThumb } from "./backdrops.mjs";
 import { Standby } from "../burrow/standby.mjs";
 import { RelayDoctor } from "../burrow/relaydoctor.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
@@ -1300,6 +1300,12 @@ async function themeApi(req, res, path, url) {
       }
       const x = backdrops.addRaw(got.buf, { name: b.name || got.name, source: got.source });
       audit("background added", req, { name: x.name, kind: x.kind }); return ok(x);
+    }
+    // searching wallpaperflare: this machine asks, so it works where your network blocks the site
+    if (path === "/__gate/api/backdrops/search" && M === "GET") return ok(await searchWallpapers(url.searchParams.get("q"), { page: url.searchParams.get("page") }));
+    if (path === "/__gate/api/backdrops/thumb" && M === "GET") {
+      const f = await wallpaperThumb(String(url.searchParams.get("u") || ""), backdrops.dir);
+      return send(res, 200, f.buf, { "Content-Type": f.type, "Cache-Control": "private, max-age=86400" });
     }
     if (path === "/__gate/api/backdrops/pick" && M === "POST") return ok({ pick: themes.setBackground(String((await readJsonBody(req)).pick || "")) });
     if ((m = /^\/__gate\/api\/backdrops\/([a-z0-9-]{1,40})(\/poster)?$/.exec(path))) {

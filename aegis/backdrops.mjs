@@ -212,3 +212,72 @@ export class Backdrops {
     return { path: f, type: m[2] ? "image/jpeg" : { gif: "image/gif", mp4: "video/mp4", webm: "video/webm" }[m[3]] };
   }
 }
+
+// ---------------------------------------------------------------- searching wallpaperflare, from here
+// The dashboard's picker searches through this machine (restricted networks
+// often block wallpaperflare, never your own gate): the results page is read
+// here, and its previews are fetched here too (the dashboard only loads its
+// own files). A browser check (Cloudflare's "Just a moment") is never worked
+// around: the search says so and stops.
+const THUMB = /^https:\/\/c\d\.wallpaperflare\.com\/(?:wallpaper|preview)\/[^?#\s"'<>]+\.(?:jpe?g|png|webp)$/i;
+const PAGE = /^https:\/\/www\.wallpaperflare\.com\/[a-z0-9-]+-wallpaper-[a-z0-9]+$/i;
+const unhtml = (s) => String(s || "").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+// the results page -> [{title, url, thumb, w, h, size}]
+export function parseSearch(html) {
+  const out = [], seen = new Set();
+  for (const li of String(html).match(/<li itemprop="associatedMedia"[\s\S]*?<\/li>/g) || []) {
+    const href = [...li.matchAll(/href="([^"]+)"/g)].map((m) => unhtml(m[1])).find((u) => PAGE.test(u));
+    const img = /<img\b[^>]*>/.exec(li)?.[0] || "";
+    const thumb = unhtml(/data-src="([^"]+)"/.exec(img)?.[1] || /\ssrc="([^"]+)"/.exec(img)?.[1] || "");
+    const res = /class="res"[^>]*>\s*(\d+)\s*x\s*(\d+)/.exec(li);
+    if (!href || !THUMB.test(thumb) || seen.has(href)) continue;
+    seen.add(href);
+    const title = unhtml(/alt="([^"]*)"/.exec(img)?.[1] || "").replace(/\s*(HD|4K|8K)?\s*wallpaper\s*$/i, "").trim();
+    out.push({ title: title.slice(0, 160) || "Wallpaper", url: href, thumb, w: res ? Number(res[1]) : 0, h: res ? Number(res[2]) : 0,
+               size: /itemprop="contentSize" content="([^"]+)"/.exec(li)?.[1] || "" });
+  }
+  return out;
+}
+const challenged = (r) => [403, 429, 503].includes(r.status) || /<title>\s*Just a moment|cf-chl-|challenge-platform\/h\//i.test(r.buf.toString("utf8", 0, 20000));
+// the same search twice in half an hour is answered from memory
+const SEARCHED = new Map();
+export async function searchWallpapers(q, { page = 1, getter = get, cache = SEARCHED } = {}) {
+  q = String(q || "").replace(/[\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!q) fail("Type what you'd like: aurora, rainy city, misty forest…");
+  page = Math.max(1, Math.min(50, Math.round(Number(page) || 1)));
+  const key = `${q.toLowerCase()}|${page}`, hit = cache?.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60e3) return hit.value;
+  const value = await searchOnce(q, page, getter);
+  if (cache) {
+    cache.set(key, { at: Date.now(), value });
+    for (const k of cache.keys()) { if (cache.size <= 200) break; cache.delete(k); }
+  }
+  return value;
+}
+async function searchOnce(q, page, getter) {
+  const url = `https://www.wallpaperflare.com/search?wallpaper=${encodeURIComponent(q).replace(/%20/g, "+")}${page > 1 ? `&page=${page}` : ""}`;
+  const r = await getter(url, { max: MAX.page, ua: "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0 Safari/537.36" });
+  if (challenged(r)) fail("wallpaperflare is asking for a browser check right now, so this machine can't search it. Try again in a while, or paste a wallpaper's link.");
+  if (r.status === 404 && page > 1) return { q, page, items: [], more: false, source: url };      // past the last page
+  if (r.status >= 400) fail(`wallpaperflare answered HTTP ${r.status}.`);
+  const items = parseSearch(r.buf.toString("utf8"));
+  return { q, page, items, more: items.length >= 60, source: url };       // a full page is 80
+}
+// a result's preview, kept here a while: data/backdrops/.thumbs (the oldest go past 600)
+export async function thumb(u, dir, { getter = get } = {}) {
+  if (!THUMB.test(u || "")) fail("Not a wallpaperflare preview.");
+  const { createHash } = await import("node:crypto");
+  const { readdirSync, statSync } = await import("node:fs");
+  const d = join(dir, ".thumbs"), f = join(d, createHash("sha256").update(u).digest("hex").slice(0, 32) + ".img");
+  if (existsSync(f)) return { buf: readFileSync(f), type: sniff(readFileSync(f))?.type || "image/jpeg" };
+  const r = await getter(u, { max: 2e6, referer: "https://www.wallpaperflare.com/" });
+  const s = sniff(r.buf);
+  if (r.status >= 400 || s?.kind !== "image") fail(`The preview didn't come (HTTP ${r.status}).`);
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  writeFileSync(f, r.buf, { mode: 0o600 });
+  try {
+    const all = readdirSync(d).map((n) => ({ n, t: statSync(join(d, n)).mtimeMs })).sort((a, b) => a.t - b.t);
+    for (const x of all.slice(0, Math.max(0, all.length - 600))) unlinkSync(join(d, x.n));
+  } catch { /* fine */ }
+  return { buf: r.buf, type: s.type };
+}
