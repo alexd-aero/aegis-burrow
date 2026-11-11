@@ -188,7 +188,7 @@ function report(r) {
   const paint = () => {
     const runs = RUN_PAGES.map(([p, label]) => {
       const x = R.runs[p];
-      return `<button type="button" class="th-ptab${R.page === p ? " on" : ""}" data-page="${p}">${label}
+      return `<button type="button" class="th-ptab${R.page === p ? " on" : ""}" data-thpage="${p}">${label}
         ${!x ? '<i class="spin sm"></i>' : x.timeout ? '<span class="pill warn">no answer</span>' : x.errors ? `<span class="pill err">${x.errors} error${x.errors === 1 ? "" : "s"}</span>` : x.ok ? `<span class="pill ok">✓ ${x.ms} ms</span>` : '<span class="pill warn">blank</span>'}</button>`;
     }).join("");
     const done = RUN_PAGES.every(([p]) => R.runs[p]);
@@ -260,7 +260,7 @@ function report(r) {
   sc.addEventListener("click", async (e) => {
     if (e.target === sc || e.target.closest("[data-x]")) return close(false);
     const s = e.target.closest("[data-slide]"); if (s) { R.slide = Number(s.dataset.slide); return paint(); }
-    const pt = e.target.closest("[data-page]"); if (pt) { R.page = pt.dataset.page; load(R.page); show(); return paint(); }
+    const pt = e.target.closest("button[data-thpage]"); if (pt) { R.page = pt.dataset.thpage; load(R.page); show(); return paint(); }
     if (e.target.closest("[data-apply]")) {
       R.applying = true; paint();
       try { await call("/__gate/api/themes/apply", { method: "POST", body: JSON.stringify({ token: r.token, confirm: true, trust: R.trust }) }); close(true); toast(`${m.name} applied`); setTimeout(() => location.reload(), 350); }

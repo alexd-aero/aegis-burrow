@@ -1042,14 +1042,18 @@ function activityBody() {
 
 async function load() {
   try {
-    const [me, cf, termix] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix")]);
+    // everything at once: one round trip, not seven (each one is slow from a phone, through a relay)
+    const soft = (path, dflt = null) => api(path).catch(() => dflt);
+    const [me, cf, termix, naming, doms, relay, doctor, tuns, audit] = await Promise.all([api("/__gate/api/me"), api("/__gate/api/cf"), api("/__gate/api/termix"),
+      soft("/__gate/api/tunnels/naming"), soft("/__gate/api/domains"), soft("/__gate/api/relay"), soft("/__gate/api/relay/doctor"),
+      soft("/__gate/api/tunnels", { tunnels: [] }), soft("/__gate/api/audit?n=300", { events: [] })]);
     S.me = me; S.cf = cf; S.termix = termix;
-    S.naming = cf.domain ? await api("/__gate/api/tunnels/naming").catch(() => null) : null;
-    S.doms = cf.domain ? await api("/__gate/api/domains").catch(() => null) : null;
-    S.relay = cf.domain ? { ...(await api("/__gate/api/relay").catch(() => null)), setup: S.relay?.setup } : null;
-    if (S.relay?.configured && !S.doctorBusy) S.doctor = (await api("/__gate/api/relay/doctor").catch(() => null))?.last || null;
-    S.tuns = S.doms ? (await api("/__gate/api/tunnels").catch(() => ({ tunnels: [] }))).tunnels || [] : [];
-    S.audit = (await api("/__gate/api/audit?n=300").catch(() => ({ events: [] }))).events;
+    S.naming = cf.domain ? naming : null;
+    S.doms = cf.domain ? doms : null;
+    S.relay = cf.domain ? { ...relay, setup: S.relay?.setup } : null;
+    if (S.relay?.configured && !S.doctorBusy) S.doctor = doctor?.last || null;
+    S.tuns = S.doms ? tuns?.tunnels || [] : [];
+    S.audit = audit?.events || [];
     if (!S.upd && !S.checking) checkUpdates(false);
     if (S.vers === undefined) { S.vers = null; loadVersions(); }
     loadLog(S.log);
