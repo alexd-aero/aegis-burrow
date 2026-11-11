@@ -1537,3 +1537,93 @@ textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-botto
 .vers-more summary { cursor: pointer; font-size: 13.5px; color: var(--muted); padding: 4px 0; }
 .vers-more[open] summary { margin-bottom: 6px; }
 @media (max-width: 600px) { .vers-row { flex-wrap: wrap; } .vers-row .grow { white-space: normal; flex-basis: 60%; } }
+
+/* ---------- Settings → Themes (public/themes.js) ---------- */
+.th-cur { --th-c: #7aa7ff; display: flex; gap: 16px; align-items: center; padding: 14px; margin-bottom: 14px; border-radius: 14px; border: 1px solid var(--line-2);
+          background: linear-gradient(135deg, color-mix(in srgb, var(--th-c) 9%, transparent), transparent 55%), var(--card-2); }
+.th-cur h3 { margin: 2px 0 2px; font-size: 16px; }
+.th-cur p { margin: 0 0 6px; }
+.th-shot { width: 170px; aspect-ratio: 16 / 10; flex: none; border-radius: 10px; object-fit: cover; object-position: top; border: 1px solid var(--line-2); background: #0b0c0e; }
+.th-shot.def { display: grid; place-items: center; font: 600 28px var(--sans); color: var(--faint); }
+.th-cur-acts { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.th-badges { gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.th-badge { white-space: nowrap; }
+.th-tabs { margin-bottom: 12px; }
+.th-list { display: grid; gap: 8px; }
+.th-row { display: flex; gap: 14px; align-items: center; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--card-2); text-align: left; color: inherit; font: inherit; }
+.th-row.on { border-color: rgba(61,220,151,.35); }
+.th-row.pick { cursor: pointer; width: 100%; }
+.th-row.pick:hover { border-color: var(--line-hi); }
+.th-thumb { width: 96px; aspect-ratio: 16 / 10; flex: none; border-radius: 8px; object-fit: cover; object-position: top; border: 1px solid var(--line); background: #0b0c0e; }
+.th-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 340px; }
+.th-acts .btn svg { width: 14px; height: 14px; }
+.th-drop { display: grid; place-items: center; gap: 6px; padding: 30px 16px; border-radius: 14px; border: 1.5px dashed var(--line-hi); background: rgba(255,255,255,.02); cursor: pointer; text-align: center; transition: background .2s, border-color .2s; }
+.th-drop svg { width: 26px; height: 26px; color: var(--muted); }
+.th-drop:hover, .th-drop.drag { background: rgba(255,255,255,.05); border-color: #fff; }
+.th-drop.busy { cursor: progress; }
+.th-or { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--faint); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+.th-or::before, .th-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.th-src { gap: 8px; }
+.th-fine { margin-top: 12px; }
+.th-disc-top { margin-bottom: 4px; }
+.th-h4 { margin: 14px 0 8px; font-size: 13px; }
+.th-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.th-card { --th-c: #7aa7ff; display: flex; flex-direction: column; border-radius: 14px; overflow: hidden; border: 1px solid var(--line-2); background: var(--card-2); transition: border-color .2s, transform .3s; }
+.th-card:hover { border-color: color-mix(in srgb, var(--th-c) 50%, var(--line-2)); transform: translateY(-2px); }
+.th-card-shot { position: relative; aspect-ratio: 16 / 9; background: radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--th-c) 35%, transparent), transparent 60%), #0b0c0e; }
+.th-card-shot img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+.th-more { position: absolute; right: 8px; bottom: 8px; padding: 1px 8px; border-radius: 99px; background: rgba(0,0,0,.6); font: 11px var(--mono); }
+.th-card-in { display: grid; gap: 6px; padding: 12px 14px 14px; }
+.th-card-in p { margin: 0; }
+.th-card-in svg { width: 11px; height: 11px; vertical-align: -1px; }
+.th-howto { margin-top: 16px; padding: 12px 14px; border-radius: 12px; border: 1px dashed var(--line-2); }
+.th-howto p { margin: 4px 0 0; }
+/* the confirm screen */
+.th-scrim .modal.th-report { --th-c: #7aa7ff; max-width: 1180px; padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.th-report .th-top { display: flex; gap: 14px; align-items: flex-start; padding: 20px 22px 14px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--th-c) 10%, transparent), transparent 60%); }
+.th-report .th-top h2 { margin: 2px 0 4px; font-size: 22px; letter-spacing: -.02em; }
+.th-report .th-top p { margin: 0 0 4px; }
+.th-body { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); gap: 18px; padding: 16px 22px; overflow-y: auto; min-height: 0; }
+.th-shots { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line-2); }
+.th-shots img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top; opacity: 0; transition: opacity .4s; }
+.th-shots img.on { opacity: 1; }
+.th-dots { position: absolute; left: 0; right: 0; bottom: 10px; display: flex; justify-content: center; gap: 6px; }
+.th-dots button { font: 500 11.5px var(--sans); color: rgba(255,255,255,.8); background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.2); border-radius: 99px; padding: 3px 10px; cursor: pointer; }
+.th-dots button.on { background: #fff; color: #000; }
+.th-live { margin-top: 14px; }
+.th-ptabs { display: flex; gap: 6px; margin: 8px 0; flex-wrap: wrap; }
+.th-ptab { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--field); color: var(--muted); cursor: pointer; font: 500 12.5px var(--sans); }
+.th-ptab.on { color: var(--text); border-color: var(--line-hi); }
+.th-frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; border: 1px solid var(--line-2); background: #030304; }
+.th-frame iframe { position: absolute; left: 0; top: 0; width: 1280px; height: 800px; border: 0; transform: scale(var(--k, .45)); transform-origin: 0 0; visibility: hidden; }
+.th-frame iframe.on { visibility: visible; }
+.th-right { display: grid; gap: 12px; align-content: start; }
+.th-box { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--card-2); }
+.th-box.bad { border-color: rgba(255,90,82,.4); }
+.th-box .row { gap: 8px; }
+.th-box svg { width: 16px; height: 16px; color: var(--muted); }
+.th-box p { margin: 6px 0 0; }
+.th-lines, .th-finds, .th-errs { margin: 6px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--muted); }
+.th-lines li, .th-errs li { margin: 2px 0; }
+.th-errs li { color: #ffb3ae; }
+.th-finds { list-style: none; padding: 0; display: grid; gap: 6px; }
+.th-finds li { display: grid; gap: 1px; padding-left: 12px; border-left: 2px solid var(--line-hi); }
+.th-finds li.danger { border-color: var(--err); } .th-finds li.danger > span:first-child { color: #ffb3ae; }
+.th-finds li.warn { border-color: var(--warn); }
+.th-finds li.ok { border-color: var(--ok); }
+.th-finds .mono { font-size: 11px; }
+.th-foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 22px; border-top: 1px solid var(--line); }
+.th-foot .grow { flex: 1; }
+.th-foot .check { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; }
+.th-scrim .modal.th-prove, .th-scrim .modal.th-choose { max-width: 640px; }
+.th-prove h2 svg { width: 18px; height: 18px; vertical-align: -3px; }
+.th-lines.run { list-style: none; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.th-pre { max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: 10px; background: var(--field); border: 1px solid var(--line); font: 11px/1.5 var(--mono); white-space: pre; }
+.th-hidden-frames { position: fixed; left: -3000px; top: 0; width: 1280px; height: 800px; overflow: hidden; }
+.th-hidden-frames iframe { width: 1280px; height: 800px; border: 0; }
+@media (max-width: 900px) {
+  .th-body { grid-template-columns: minmax(0, 1fr); }
+  .th-cur { flex-wrap: wrap; } .th-shot { width: 100%; } .th-cur-acts { flex-direction: row; flex-wrap: wrap; }
+  .th-row { flex-wrap: wrap; } .th-acts { max-width: none; justify-content: flex-start; }
+}

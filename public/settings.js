@@ -1,5 +1,6 @@
 // Settings: link a domain through Cloudflare, Termix, the login, connected apps.
 import { $, h, api, post, toast, ago, chrome, ICONS, UPD, updHero, verJump, runUpdate } from "./common.js";
+import { themesBody, wireThemes } from "./themes.js";
 
 const app = $("#app");
 const S = { me: null, cf: null, termix: null, poll: null, busy: false,
@@ -599,6 +600,12 @@ const INDEX = [
   ["Stay signed in for (days)", "signin", "session days cookie remember"],
   ["Lock out after wrong tries", "signin", "brute force attempts minutes lockout security"],
   ["Customize the home page", "signin", "dashboard tiles greeting tagline background columns gear links", "/?customize=1"],
+  ["Themes", "themes", "theme look skin appearance style weft custom ui zip discover"],
+  ["Add a theme (a .zip, a link, GitHub or GitLab)", "themes", "install theme upload zip repository github gitlab weft"],
+  ["Discover themes", "themes", "browse find themes forks weft community gallery"],
+  ["Background (a picture, GIF or video behind the dashboard)", "themes", "background wallpaper picture image gif video wallpaperflare backdrop"],
+  ["Use the default look", "themes", "default theme off reset broken look safe mode"],
+  ["Prove a theme stable (.stability)", "themes", "stability stable test theme proof"],
   ["Check for updates", "updates", "update version upgrade new release"],
   ["Update by itself", "updates", "auto-update automatic updates"],
   ["Changelog: Aegis × Burrow", "changelog", "release notes what's new history versions", "log:aegis-burrow"],
@@ -781,12 +788,13 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName", "thSrc"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
       <div class="spacer"></div><button class="btn srch-btn" data-act="search" title="Search all settings (/ or Ctrl+K)">${SEARCH}<span>Search all settings</span><kbd>/</kbd></button></div>
     ${sec("signin", "Sign-in", "What the sign-in page says, and how long a sign-in lasts.", signinBody())}
+    ${sec("themes", "Themes", "A new look for the signed-in pages, as Weft themes: from a .zip, a link, or a fork of the Weft repository.", themesBody())}
     ${sec("updates", "Updates", "New versions of Aegis × Burrow, by hand or by themselves.", updatesBody())}
     ${sec("changelog", "Changelog", "What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture.", changelogBody())}
     ${sec("modules", "Modules", "What Aegis runs besides the gate.", modulesBody())}
@@ -797,6 +805,7 @@ function render() {
     ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
     ${advancedBody()}`;
   wireForms();
+  wireThemes(render);
   landOnHash();
 }
 // #domain-<zone> (the gear in the dashboards menu) or a section: scrolled to once it's on the

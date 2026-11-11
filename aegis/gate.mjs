@@ -35,7 +35,7 @@
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync, rmSync, readdirSync,
-         linkSync, symlinkSync, readlinkSync, copyFileSync } from "node:fs";
+         linkSync, symlinkSync, readlinkSync, copyFileSync, createReadStream } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -52,7 +52,9 @@ import { RelayLink, AGENT_VERSION, visitorPage, verify as relayVerify } from "..
 import { lookup as dnsLookup } from "node:dns/promises";
 import { checkLock, cleanNaming } from "../burrow/tunnels.mjs";
 import { Serveo } from "../burrow/serveo.mjs";
-import { Addons, AddonError, RootError } from "../burrow/addons.mjs";
+import { Addons, AddonError, RootError, parseSource, fetchSource } from "../burrow/addons.mjs";
+import { Themes, ThemeError } from "./themes.mjs";
+import { Backdrops, BackdropError, fetchLink } from "./backdrops.mjs";
 import { Standby } from "../burrow/standby.mjs";
 import { RelayDoctor } from "../burrow/relaydoctor.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
@@ -227,7 +229,8 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "ui.css", "login.css",
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "themes.js", "ui.css", "login.css",
+                 "core/host.js", "core/host.css",
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/bulwark.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
 }
@@ -241,6 +244,78 @@ for (const f of Object.keys(FILES)) {
     .replace(/(from\s+["']\.\/[a-z-]+\.js)(["'])/g, `$1?v=${VERSION}$2`));
 }
 const TYPES = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".html": "text/html; charset=utf-8" };
+
+// ---------- themes (aegis/themes.mjs) and your own backgrounds (aegis/backdrops.mjs) ----------
+const themes = new Themes({ dir: join(DATA, "themes"), version: VERSION, log: (...a) => log(...a), parseSource, fetchSource });
+const backdrops = new Backdrops(join(DATA, "backdrops"));
+const DASH_PAGES = new Set(["home.html", "tunnels.html", "settings.html", "welcome.html"]);
+// "Use the default look" for this browser (a theme that broke the dashboard can't keep you out)
+const themeOff = (req) => parseCookies(req.headers.cookie)["aegis-theme"] === "off";
+// What a theme's text files need before they are served: the same ?v= on every
+// link to our scripts and styles as ours get, then the theme's tag on all of
+// them, so no cache between here and the browser hands back an old look.
+function themed(buf, ext, tag, prefix = null) {
+  let t = buf.toString("utf8");
+  if (ext === ".html" || ext === ".js") {
+    t = t.replace(/(["'(])(\/__gate\/[a-z-]+\.(?:js|css))(["')])/g, `$1$2?v=${VERSION}$3`).replace(/(from\s+["']\.\/[a-z-]+\.js)(["'])/g, `$1?v=${VERSION}$2`);
+  }
+  if (tag) t = t.replaceAll(`?v=${VERSION}"`, `?v=${VERSION}-${tag}"`).replaceAll(`?v=${VERSION}'`, `?v=${VERSION}-${tag}'`).replaceAll(`?v=${VERSION})`, `?v=${VERSION}-${tag})`);
+  // a preview: every file this page asks for comes from the staged theme
+  if (prefix) t = t.replace(/(["'(`])\/__gate\/(?!api\/|core\/|backdrops\/|theme-|x\/|open\/|logout|login|tunnels["'#?]|settings["'#?]|welcome["'#?]|home["'#?])([a-z0-9][a-z0-9/_.-]*\.(?:js|css|svg|png|webp|jpe?g|gif|woff2?))/gi, `$1${prefix}$2`);
+  return Buffer.from(t);
+}
+// The core host script, in every signed-in page whatever the theme: it catches
+// a theme's errors (and offers the default look back), draws your background,
+// and runs a theme's welcome. A theme can't replace it.
+function hostConfig(req, preview = null) {
+  const off = themeOff(req);
+  const info = preview ? previewInfo(preview) : themes.activeInfo(off);
+  const pick = info?.background || null;
+  const media = pick && pick.startsWith("img:") ? backdrops.list().find((b) => b.id === pick.slice(4)) || null : null;
+  return { v: VERSION, api: 1, off, preview: preview || null, theme: info, background: pick && (!pick.startsWith("img:") || media) ? pick : (info?.backgrounds?.default ? `theme:${info.backgrounds.default}` : null), media };
+}
+function previewInfo(token) {
+  const p = token.startsWith("i-") ? themes.readPackage(token.slice(2)) : themes.readPackage(token, true);
+  if (!p) return null;
+  return { id: p.id, name: p.m.name, version: p.m.version, accent: p.m.accent, tag: p.tag, previews: [], onboarding: [], welcome: false,
+           backgrounds: p.m.backgrounds ? { ...p.m.backgrounds, recommended: [] } : null, background: p.m.backgrounds?.default ? `theme:${p.m.backgrounds.default}` : null };
+}
+function injectHost(html, req, preview) {
+  const cfg = JSON.stringify(hostConfig(req, preview)).replace(/</g, "\\u003c");
+  const tag = `<link rel="stylesheet" href="/__gate/core/host.css?v=${VERSION}"><script id="weft-host" type="application/json">${cfg}</script><script src="/__gate/core/host.js?v=${VERSION}"></script>`;
+  return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (h) => h + "\n" + tag) : tag + html;
+}
+function dashPageHtml(req, name, preview = null) {
+  const t = preview ? themes.file(name, { token: preview }) : themes.file(name, { off: themeOff(req) });
+  const tag = preview ? (themes.file("ui.css", { token: preview })?.tag || "p") : (themeOff(req) ? null : themes.active?.tag || null);
+  let html = t ? themed(t.buf, ".html", null).toString("utf8") : FILES[name].toString();
+  html = html.replaceAll("{{title}}", esc(settings.get("title"))).replaceAll("{{subtitle}}", esc((settings.get("login") || {}).subtitle || "Secure channel"));
+  // theme.css: the theme's styles on top of ours, after ui.css
+  const layer = preview ? themes.file("theme.css", { token: preview }) : themes.file("theme.css", { off: themeOff(req) });
+  if (layer) {
+    const href = preview ? `/__gate/theme-preview/${preview}/theme.css?v=${VERSION}-${layer.tag}` : `/__gate/theme/theme.css?v=${VERSION}-${layer.tag}`;
+    html = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `<link rel="stylesheet" href="${href}">\n</head>`) : html + `<link rel="stylesheet" href="${href}">`;
+  }
+  if (tag) html = themed(Buffer.from(html), ".html", tag, preview ? `/__gate/theme-preview/${preview}/` : null).toString("utf8");
+  return injectHost(html, req, preview);
+}
+function sendRange(req, res, path, type) {
+  const size = statSync(path).size, m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+  const base = { "Content-Type": type, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff" };
+  if (!m || (!m[1] && !m[2])) { res.writeHead(200, { ...base, "Content-Length": size }); return createReadStream(path).pipe(res); }
+  let a = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2])), b = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+  if (a >= size || a > b) { res.writeHead(416, { "Content-Range": `bytes */${size}` }); return res.end(); }
+  res.writeHead(206, { ...base, "Content-Range": `bytes ${a}-${b}/${size}`, "Content-Length": b - a + 1 });
+  createReadStream(path, { start: a, end: b }).pipe(res);
+}
+function readBuffer(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on("data", (c) => { size += c.length; if (size > limit) { reject(new Error("too large")); req.destroy(); } else chunks.push(c); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
 
 // ---------- the pieces ----------
 
@@ -887,7 +962,7 @@ const readJsonBody = async (req) => JSON.parse((await readBody(req)) || "{}");
 
 const SEC_HEADERS = { "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" };
 const GATE_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-  + "connect-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+  + "connect-src 'self'; img-src 'self' data:; media-src 'self'; frame-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 function send(res, status, body, headers = {}) {
   const sec = res.req && isSecure(res.req) ? { "Strict-Transport-Security": "max-age=31536000" } : {};
@@ -900,6 +975,9 @@ const sendJson = (res, status, obj, headers = {}) =>
   send(res, status, JSON.stringify(obj), { "Content-Type": "application/json", ...headers });
 // Pages are templated per request, so a new title or sign-in text shows at once.
 const page = (res, name, headers = {}) => {
+  if (DASH_PAGES.has(name) && res.req && isAuthed(res.req)) {
+    return send(res, 200, dashPageHtml(res.req, name), { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": GATE_CSP, "Vary": "Cookie", ...headers });
+  }
   const l = settings.get("login") || {};
   const html = FILES[name].toString().replaceAll("{{title}}", esc(settings.get("title")))
     .replaceAll("{{subtitle}}", esc(l.subtitle || "Secure channel"));
@@ -932,6 +1010,17 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/health") return sendJson(res, 200, { ok: true, app: "aegis-burrow", version: VERSION, burrow: burrow.on, standby: process.env.AEGIS_STANDBY === "1" });
   const asset = path.slice("/__gate/".length);
   if (FILES[asset] && !asset.endsWith(".html")) {
+    // the theme's own copy, only ever for a signed-in browser (a theme can be private)
+    const t = !asset.startsWith("core/") && themes.active && isAuthed(req) ? themes.file(asset, { off: themeOff(req) }) : null;
+    if (t) {
+      const ext = extname(asset);
+      return send(res, 200, /\.(js|css)$/.test(ext) ? themed(t.buf, ext, t.tag) : t.buf, { "Content-Type": t.type, "Cache-Control": "private, no-store", "Vary": "Cookie",
+        ...(t.svg ? { "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}) });
+    }
+    if (themes.active && isAuthed(req) && !themeOff(req) && /\.(js)$/.test(asset)) {
+      // our own scripts under a theme: their links carry the theme's tag too
+      return send(res, 200, themed(FILES[asset], ".js", themes.active.tag), { "Content-Type": TYPES[extname(asset)], "Cache-Control": "private, no-store", "Vary": "Cookie" });
+    }
     return send(res, 200, FILES[asset], { "Content-Type": TYPES[extname(asset)], "Cache-Control": "no-cache" });
   }
   if (path === "/__gate/challenge" && req.method === "POST") return sendJson(res, 200, newChallenge());
@@ -1083,6 +1172,42 @@ async function handleGate(req, res, path, url, host, isMain) {
     return send(res, 302, "", { Location: "/" + qs, "Set-Cookie": `${goName(req)}=termix; ${cookieAttrs(req, 30).replace("SameSite=Lax", "SameSite=Strict")}` });
   }
   if (path === "/__gate/tunnels") return page(res, "tunnels.html");
+  // ---- themes: the active theme's extra files, package files (previews), previews of a staged one, the way out
+  if (path === "/__gate/theme-off" || path === "/__gate/theme-on") {
+    audit(path.endsWith("off") ? "theme: default look (this browser)" : "theme: back on (this browser)", req, {});
+    return send(res, 302, "", { Location: "/__gate/settings#themes", "Set-Cookie": `aegis-theme=${path.endsWith("off") ? "off" : ""}; ${cookieAttrs(req, path.endsWith("off") ? 30 * 86400 : 0)}` });
+  }
+  if (path.startsWith("/__gate/theme/")) {
+    const t = themes.file(decodeURIComponent(path.slice("/__gate/theme/".length)), { off: themeOff(req) });
+    if (!t) return send(res, 404, "");
+    return send(res, 200, t.buf, { "Content-Type": t.type, "Cache-Control": "private, max-age=3600", ...(t.svg ? { "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}) });
+  }
+  const tf = /^\/__gate\/theme-file\/([a-z0-9][a-z0-9-]{1,39})\/(.+)$/.exec(path);
+  if (tf) {
+    const f = themes.packageFile(tf[1], decodeURIComponent(tf[2]));
+    if (!f) return send(res, 404, "");
+    return send(res, 200, f.buf, { "Content-Type": f.type, "Cache-Control": "private, max-age=3600", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" });
+  }
+  const tp = /^\/__gate\/theme-preview\/([0-9a-f]{24}|i-[a-z0-9][a-z0-9-]{1,39})\/(.*)$/.exec(path);
+  if (tp) {
+    const token = tp[1], rest = decodeURIComponent(tp[2]);
+    if (!(token.startsWith("i-") ? themes.readPackage(token.slice(2)) : themes.readPackage(token, true))) return send(res, 404, "That preview is gone.");
+    const pg = /^page\/(home|tunnels|settings|welcome)$/.exec(rest);
+    const PCSP = GATE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+    if (pg) return send(res, 200, dashPageHtml(req, `${pg[1]}.html`, token), { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": PCSP, "Cache-Control": "no-store" });
+    const t = themes.file(rest, { token }), ext = extname(rest);
+    const prefix = `/__gate/theme-preview/${token}/`;
+    if (t) return send(res, 200, /\.(js|css)$/.test(ext) ? themed(t.buf, ext, t.tag, prefix) : t.buf, { "Content-Type": t.type, "Cache-Control": "no-store",
+      ...(t.svg ? { "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}) });
+    if (FILES[rest] && !rest.endsWith(".html")) return send(res, 200, /\.js$/.test(ext) ? themed(FILES[rest], ext, "p", prefix) : FILES[rest], { "Content-Type": TYPES[ext], "Cache-Control": "no-store" });
+    return send(res, 404, "");
+  }
+  const bdf = /^\/__gate\/backdrops\/([a-z0-9-]{1,40}(?:-[lst]\.jpg|\.(?:gif|mp4|webm)))$/.exec(path);
+  if (bdf) {
+    const f = backdrops.file(bdf[1]);
+    if (!f) return send(res, 404, "");
+    return sendRange(req, res, f.path, f.type);
+  }
   const xu = /^\/__gate\/x\/([a-z0-9][a-z0-9-]{1,39})\/ui\.js$/.exec(path);
   if (xu) {
     const x = extensions.get(xu[1]);
@@ -1093,6 +1218,105 @@ async function handleGate(req, res, path, url, host, isMain) {
   if (path === "/__gate/welcome") return page(res, "welcome.html");
   if (path.startsWith("/__gate/api/")) return handleApi(req, res, path, url);
   return send(res, 404, "Not found");
+}
+
+// ---------- themes and backgrounds (signed in) ----------
+async function themeApi(req, res, path, url) {
+  const M = req.method, ok = (j) => sendJson(res, 200, j), no = (st, e) => sendJson(res, st, { error: e.message || e, ...(e.extra || {}) });
+  try {
+    if (path === "/__gate/api/themes" && M === "GET") return ok(themes.view());
+    if (path === "/__gate/api/themes/inspect" && M === "POST") {
+      const json = /json/.test(req.headers["content-type"] || "");
+      if (json) {
+        const b = await readJsonBody(req);
+        if (b.token) return ok(await themes.inspect(null, { token: b.token, pick: b.pick }));
+        return ok(await themes.inspect({ source: String(b.source || "") }));
+      }
+      let buf;
+      try { buf = await readBuffer(req, 200 << 20); } catch { return no(413, "That file is larger than 200 MB."); }
+      return ok(await themes.inspect({ buffer: buf, filename: String(url.searchParams.get("name") || "") }));
+    }
+    let m;
+    if ((m = /^\/__gate\/api\/themes\/staged\/([0-9a-f]{24})$/.exec(path))) {
+      if (M === "DELETE") { themes.discard(m[1]); return ok({ ok: true }); }
+      if (!themes.stagedPkg(m[1])) return no(404, "That upload is gone: add the theme again.");
+      return ok({ token: m[1], ...themes.report(m[1]) });
+    }
+    if ((m = /^\/__gate\/api\/themes\/staged\/([0-9a-f]{24})\/file\/(.+)$/.exec(path))) {
+      const f = themes.packageFile(m[1], decodeURIComponent(m[2]), true);
+      if (!f) return send(res, 404, "");
+      return send(res, 200, f.buf, { "Content-Type": f.type, "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" });
+    }
+    if (path === "/__gate/api/themes/apply" && M === "POST") {
+      const b = await readJsonBody(req);
+      const v = themes.apply(String(b.token || ""), { confirm: b.confirm === true, trust: b.trust === true });
+      audit("theme: applied", req, { theme: v.active, version: v.themes.find((t) => t.active)?.version });
+      return ok(v);
+    }
+    if (path === "/__gate/api/themes/use" && M === "POST") { const b = await readJsonBody(req); const v = themes.use(b.id || null); audit(b.id ? "theme: switched" : "theme: default look", req, { theme: b.id || null }); return ok(v); }
+    if (path === "/__gate/api/themes/onboarded" && M === "POST") { themes.onboarded(String((await readJsonBody(req)).id || "")); return ok({ ok: true }); }
+    if (path === "/__gate/api/themes/discover" && M === "GET") return ok(await themes.discover({ fresh: url.searchParams.has("fresh") }));
+    if (path === "/__gate/api/themes/discover/img" && M === "GET") {
+      const f = await themes.discoverImage(url.searchParams.get("u"));
+      return send(res, 200, f.buf, { "Content-Type": f.type, "Cache-Control": "private, max-age=86400" });
+    }
+    if ((m = /^\/__gate\/api\/themes\/([a-z0-9][a-z0-9-]{1,39})(?:\/(rollback|welcome|stamp|stability|update))?$/.exec(path))) {
+      const [, id, op] = m;
+      if (!op && M === "DELETE") { const v = themes.remove(id); audit("theme: removed", req, { theme: id }); return ok(v); }
+      if (op === "rollback" && M === "POST") { const v = themes.rollback(id); audit("theme: rolled back", req, { theme: id }); return ok(v); }
+      if (op === "welcome" && M === "POST") { themes.welcomeAgain(id); return ok({ ok: true }); }
+      if (op === "stamp" && M === "POST") { const r = themes.stamp(id, (await readJsonBody(req)).live, { by: `aegis-burrow ${VERSION} (Settings → Themes)` }); audit("theme: proven stable", req, { theme: id }); return ok(r); }
+      if (op === "stability" && M === "GET") {
+        const p = themes.readPackage(id);
+        if (!p || !existsSync(join(p.pkg, ".stability"))) return no(404, "It has no .stability file yet.");
+        return send(res, 200, readFileSync(join(p.pkg, ".stability")), { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": `attachment; filename=".stability"` });
+      }
+      if (op === "update" && M === "POST") {
+        const t = themes.state.themes[id];
+        if (!t?.source || t.source.kind === "upload") return no(400, "It was uploaded: upload the new version.");
+        return ok(await themes.inspect({ source: t.source.display || t.source.url }));
+      }
+    }
+    // ---- backgrounds
+    if (path === "/__gate/api/backdrops" && M === "GET") return ok({ backdrops: backdrops.list() });
+    if (path === "/__gate/api/backdrops" && M === "POST") {
+      let b;
+      try { b = JSON.parse(await readBody(req, 22e6)); } catch (e) { return no(413, e.message === "too large" ? "That picture is too big." : "bad request"); }
+      const x = backdrops.add(b); audit("background added", req, { name: x.name }); return ok(x);
+    }
+    if (path === "/__gate/api/backdrops/raw" && M === "POST") {
+      let buf;
+      try { buf = await readBuffer(req, 95e6); } catch { return no(413, "That file is too big (90 MB at most for a video)."); }
+      const x = backdrops.addRaw(buf, { name: url.searchParams.get("name") || "", source: url.searchParams.get("source") || null });
+      audit("background added", req, { name: x.name, kind: x.kind }); return ok(x);
+    }
+    if (path === "/__gate/api/backdrops/link" && M === "POST") {
+      const b = await readJsonBody(req);
+      const got = await fetchLink(String(b.url || ""));
+      if (got.kind === "image") {
+        // a still picture: the browser sizes it, then adds it like an upload
+        const name = String(b.name || "").trim().slice(0, 60) || got.name;
+        return send(res, 200, got.buf, { "Content-Type": got.type, "Cache-Control": "no-store", "X-Backdrop-Name": encodeURIComponent(name), "X-Backdrop-Source": encodeURIComponent(got.source) });
+      }
+      const x = backdrops.addRaw(got.buf, { name: b.name || got.name, source: got.source });
+      audit("background added", req, { name: x.name, kind: x.kind }); return ok(x);
+    }
+    if (path === "/__gate/api/backdrops/pick" && M === "POST") return ok({ pick: themes.setBackground(String((await readJsonBody(req)).pick || "")) });
+    if ((m = /^\/__gate\/api\/backdrops\/([a-z0-9-]{1,40})(\/poster)?$/.exec(path))) {
+      if (m[2] && M === "PUT") { const b = JSON.parse(await readBody(req, 1e6)); return ok(backdrops.poster(m[1], b.t, b)); }
+      if (!m[2] && M === "PATCH") return ok(backdrops.rename(m[1], (await readJsonBody(req)).name));
+      if (!m[2] && M === "DELETE") {
+        if (!backdrops.remove(m[1])) return no(404, "No such background.");
+        themes.dropBackground(m[1]);
+        return ok({ backdrops: backdrops.list() });
+      }
+    }
+    return no(404, "not found");
+  } catch (e) {
+    if (e instanceof ThemeError || e instanceof BackdropError) return no(400, e);
+    log("themes:", e.stack || e.message);
+    return no(500, e);
+  }
 }
 
 // ---------- dashboard API (signed in) ----------
@@ -1224,6 +1448,7 @@ async function handleApi(req, res, path, url) {
       return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
     }
     if (path === "/__gate/api/prefs" && req.method === "POST") { savePrefs(await readJsonBody(req)); return sendJson(res, 200, me(req)); }
+    if (path.startsWith("/__gate/api/themes") || path.startsWith("/__gate/api/backdrops")) return await themeApi(req, res, path, url);
     if (path === "/__gate/api/pack" && req.method === "GET") {
       if (!pack.found || Date.now() - pack.found.at > 30000) await pack.detect();
       return sendJson(res, 200, pack.status());
@@ -2563,6 +2788,30 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (path === "/update/hold" && method === "POST") { updater.setHold((await readJson()).version || null); return ok(await updater.versions()); }
   if (path === "/update/apply" && method === "POST") { const job = await updater.apply(); return job.state === "error" ? no(500, job.error) : ok({ ...updater.view(), job }); }
   if (path === "/prefs" && method === "POST") { savePrefs(await readJson()); return ok({ ok: true }); }
+  // themes, for `aegis themes` (aegis/themes.mjs)
+  if (path === "/themes" && method === "GET") return ok(themes.view());
+  if (path === "/themes/inspect" && method === "POST") {
+    const b = await readJson();
+    try {
+      if (b.token) return ok(await themes.inspect(null, { token: b.token, pick: b.pick }));
+      if (b.file) return ok(await themes.inspect({ buffer: readFileSync(String(b.file)), filename: String(b.file).split("/").pop() }));
+      return ok(await themes.inspect({ source: String(b.source || ""), allowLocal: true }));
+    }
+    catch (e) { return no(400, e.message); }
+  }
+  if (path === "/themes/apply" && method === "POST") {
+    const b = await readJson();
+    try { const v = themes.apply(String(b.token || ""), { confirm: b.confirm === true, trust: b.trust === true }); audit("theme: applied (command line)", null, { theme: v.active }); return ok(v); }
+    catch (e) { return no(400, e.message); }
+  }
+  if (path === "/themes/use" && method === "POST") {
+    const b = await readJson();
+    try { const v = themes.use(b.id || null); audit(b.id ? "theme: switched (command line)" : "theme: default look (command line)", null, { theme: b.id || null }); return ok(v); }
+    catch (e) { return no(400, e.message); }
+  }
+  if (path === "/themes/remove" && method === "POST") {
+    try { return ok(themes.remove(String((await readJson()).id || ""))); } catch (e) { return no(400, e.message); }
+  }
   // the domain and its DNS records, read-only (addon scripts: Burrow Pages checks them on install)
   if (path === "/dns" && method === "GET") {
     const d = settings.get("domain");

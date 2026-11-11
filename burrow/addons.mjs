@@ -144,7 +144,7 @@ function git(args, { cwd, timeout = 240 } = {}) {
   (err, out, errOut) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: String(out || ""), err: String(errOut || err?.message || "") })));
 }
 
-async function fetchSource(source, dest) {
+export async function fetchSource(source, dest) {
   if (source.kind === "archive") {
     try { return unpack(await download(source.url, `burrow/${HOST}`), dest); }
     catch (e) { if (e instanceof ArchiveError) fail(e.message); throw e; }

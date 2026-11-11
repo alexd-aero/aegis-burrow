@@ -21,6 +21,7 @@
 #   aegis serveo on | off | url      a public https link to the dashboard (serveo.net)
 #   aegis addons [add LINK | update|install|uninstall|check ID | action ID ACTION] [--here]   Burrow's addons, from the terminal
 #   aegis burrow status | list | on | off | publish PORT … | unpublish PORT | rename PORT NAME | move PORT ZONE
+#   aegis themes [list | add ZIP|LINK|FOLDER [--yes] [--trust] | use ID | off | remove ID | check FOLDER]   Weft themes
 #
 # Layout (AEGIS_HOME, default ~/.local/share/aegis):
 #   app/          the code (aegis/, burrow/, public/, bin/), copied from a checkout
@@ -1268,6 +1269,72 @@ case "$1" in
     if [ -z "${1:-}" ] || [ "$1" = list ]; then cli addons; else addon_op "$@"; fi ;;
   url) need_installed; links "" ;;
   setup-link) need_installed; if setup_needed; then links "$(setup_path)"; else echo "  the login is already set up:"; links ""; fi ;;
+  themes|theme) shift; need_installed
+    # Weft themes (aegis/themes.mjs, Weft spec §12). Adding one shows its report and asks before it applies.
+    show_report() {   # the report the dashboard's confirm screen shows, in words
+      "$NODE" -e '
+        const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        if (r.choose) { console.log("Several themes in there:"); for (const c of r.choose) console.log(`  [${c.i}] ${c.name} ${c.version}  (${c.path})`); process.exit(3); }
+        const m = r.manifest || {}, L = (x) => console.log(x);
+        L(`
+  ${m.name || "?"} ${m.version || ""}${m.author ? `  by ${m.author}` : ""}${r.installed ? `  (you have ${r.installed.version})` : ""}`);
+        if (m.description) L(`  ${m.description}`);
+        if (r.files) L(`  changes: ${r.files.stylesOnly ? "styles only" : r.files.pages.length ? "draws " + r.files.pages.join(", ") : "styles and scripts"} · ${r.files.replaces.length} files replaced, ${r.files.assets} of its own`);
+        if (r.stability) { L(`  stability: ${r.stability.level}: ${r.stability.title}`); for (const l of (r.stability.lines || []).slice(0, 6)) L(`    ${l}`); }
+        if (r.safety) { L(`  safety scan: ${r.safety.level}`); for (const f of r.safety.findings.filter((x) => x.level !== "info")) L(`    ${f.level === "danger" ? "!!" : " !"} ${f.what}${f.file ? ` (${f.file}${f.detail ? ", " + f.detail : ""})` : ""}`); }
+        if (m.previews) L(`  previews: ${m.previews.length} (see them in Settings → Themes before you trust it)`);
+        for (const e of r.errors || []) L(`  ✗ ${e}`);
+        process.stdout.write("
+" + JSON.stringify({ token: r.token, ok: !!r.ok, danger: r.safety?.level === "danger" }));'
+    }
+    case "${1:-list}" in
+      list|ls) ensure_running
+        burrow_call GET /themes | "$NODE" -e '
+          const v = JSON.parse(require("fs").readFileSync(0, "utf8"));
+          if (!v.themes.length) { console.log("no themes yet: aegis themes add ZIP|LINK  (or Settings → Themes)"); process.exit(0); }
+          for (const t of v.themes) console.log(`${t.active ? "*" : " "} ${t.id.padEnd(22)} ${t.version.padEnd(10)} ${t.stabilityNow.level.padEnd(9)} ${t.safety.padEnd(7)} ${t.name}`);
+          if (!v.active) console.log("
+  (the default look is in use)");' ;;
+      add|install) ensure_running
+        src="${2:-}"; [ -n "$src" ] || die "aegis themes add FILE.zip | https://… | github.com/you/weft | /a/folder  [--yes] [--trust]"
+        yes=0; trust=0; for a in "$@"; do [ "$a" = --yes ] && yes=1; [ "$a" = --trust ] && trust=1; done
+        if [ -f "$src" ]; then body="$("$NODE" -e 'process.stdout.write(JSON.stringify({file: require("path").resolve(process.argv[1])}))' "$src")"
+        else body="$("$NODE" -e 'process.stdout.write(JSON.stringify({source: process.argv[1]}))' "$src")"; fi
+        spin_start "fetching and looking inside"
+        out="$(burrow_call POST /themes/inspect "$body")" || { spin_stop; die "$out"; }
+        spin_stop
+        rep="$(printf '%s' "$out" | show_report)"; rc=$?
+        if [ $rc -eq 3 ]; then printf '%s
+' "$rep"; tok="$(printf '%s' "$out" | jget token)"; read -rp "which one? " pick
+          out="$(burrow_call POST /themes/inspect "{\"token\":\"$tok\",\"pick\":${pick:-0}}")" || die "$out"; rep="$(printf '%s' "$out" | show_report)"; fi
+        printf '%s
+' "$rep" | sed '$d'
+        meta="$(printf '%s' "$rep" | tail -1)"
+        [ "$(printf '%s' "$meta" | jget ok)" = true ] || die "it can't be applied (see above)"
+        if [ "$(printf '%s' "$meta" | jget danger)" = true ] && [ $trust = 0 ]; then die "the safety scan found code a theme shouldn't have. Look at it in Settings → Themes, or add --trust if you know why it's there."; fi
+        if [ $yes = 0 ]; then read -rp "  apply it? [y/N] " a; [[ "$a" =~ ^[Yy] ]] || { say "left as it was"; exit 0; }; fi
+        out="$(burrow_call POST /themes/apply "{\"token\":\"$(printf '%s' "$meta" | jget token)\",\"confirm\":true,\"trust\":$([ $trust = 1 ] && echo true || echo false)}")" || die "$out"
+        ok "applied: open the dashboard (its welcome shows once)" ;;
+      use) ensure_running; [ -n "${2:-}" ] || die "aegis themes use ID   (aegis themes list)"
+        out="$(burrow_call POST /themes/use "{\"id\":\"$2\"}")" || die "$out"; ok "$2 is the look now" ;;
+      off|default) ensure_running; out="$(burrow_call POST /themes/use '{"id":null}')" || die "$out"; ok "the default look is back (your themes stay installed)" ;;
+      remove|rm) ensure_running; [ -n "${2:-}" ] || die "aegis themes remove ID"
+        out="$(burrow_call POST /themes/remove "{\"id\":\"$2\"}")" || die "$out"; ok "removed $2" ;;
+      check) [ -d "${2:-}" ] || die "aegis themes check FOLDER   (the folder with the .theme file)"
+        "$NODE" --input-type=module -e '
+          const { checkFolder } = await import(process.argv[1]);
+          const r = checkFolder(process.argv[2], { version: process.argv[3] });
+          const L = (x) => console.log(x);
+          if (r.m) L(`${r.m.name} ${r.m.version} (${r.m.id}), theme API ${r.m.api}`);
+          for (const e of r.errors) L(`  ✗ ${e}`);
+          for (const w of r.warnings || []) L(`  ! ${w}`);
+          if (r.sorted) L(`  replaces ${r.sorted.replaces.map((f) => f.rel).join(", ") || "nothing"}; ${r.sorted.assets.length} files of its own${r.sorted.ignored.length ? `; left out: ${r.sorted.ignored.map((f) => f.rel).join(", ")}` : ""}`);
+          if (r.syntax) L(`  syntax: ${r.syntax.scripts} scripts, ${r.syntax.bad.length} broken`);
+          if (r.safety) { L(`  safety: ${r.safety.level}`); for (const f of r.safety.findings) L(`    ${f.level.padEnd(6)} ${f.what}${f.file ? ` (${f.file}${f.detail ? ", " + f.detail : ""})` : ""}`); }
+          if (r.stability) L(`  stability: ${r.stability.level}: ${r.stability.title}${r.stability.level === "unproven" ? "\n    prove it: install it, then Settings → Themes → Prove it stable (it runs the pages in your browser)" : ""}`);
+          process.exit(r.ok ? 0 : 1);' "$APP/aegis/themes.mjs" "$2" "$(app_version)" ;;
+      *) die "aegis themes [list | add ZIP|LINK|FOLDER [--yes] [--trust] | use ID | off | remove ID | check FOLDER]" ;;
+    esac ;;
   serveo) shift; need_installed
     case "${1:-url}" in
       on|off) out="$(burrow_call POST /serveo "{\"on\":$([ "$1" = on ] && echo true || echo false)}")" || die "$out"

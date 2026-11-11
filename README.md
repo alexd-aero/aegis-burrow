@@ -118,6 +118,7 @@ Everything the browser does, the terminal does too. It talks to the running gate
 | `aegis update [--check]` · `aegis update auto on\|off` | What's new, then install and wait for the restart |
 | `aegis versions` · `aegis rollback [VERSION]` | The versions kept here; go back to one (works with the gate down) |
 | `aegis open` | The dashboard's links (and opens it, on a desktop) |
+| `aegis themes [list \| add ZIP\|LINK\|FOLDER \| use ID \| off \| remove ID \| check FOLDER]` | Weft themes: `add` shows the report (stability, safety scan) and asks before it applies; `off` brings the default look back; `check` validates a theme folder you're making |
 
 Under Selkies Forge, or with no keyboard (`curl … \| bash` in a script), nothing is asked: the links are printed instead.
 
@@ -362,6 +363,16 @@ Aegis × Burrow opens `ssh -R 80:localhost:PORT serveo.net` itself and keeps it 
 - **Its name changes.** Serveo gives it a new random name every time Aegis restarts; *Settings → Modules* and `aegis serveo url` show the current one.
 - **It goes through the same gate as everything else.** Serveo's visitors count as remote, never as "this machine", even though serveo connects from loopback. The setup page is open from anywhere for 30 minutes after Aegis starts (and from this machine any time; `aegis restart` opens the 30 minutes again), sign-in needs your password, and the lockout counts each visitor's real address.
 - **Serveo's warning page.** Serveo shows its own *Browser Warning* the first time a browser opens a free tunnel; press *Continue to Site*.
+
+## 🎨 Themes
+
+A new look for the signed-in pages, as **[Weft themes](https://github.com/alexd-aero/weft/blob/main/SPEC.md#12-themes)**. **Settings → Themes**:
+
+- **Add a theme** from a `.zip` (archives inside archives are opened too), a download link, or a GitHub or GitLab repository. Nothing applies yet: you get its **previews**, a **live run** of its pages on your own dashboard (in frames, the rest unchanged), its **`.stability`** proof checked file by file, and a **safety scan** of its code (styles only, what the pages it replaces handle, anything a look shouldn't need). You confirm, or it goes.
+- **Discover**: themes people share by forking [alexd-aero/weft](https://github.com/alexd-aero/weft) with a `.theme` at the root, with their previews; Weft's own examples first.
+- **Backgrounds**, for themes that have them: the theme's own, its suggestions (wallpaperflare links, fetched when you pick one), and yours: pictures, GIFs and videos, uploaded or from a link, kept on this machine only. A theme's welcome walks you through them once it's applied.
+- **Prove it stable** writes the `.stability` file for a theme you made: Aegis runs its pages in your browser, checks the rest, and records every file's fingerprint and the version it was tested on.
+- The way back is always there: **Use the default look**, `/__gate/theme-off` (this browser only, for a theme that broke a page), `aegis themes off`. Sign-in pages are never themed, and a theme's files are only ever served to a signed-in browser, so a private theme stays private.
 
 ## 📦 Addons
 
