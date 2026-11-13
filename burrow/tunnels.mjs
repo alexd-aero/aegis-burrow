@@ -566,18 +566,24 @@ export class TunnelManager {
     const port = Number(spec.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Pick a port from 1 to 65535.");
     if (this.forbidden.has(port)) throw new Error("That is Aegis itself.");
-    if (this.tunnels.has(port)) throw new Error(`tunnel-${port} already exists.`);
+    // A port that already has a tunnel gets a second one beside it: its own address,
+    // name and access, the same target. Its key is a free one above 65535, like a site's.
+    const mirror = this.tunnels.has(port);
+    if (mirror && spec.parent != null) throw new Error(`tunnel-${port} already exists.`);
+    if (mirror && !String(spec.sub || "").trim()) throw new Error(`Port ${port} already has a tunnel. Give this one its own address to make a second tunnel for it.`);
+    const key = mirror ? this.freeKey() : port;
     const { access, lock } = this.checkAccess(null, spec);
-    const targetHost = String(spec.targetHost || "127.0.0.1").trim() || "127.0.0.1";
+    const twin = mirror ? this.tunnels.get(port) : null;                                      // a mirror forwards where its twin does
+    const targetHost = String(spec.targetHost || twin?.targetHost || "127.0.0.1").trim() || "127.0.0.1";
     if (!/^[a-zA-Z0-9.\-:\[\]]{1,253}$/.test(targetHost)) throw new Error("That target host does not look right.");
-    const targetPort = Number(spec.targetPort || port);
+    const targetPort = Number(spec.targetPort || twin?.targetPort || port);
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error("Target port must be 1-65535.");
     const on = spec.parent != null ? this.checkPublicPort(spec.parent, spec.publicPort, { app: spec.app }) : null;
-    const sub = on ? null : await this.checkSub(port, spec.sub);
+    const sub = on ? null : await this.checkSub(key, spec.sub);
     const home = on ? {} : this.homeFields(spec.domain);
     const t = {
       sub, ...(on || {}), ...home,
-      port, targetHost, targetPort,
+      port: key, targetHost, targetPort,
       scheme: ["http", "https"].includes(spec.scheme) ? spec.scheme : await this.detectScheme(targetHost, targetPort),
       name: String(spec.name || "").slice(0, 60),
       access, lock,
@@ -588,7 +594,7 @@ export class TunnelManager {
     return this.add(t);
   }
 
-  // a site's or a clone's key: the first free one above 65535
+  // a site's, a clone's or a mirror's key: the first free one above 65535
   freeKey() {
     let port = SITE_BASE + 1;
     while (this.tunnels.has(port)) port++;

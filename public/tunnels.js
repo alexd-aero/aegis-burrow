@@ -17,7 +17,9 @@ const fmtMs = (ms) => ms == null ? "–" : ms < 1000 ? Math.round(ms) + " ms" : 
 const ago = (t) => { if (!t) return "never"; const s = Math.max(0, (Date.now() - t) / 1000); return s < 5 ? "now" : s < 60 ? Math.floor(s) + "s ago" : s < 3600 ? Math.floor(s / 60) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago"; };
 const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const flag = (cc) => /^[A-Z]{2}$/.test(cc || "") && cc !== "XX" && cc !== "T1" ? String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0))) : "";
-const displayName = (t) => t.name || t.title || (t.site ? t.site.url.replace(/^https:\/\//, "") : `tunnel-${t.port}`);
+const displayName = (t) => t.name || t.title || (t.site ? t.site.url.replace(/^https:\/\//, "") : keyName(t));
+// a port's own tunnel is tunnel-PORT; a second tunnel on that port (a mirror) has a hidden key above 65535, so its address names it
+const keyName = (t) => (t.port > 65535 && !t.kind && t.sub ? t.sub : `tunnel-${t.port}`);
 
 const ICON = {
   download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
@@ -1350,7 +1352,7 @@ async function tunnelForm(edit, preset, opts = {}) {
   const noPublic = () => st.mode === "site" || (st.mode === "clone" && st.probe?.access === "password");
   const kinds = [["port", "A port"], ["clone", "Clone a link"], ...(canSite ? [["site", `Pages site <span class="pill exp">experimental</span>`]] : [])];
   openModal(`
-    <h2>${edit ? `Edit ${h(isSite || isClone ? displayName(t) : "tunnel-" + t.port)}` : siteOnly ? "Add a site" : "New tunnel"}</h2>
+    <h2>${edit ? `Edit ${h(isSite || isClone ? displayName(t) : keyName(t))}` : siteOnly ? "Add a site" : "New tunnel"}</h2>
     <p id="fLead">${edit ? (isSite ? "Change the site, its address, or who can open it." : isClone ? "Change its address or who can open it, or give it the original's new password." : "Change where it points or who can open it.") : LEADS[st.mode]}</p>
     <form id="tf" autocomplete="off">
       ${!edit && !siteOnly ? `<div class="field"><div class="seg kind-seg" id="fKind">${kinds.map(([v, l]) => `<button type="button" data-v="${v}" class="${st.mode === v ? "on" : ""}">${l}</button>`).join("")}</div></div>` : ""}
@@ -1464,6 +1466,13 @@ async function tunnelForm(edit, preset, opts = {}) {
         pv.innerHTML = `${at} <span class="faint">clones</span> ${p ? `<span class="mono">${h(p.host)}</span>` : "the link"} <span class="faint">· ${who}</span>`;
       } else if (dom) pv.innerHTML = `https://<b>${h(sub || (edit ? t.port : (portEl?.value || "").trim() || "PORT"))}</b>.${h(dom)}`;
       else pv.innerHTML = previewText(edit ? t.port : (portEl?.value || "").trim() || "PORT", sub);
+      const twin = !edit && st.mode === "port" && (S.list || []).find((x) => !x.kind && String(x.port) === (portEl?.value || "").trim());
+      if (twin) {
+        pv.innerHTML += `<div class="faint">Port ${h(twin.port)} already has ${h(twin.url ? twin.url.replace(/^https:\/\//, "") : keyName(twin))}: this makes a second address for it, with its own name and who can open it.</div>`;
+        const hostEl = m.querySelector("#fHost");
+        if (hostEl.value.trim() === "127.0.0.1" && twin.targetHost && twin.targetHost !== hostEl.value) hostEl.value = twin.targetHost;
+        m.querySelector("#fTPort").placeholder = String(twin.targetPort || "same");
+      } else if (!edit) m.querySelector("#fTPort").placeholder = "same";
     };
     m.querySelector("#fKind")?.addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
@@ -1541,7 +1550,7 @@ async function tunnelForm(edit, preset, opts = {}) {
         closeModal();
         const behind = res.access === "password" ? "its password" : res.access === "public" ? "nothing: it's public" : "your login";
         toast(edit ? "Saved" : st.mode === "site" ? `${res.host || "The site"} is live behind ${behind}`
-              : st.mode === "clone" ? `${res.host || "The clone"} is live, behind ${behind}` : `tunnel-${res.port} is live`);
+              : st.mode === "clone" ? `${res.host || "The clone"} is live, behind ${behind}` : `${keyName(res)} is live`);
         go("detail", res.port);
       } catch (ex) {
         err.textContent = ex.message; btn.disabled = false; btn.textContent = label;
@@ -1667,13 +1676,13 @@ function passwordForm(d) {
 }
 
 function confirmDelete(t) {
-  openModal(`<h2>Delete ${h(t.kind === "site" ? displayName(t) : "tunnel-" + t.port)}?</h2>
+  openModal(`<h2>Delete ${h(t.kind === "site" ? displayName(t) : keyName(t))}?</h2>
     <p><span class="mono">${h(t.host || "Its address")}</span> stops working right away, open connections are closed, and its DNS record is removed. ${t.kind === "site" ? `The site itself, on ${h(PROVIDER[t.site.provider] || "Pages")}, is not touched.` : `Whatever runs on port ${t.targetPort} is not touched.`}</p>
     <div class="err-msg" id="dErr"></div>
     <div class="modal-actions"><button class="btn ghost" data-act="close">Cancel</button><button class="btn danger" id="dGo">Delete tunnel</button></div>`, (m) => {
     m.querySelector("#dGo").addEventListener("click", async () => {
       const b = m.querySelector("#dGo"); b.disabled = true; b.textContent = "Deleting…";
-      try { await api(`/__gate/api/tunnels/${t.port}`, { method: "DELETE" }); closeModal(); toast(`${t.kind === "site" ? displayName(t) : "tunnel-" + t.port} deleted`); go("list"); }
+      try { await api(`/__gate/api/tunnels/${t.port}`, { method: "DELETE" }); closeModal(); toast(`${t.kind === "site" ? displayName(t) : keyName(t)} deleted`); go("list"); }
       catch (ex) { m.querySelector("#dErr").textContent = ex.message; b.disabled = false; b.textContent = "Delete tunnel"; }
     });
   });
