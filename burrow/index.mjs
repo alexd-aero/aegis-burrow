@@ -81,7 +81,7 @@ export class Burrow {
       mainCert: () => settings.get("domain")?.cert || null,
       onChange: (list) => { this.tunnels.useExtras(list); this.onDomainsChange?.(); },
     });
-    this.tunnels.useExtras(this.domains.list(), (zone) => this.domains.takenOn(zone));
+    this.tunnels.useExtras(this.domains.serving(), (zone) => this.domains.takenOn(zone));
     // who may reach the gate at all (shield.mjs); Aegis asks it about every request
     this.shield = new Shield({
       dataDir, log: this.log,
@@ -112,6 +112,11 @@ export class Burrow {
 
   // The tunnel a request's Host names, or null (also null while Burrow is off).
   matchHost(host) { return this.on ? this.tunnels.matchHost(host) : null; }
+  // the relay agent's question before Caddy fetches a certificate for a name on a domain added by hand
+  manualAsk(host) {
+    const port = this.on ? this.domains.manualAsk(host, (h) => this.tunnels.matchHost(h)) : null;
+    return port !== null && !!this.tunnels.get(port)?.enabled;
+  }
 
   status() {
     const t = this.tunnels.list();

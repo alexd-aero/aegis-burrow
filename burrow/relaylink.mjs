@@ -280,6 +280,15 @@ export class RelayLink {
     if (this.agent?.zones) this.agent.zones = this.agent.zones.filter((z) => z.suffix !== suffix);
     return r;
   }
+  // the domains on other DNS providers (agent 1.8+), in full: Caddy fetches their certificates
+  // per name, asking first -> {manual, ask: "ours" | "theirs <url>" | null}
+  async manualZones(suffixes) {
+    if (this.link.state !== "up") throw new Error(`the link to ${this.state.vps?.host || "your VPS"} isn't up`);
+    if (!this.can("manual")) throw new Error(`the agent on ${this.state.vps.host} is ${this.agent?.version || "too old"}: it needs ${AGENT_VERSION} for domains on other DNS providers`);
+    const r = await this.control("POST", "/zones/manual", { suffixes });
+    this.agent = { ...(this.agent || {}), manual: r.manual, ask: r.ask };
+    return r;
+  }
   // the other ports the agent answers on, for tunnels on a port of an address: -> {ports: {8080: {state, error}}}
   async syncPorts(ports) {
     const r = await this.control("POST", "/ports", { ports });
@@ -351,7 +360,7 @@ export class RelayLink {
   view() {
     const S = this.state;
     return { configured: this.configured(), vps: S.vps, installed: S.installed, link: this.link,
-             agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, zones: this.agent.zones || null, features: this.agent.features || [],
+             agent: this.agent ? { version: this.agent.version, mode: this.agent.mode, cert: this.agent.cert, zones: this.agent.zones || null, manual: this.agent.manual || null, ask: this.agent.ask || null, features: this.agent.features || [],
                                    stats: this.agent.stats, at: this.agent.at, outdated: this.outdated() } : null,
              pending: S.token ? { host: S.token.host, port: S.token.port, expires: S.token.exp } : null, agentVersion: AGENT_VERSION,
              checked: this.checked, machine: this.machine(), clock: this.clock ? { ...this.clock, used: this.skew } : null };

@@ -64,6 +64,16 @@
 // over the signed control channel one by one, each bound to its signature by
 // its sha256, and a commit swaps the new copy in at once.
 //
+// Manual domains (agent 1.8+): a domain whose DNS isn't on Cloudflare has no
+// wildcard certificate from home (that needs a DNS API). POST /zones/manual (signed)
+// says which zones those are; Caddy then gets a site for each with on-demand TLS, a
+// certificate per name fetched the first time someone opens it. Before Caddy asks
+// Let's Encrypt it asks first: an `ask` on loopback here, which only says yes after
+// a signed question home (is this name one of your tunnels?). The ask is put in the
+// Caddyfile's global options only when there is none yet; one that is already there
+// (Caddy takes just one) is left alone and reported in /status, for you to decide.
+// Agent 1.8+ needs Caddy for these; a relay that does TLS itself refuses them.
+//
 // One file, no dependencies, Node 18+. Config: /etc/aegis-relay/config.json.
 // Installed by the one-line command your Aegis shows (Settings → Domain).
 
@@ -76,8 +86,8 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSy
 import { execFile, execFileSync } from "node:child_process";
 import { join, dirname, sep, extname } from "node:path";
 
-export const VERSION = "1.7.0";
-export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock", "ports"];
+export const VERSION = "1.8.0";
+export const FEATURES = ["zones", "update", "edge", "fleet", "standby", "clock", "ports", "manual"];
 export const STANDBY_LIMITS = { files: 2000, bytes: 50 * 1024 * 1024 };
 const SUFFIX_RE = /^(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.[a-z]{2,63}$/;
 const CONFIG = process.env.AEGIS_RELAY_CONFIG || "/etc/aegis-relay/config.json";
@@ -200,14 +210,20 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   let extra = [];
   try { extra = JSON.parse(readFileSync(zonesFile, "utf8")).filter((z) => SUFFIX_RE.test(z) && z !== suffix); } catch { /* none yet */ }
   const zones = () => [suffix, ...extra];
+  // manual domains (POST /zones/manual): served like the others, certificates per name by Caddy
+  const manualFile = cfg.manualFile || join(dirname(zonesFile), "manual.json");
+  let manual = [];
+  try { manual = JSON.parse(readFileSync(manualFile, "utf8")).filter((z) => SUFFIX_RE.test(z) && z !== suffix && !extra.includes(z)); } catch { /* none yet */ }
+  const saveManual = () => { mkdirSync(dirname(manualFile), { recursive: true }); writeFileSync(manualFile + ".tmp", JSON.stringify(manual)); renameSync(manualFile + ".tmp", manualFile); };
   const filesOf = (z) => z === suffix ? { crt: certFile, key: keyFile } : { crt: join(cfg.certDir, `z${z}.crt`), key: join(cfg.certDir, `z${z}.key`) };
   const saveZones = () => { mkdirSync(dirname(zonesFile), { recursive: true }); writeFileSync(zonesFile + ".tmp", JSON.stringify(extra)); renameSync(zonesFile + ".tmp", zonesFile); };
   const zoneOf = (host) => {
     host = String(host || "").toLowerCase().replace(/:\d+$/, "");
     let best = null;
-    for (const z of zones()) if (host.endsWith(z) && host.length > z.length && !host.slice(0, -z.length).includes(".") && (!best || z.length > best.length)) best = z;
+    for (const z of [...zones(), ...manual]) if (host.endsWith(z) && host.length > z.length && !host.slice(0, -z.length).includes(".") && (!best || z.length > best.length)) best = z;
     return best;
   };
+  const manualZoneOf = (host) => { const z = zoneOf(host); return z && manual.includes(z) ? z : null; };
   const ours = (host) => (zoneOf(host) ? String(host).toLowerCase().replace(/:\d+$/, "") : null);
 
   // the visitor's address: Caddy in front says it in x-aegis-client (only believed from this machine)
@@ -344,6 +360,8 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   // the name, with the port when it came in on one of the other ports (the listener's, not what Host says)
   const hostFrom = (req) => { const h = ours(req.headers.host); return h && req.aegisPort ? `${h}:${req.aegisPort}` : h; };
   function onRequest(req, res) {
+    if (req.url.startsWith("/__aegis_ask?") && cfg.mode === "caddy" && !req.aegisPort && !ours(req.headers.host)
+        && /^(127\.|::1$)/.test(String(req.socket.remoteAddress || "").replace(/^::ffff:/, ""))) return answerAsk(req, res);
     const host = hostFrom(req), ip = visitor(req);
     if (!host || !ip) { stats.refused++; res.writeHead(421, { "Content-Type": "text/plain" }); return res.end("Misdirected request"); }
     const stop = edgeStop(req, host, ip);
@@ -410,6 +428,30 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     });
     up.on("response", (upRes) => { socket.end(`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}\r\n\r\n`); });
     up.on("error", () => { stats.upstreamErrors++; socket.destroy(); });
+    up.end();
+  }
+
+  // Caddy's question before it fetches a certificate for a name on a manual domain:
+  // yes only when home says that name is one of its tunnels (a signed question, the
+  // answer kept a minute; home unreachable means no, and Caddy asks again later)
+  const askCache = new Map();
+  function answerAsk(req, res) {
+    const name = String(new URL(req.url, "http://x").searchParams.get("domain") || "").toLowerCase().replace(/\.$/, "");
+    const done = (ok) => { res.writeHead(ok ? 200 : 404, { "Content-Type": "text/plain" }); res.end(ok ? "ok" : "no"); };
+    if (!manualZoneOf(name)) return done(false);
+    const hit = askCache.get(name);
+    if (hit && hit.until > Date.now()) return done(hit.ok);
+    const url = `/__aegis-relay/ask?domain=${encodeURIComponent(name)}`;
+    const up = httpRequest({ host: "127.0.0.1", port: cfg.upstreamPort, method: "GET", path: url, timeout: 8000,
+                             headers: { host: "ask", "x-aegis-relay-ip": "0.0.0.0", "x-aegis-relay": sign(key, { host: "ask", ip: "0.0.0.0", method: "GET", url }) } }, (r) => {
+      r.resume();
+      const ok = r.statusCode === 200;
+      askCache.set(name, { ok, until: Date.now() + (ok ? 60e3 : 15e3) });
+      if (askCache.size > 2000) askCache.clear();
+      done(ok);
+    });
+    up.on("timeout", () => up.destroy(new Error("timeout")));
+    up.on("error", () => done(false));
     up.end();
   }
 
@@ -497,12 +539,12 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
   // exchange first. HTTP/2 only: Caddy offers HTTP/3 (QUIC, over UDP) to every site,
   // and through the relay it crawled where UDP is throttled (a 3.8 MB file took 23 s,
   // ~1 s over HTTP/2), so these names tell browsers to forget it (Alt-Svc: clear).
+  // Manual domains (no certificate from home): on_demand, a certificate per name, asked for first.
   function caddySite() {
     const have = zones().filter((z) => z === suffix || existsSync(filesOf(z).crt));
-    return `# Aegis Relay: ${have.map((z) => "*" + z).join(", ")} -> the Aegis at home, through the relay agent (written by it; don't edit)
-` + have.map((z) => `*${z} {
-	tls ${filesOf(z).crt} ${filesOf(z).key} {
-		protocols tls1.3
+    const block = (z, tls) => `*${z} {
+	tls ${tls} {
+${tls === "" ? "\t\ton_demand\n" : ""}		protocols tls1.3
 		curves x25519mlkem768 x25519 secp256r1
 	}
 	header -Server
@@ -511,7 +553,34 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
 		header_up X-Aegis-Client {remote_host}
 	}
 }
-`).join("\n");
+`.replace("tls  {", "tls {");
+    return `# Aegis Relay: ${[...have, ...manual].map((z) => "*" + z).join(", ")} -> the Aegis at home, through the relay agent (written by it; don't edit)
+` + [...have.map((z) => block(z, `${filesOf(z).crt} ${filesOf(z).key}`)), ...manual.map((z) => block(z, ""))].join("\n");
+  }
+  // The global on_demand_tls ask, for the manual domains: added to the Caddyfile only when it
+  // has none (Caddy takes one), taken out again with the last manual domain. Not ours: left alone.
+  const ASK = `http://127.0.0.1:${cfg.httpPort}/__aegis_ask`;
+  const ASK_MARK = "# aegis relay: asks before a certificate for a manual domain (written by it)";
+  // whose ask the Caddyfile has: "ours", "theirs <url>", or null (none)
+  const askOf = (text) => !/^\s*on_demand_tls\b/m.test(text) ? null : text.includes(ASK) ? "ours"
+    : `theirs ${(/on_demand_tls\s*\{[^}]*?\bask\s+(\S+)/.exec(text) || [])[1] || "(a permission module)"}`;
+  let askState = null;               // askOf() while there are manual domains; "missing" until it's written
+  if (cfg.mode === "caddy" && manual.length) { try { askState = askOf(readFileSync(cfg.caddyfile || "/etc/caddy/Caddyfile", "utf8")) || "missing"; } catch { /* no Caddyfile here */ } }
+  function withAsk(text) {
+    if (!manual.length) {
+      askState = null;
+      if (!text.includes(ASK_MARK)) return text;
+      return text.replace(new RegExp(`\\t${ASK_MARK.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\n\\ton_demand_tls \\{\\n\\t\\task [^\\n]*\\n\\t\\}\\n`), "").replace(/^\{\n\}\n\n/, "");
+    }
+    const has = askOf(text);
+    if (has) { askState = has; return text; }
+    askState = "ours";
+    const lines = `\t${ASK_MARK}\n\ton_demand_tls {\n\t\task ${ASK}\n\t}\n`;
+    const first = text.split("\n").findIndex((l) => l.trim() && !l.trim().startsWith("#"));
+    if (first >= 0 && text.split("\n")[first].trim() === "{") {
+      const at = text.split("\n"); at.splice(first + 1, 0, lines.replace(/\n$/, "")); return at.join("\n");
+    }
+    return `{\n${lines}}\n\n${text}`;
   }
   // Caddy: our site file, imported by the Caddyfile (a glob over its folder, or a line of
   // its own; an older hand-made site's import line becomes ours), checked with
@@ -531,6 +600,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
         if (cfg.replaces) text = text.split("\n").map((l) => (l.trim() === `import ${cfg.replaces}` ? l.replace(cfg.replaces, site) : l)).join("\n");
         const dir = dirname(site), covered = text.includes(site) || new RegExp(`import\\s+${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}/\\*`).test(text);
         if (!covered) text = text.replace(/\n*$/, `\n\nimport ${site}\n`);
+        text = withAsk(text);
         if (text !== before) { keep(cf); writeFileSync(cf, text); }
       }
       if (cfg.replaces && existsSync(cfg.replaces)) {
@@ -715,7 +785,7 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
     if (!verify(key, req.headers["x-aegis-relay"], { host: "agent", ip: "-", method: req.method, url: req.url })) return reply(401, { error: "not signed by your Aegis", now: Date.now() });
     if (req.method === "GET" && req.url === "/status") {
       return reply(200, { version: VERSION, features: FEATURES, mode: cfg.mode, suffix, now: Date.now(), cert: certInfo(suffix),
-                          zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), stats,
+                          zones: zones().map((z) => ({ suffix: z, cert: certInfo(z) })), manual, ask: askState, stats,
                           edge: { on: edge.on, epoch: edge.epoch, hosts: edge.hosts.size, cleared: edge.cleared.size, banned: edge.banned.size },
                           standby: { sites: sites.size }, ports: portsView() });
     }
@@ -755,6 +825,23 @@ export function startAgent(cfg, { log = (...a) => console.log(new Date().toISOSt
       return body(64 * 1024, ({ ports }) => {
         if (!Array.isArray(ports) || ports.length > 64) return reply(400, { error: "ports is a list of up to 64" });
         setPorts(ports).then((v) => reply(200, { ok: true, ports: v }), (e) => reply(500, { error: e.message }));
+      });
+    }
+    // the manual domains, in full ({suffixes}): Caddy gets their sites (and the ask), or nothing changes
+    if (req.method === "POST" && req.url === "/zones/manual") {
+      return body(16 * 1024, ({ suffixes }) => {
+        if (!Array.isArray(suffixes) || suffixes.length > 100) return reply(400, { error: "suffixes is a list of up to 100" });
+        const next = [...new Set(suffixes.map((z) => String(z).toLowerCase()))];
+        const bad = next.find((z) => !SUFFIX_RE.test(z) || z === suffix || extra.includes(z));
+        if (bad) return reply(400, { error: `${bad} can't be a manual domain here` });
+        if (next.length && cfg.mode !== "caddy") return reply(400, { error: "this relay answers TLS itself (no Caddy); domains on other DNS providers need Caddy on it" });
+        const was = manual;
+        manual = next; saveManual();
+        try { if (cfg.mode === "caddy") caddyInstall(); }
+        catch (e) { manual = was; saveManual(); return reply(500, { error: e.message }); }
+        askCache.clear();
+        log(manual.length ? `manual domains: ${manual.map((z) => "*" + z).join(" ")}` : "no manual domains");
+        reply(200, { ok: true, manual, ask: askState });
       });
     }
     if (req.method === "POST" && req.url === "/zones/remove") {

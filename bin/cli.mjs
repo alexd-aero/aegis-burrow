@@ -292,13 +292,15 @@ async function addonHere(op, id, ...rest) {
 }
 
 // aegis domains: other domains, the way Settings → Domain adds them
-//   list | add ZONE [--cert FILE | --token-stdin] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]
-//   set ZONE [--tunnels …] [--route …] [--label NAME] | remove ZONE | tunnel PORT [ZONE…]
+//   list | add ZONE [--cert FILE | --token-stdin | --manual] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]
+//   set ZONE [--tunnels …] [--route …] [--label NAME] | check ZONE | remove ZONE | tunnel PORT [ZONE…]
+//   --manual: DNS at another provider; Aegis shows the records to make, `check` finds them
 async function domains(op = "list", ...rest) {
   const flags = {}, pos = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--token-stdin") flags.tokenStdin = true;
+    else if (a === "--manual") flags.manual = true;
     else if (/^--(cert|tunnels|route|label)$/.test(a)) flags[a.slice(2)] = rest[++i] ?? "";
     else if (a === "--wildcard" || a === "--drop-sub") (flags[a === "--wildcard" ? "wild" : "drop"] ||= []).push(String(rest[++i] ?? "").toLowerCase());
     else if (a.startsWith("--")) { out(red(`  ✗ unknown option ${a}`)); return 2; }
@@ -311,6 +313,10 @@ async function domains(op = "list", ...rest) {
       out(`  ${bold(d.zone)}  tunnels: ${d.tunnels}${d.tunnels === "none" ? "" : ` through ${d.route}`}${d.dashboard ? `, dashboard ${d.dashboard}` : ""}`);
       for (const x of d.subs || []) out(dim(`    subdomain: ${x.host}${x.wildcard ? "" : ` → port ${x.port}`}`));
       if (d.cert) out(dim(`    certificate: ${d.cert.error ? red(d.cert.error) : d.cert.issuing ? "being issued" : d.cert.notAfter ? "until " + new Date(d.cert.notAfter).toISOString().slice(0, 10) : "none yet"}`));
+      if (d.manual) {
+        out(d.manual.live ? green("    DNS by hand: live (a certificate per name, on demand)") : yellow(`    DNS by hand: make these records at your DNS provider, then: aegis domains check ${d.zone}`));
+        for (const r of d.manual.records) out(`    ${r.ok ? green("✓") : r.error ? red("✗") : dim("·")} ${r.type.padEnd(4)} ${r.name.padEnd(30)} ${r.value || "(your VPS's address)"}${r.error ? dim("  " + r.error) : ""}`);
+      }
     }
     if (v.pending) out(yellow(`  ready to add: ${v.pending.zone} (with ${v.pending.via})`));
   };
@@ -318,7 +324,8 @@ async function domains(op = "list", ...rest) {
     if (op === "list") { show(await call("GET", "/domains", null, 20000)); return 0; }
     if (op === "add") {
       const zone = String(pos[0] || "").toLowerCase();
-      if (!zone) { out(red("  ✗ aegis domains add ZONE [--cert FILE | --token-stdin] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]")); return 2; }
+      if (!zone) { out(red("  ✗ aegis domains add ZONE [--cert FILE | --token-stdin | --manual] [--tunnels all|picked|none] [--route vps|cloudflare] [--label NAME]")); return 2; }
+      if (flags.manual) { show(await call("POST", "/domains", JSON.stringify({ manual: true, zone, ...spec() }), 60000)); return 0; }
       let v;
       if (flags.cert) {
         const { readFileSync } = await import("node:fs");
@@ -349,6 +356,7 @@ async function domains(op = "list", ...rest) {
       }
       show(await call("PATCH", `/domains/${encodeURIComponent(zone)}`, JSON.stringify(body), 600000)); return 0;
     }
+    if (op === "check") { show(await call("POST", `/domains/${encodeURIComponent(String(pos[0] || "").toLowerCase())}/check`, "{}", 120000)); return 0; }
     if (op === "remove") { show(await call("DELETE", `/domains/${encodeURIComponent(pos[0] || "")}`, null, 120000)); return 0; }
     if (op === "tunnel") {
       const port = Number(pos[0]);
@@ -361,7 +369,7 @@ async function domains(op = "list", ...rest) {
       return 0;
     }
   } catch (e) { out(red(`  ✗ ${e.message}`)); return e.code === "DOWN" ? 3 : 1; }
-  out(red("  ✗ aegis domains list | add | set | remove | tunnel"));
+  out(red("  ✗ aegis domains list | add | set | check | remove | tunnel"));
   return 2;
 }
 

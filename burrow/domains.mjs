@@ -40,14 +40,26 @@
 // A tunnel keeps its access (login, password, public) on every name, and signs
 // in through the main dashboard, so one sign-in covers every domain.
 //
+// Manual domains (DNS anywhere, not on Cloudflare): Aegis can't touch their
+// records or prove them to Let's Encrypt by DNS, so they go through your VPS only,
+// with no dashboard there. Aegis shows the records to make at your DNS provider
+// (a plain A or AAAA to the VPS for each name), checks them on public resolvers,
+// and only then hands the zones to the agent (agent 1.8+), whose Caddy gets a
+// certificate per name the first time someone opens it (on-demand TLS, asking
+// home first: only names that are tunnels here get one). Nothing to renew by hand.
+// Those per-name certificates show up in public Certificate Transparency logs.
+//
 // settings "domains": [{zone: {id, name}, label, tunnels, route, subs, cert,
-//                       tunnelId?, tunnelName?, creds?, linked}]
+//                       tunnelId?, tunnelName?, creds?, linked}
+//                      | {zone: {id: null, name}, manual: true, label: "", tunnels, route: "vps", subs, linked,
+//                         live?, dns?: {at, ip, records: [{name, type, value, ok, got, error?}]}}]
 // settings "cfTokens": [{token, added}]   API tokens you pasted
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isIP } from "node:net";
+import { Resolver } from "node:dns/promises";
 import { randomBytes } from "node:crypto";
 import { LOGIN_URL_RE, LABEL_RE, Supervised, decodeCert, cfApi as realCfApi, run as realRun } from "./cloudflare.mjs";
 import { Acme, CertFiles, LETSENCRYPT } from "./acme.mjs";
@@ -62,6 +74,15 @@ const MAX_SUBS = 20;
 const RENEW_BEFORE_MS = 30 * 864e5;
 const RENEW_EVERY_MS = 6 * 3600e3;
 const RETRY_MS = 3600e3;
+const RESOLVERS = ["1.1.1.1", "8.8.8.8"];
+
+// One name's A or AAAA records as a public resolver sees them ([] when there are none)
+async function realResolve(name, type, server) {
+  const r = new Resolver({ timeout: 4000, tries: 2 });
+  r.setServers([server]);
+  try { return type === "AAAA" ? await r.resolve6(name) : await r.resolve4(name); }
+  catch (e) { if (["ENOTFOUND", "ENODATA"].includes(e.code)) return []; throw e; }
+}
 
 // a cert.pem in cloudflared's format, for credentials that didn't come from cloudflared
 export const makeCert = ({ zoneId, accountId, token }) =>
@@ -73,7 +94,7 @@ export class Domains {
   // onChange: (list) => void, after anything that changes which names answer
   // cfApi / run / acme / txtVisible: Cloudflare, cloudflared, Let's Encrypt, DNS checks (replaceable in tests)
   constructor({ settings, dataDir, origin, log, bin, mainZone, mainCert = () => null, onChange,
-                cfApi = realCfApi, run = realRun, acme, txtVisible = realTxtVisible, autostart = true }) {
+                cfApi = realCfApi, run = realRun, acme, txtVisible = realTxtVisible, resolve = realResolve, autostart = true }) {
     this.settings = settings;
     this.dir = join(dataDir, "cf", "domains");
     this.home = join(this.dir, "home");
@@ -86,6 +107,7 @@ export class Domains {
     this.cfApi = cfApi;
     this.run = run;
     this.txtVisible = txtVisible;
+    this.resolve = resolve;
     this.files = new CertFiles(join(dataDir, "certs"));
     this.acme = acme || new Acme({ dir: join(dataDir, "certs"), directory: process.env.AEGIS_ACME_DIRECTORY || LETSENCRYPT, log: this.log });
     this.relay = null;                 // useRelay(): your VPS, through Aegis Relay
@@ -102,12 +124,15 @@ export class Domains {
     }
   }
 
-  // relay: {configured(), host(), ip(): Promise<ip>, ready(): Promise<{ok, error}>, push(cur, suffix), remove(suffix)}
+  // relay: {configured(), host(), ip(): Promise<ip>, ready(): Promise<{ok, error}>, push(cur, suffix), remove(suffix),
+  //         manual(suffixes): Promise<{ask}>, ask(): "ours" | "theirs <url>" | null}
   useRelay(relay) { this.relay = relay; }
 
-  list() { return (this.settings.get("domains") || []).filter((d) => d?.zone?.name && d.cert); }
+  list() { return (this.settings.get("domains") || []).filter((d) => d?.zone?.name && (d.cert || d.manual)); }
+  // the ones whose names answer: a manual domain only once its records checked out
+  serving() { return this.list().filter((d) => !d.manual || d.live); }
   get(zone) { return this.list().find((d) => d.zone.name === String(zone || "").toLowerCase()) || null; }
-  save(list) { this.settings.set({ domains: list }); this.onChange?.(list); }
+  save(list) { this.settings.set({ domains: list }); this.onChange?.(this.serving()); }
   pendingPath() { return join(this.dir, "pending.pem"); }
   pending() { return existsSync(this.pendingPath()) ? this.settings.get("domainsPending") || null : null; }
   target(d) { return d.tunnelId ? `${d.tunnelId}.cfargotunnel.com` : null; }
@@ -118,17 +143,33 @@ export class Domains {
   // something on the domain is for tunnels: its wildcard, or a subdomain
   hasTunnels(d) { return d.tunnels !== "none" || this.subsOf(d).length > 0; }
   onVps(d) { return d.route === "vps" && this.hasTunnels(d); }
-  needsTunnel(d) { return !!d.label || (this.hasTunnels(d) && d.route !== "vps"); }
+  needsTunnel(d) { return !d.manual && (!!d.label || (this.hasTunnels(d) && d.route !== "vps")); }
   // The certificates a domain needs on your VPS: *.<zone> (its wildcard, and every
   // one-level name: the single subdomains), and *.<name>.<zone> for each wildcard subdomain.
   certsOf(d) {
-    if (!this.onVps(d)) return [];
+    if (!this.onVps(d) || d.manual) return [];
     const out = [];
     if (d.tunnels !== "none" || this.subsOf(d).some((x) => !x.wildcard)) out.push({ base: this.certBase(d), name: `*.${d.zone.name}`, suffix: this.suffixOf(d) });
     for (const x of this.subsOf(d)) if (x.wildcard) out.push({ base: `zone-${x.name}.${d.zone.name}`, name: `*.${x.name}.${d.zone.name}`, suffix: `.${x.name}.${d.zone.name}` });
     return out;
   }
   wantsRelay() { return this.list().some((d) => this.onVps(d)); }
+  // A manual domain's zones on the agent: the same suffixes certsOf would give it
+  suffixesOf(d) {
+    if (!this.onVps(d)) return [];
+    const out = [];
+    if (d.tunnels !== "none" || this.subsOf(d).some((x) => !x.wildcard)) out.push(this.suffixOf(d));
+    for (const x of this.subsOf(d)) if (x.wildcard) out.push(`.${x.name}.${d.zone.name}`);
+    return out;
+  }
+  // What to make at the DNS provider for a manual domain: one record per name, to the VPS
+  dnsRecords(d, ip) {
+    const type = isIP(ip) === 6 ? "AAAA" : "A", names = [];
+    if (d.tunnels !== "none") names.push(`*.${d.zone.name}`);
+    for (const x of this.subsOf(d)) names.push(x.wildcard ? `*.${x.name}.${d.zone.name}` : `${x.name}.${d.zone.name}`);
+    return names.map((name) => ({ type, name, value: ip || null, ttl: 300 }));
+  }
+  relayIp() { const h = this.relay?.host?.(); return isIP(h) ? h : this.lastIp || null; }
 
   // ------------------------------------------------------------- names
   isDashboard(host) {
@@ -138,6 +179,7 @@ export class Domains {
   // Names on a zone that have a record of their own (not ours): they never reach the wildcard.
   takenOn(zone) { return this.taken.get(zone)?.names || new Set(); }
   async refreshTaken(d, force = false) {
+    if (d.manual) return;                // its records aren't Aegis's to read
     const t = this.taken.get(d.zone.name);
     if (!force && t && Date.now() - t.at < TAKEN_TTL) return;
     this.taken.set(d.zone.name, { at: Date.now(), names: t?.names || new Set() });          // one refresh at a time
@@ -154,11 +196,13 @@ export class Domains {
     return {
       cloudflared: !!this.bin(),
       main: this.mainZone() || null,
-      vps: r?.configured() ? { host: r.host(), outdated: r.outdated?.() || null, version: r.version?.() || null } : null,
+      vps: r?.configured() ? { host: r.host(), outdated: r.outdated?.() || null, version: r.version?.() || null, ask: r.ask?.() || null } : null,
       domains: this.list().map((d) => {
         const c = this.connectors.get(d.zone.name), certs = this.certsOf(d).map((x) => ({ ...x, cur: this.files.read(x.base), st: this.certState.get(x.base) }));
         const ends = certs.map((x) => x.cur?.notAfter || 0), bad = certs.find((x) => x.st?.error);
-        return { zone: d.zone.name, label: d.label || "", dashboard: this.dashboardOf(d), tunnels: d.tunnels, route: d.route || "cloudflare", linked: d.linked,
+        const manual = d.manual ? { live: d.live || null, check: d.dns || null,
+                                    records: this.dnsRecords(d, this.relayIp()).map((x) => ({ ...x, ...((d.dns?.records || []).find((y) => y.name === x.name && y.value === x.value) || {}) })) } : null;
+        return { zone: d.zone.name, label: d.label || "", dashboard: this.dashboardOf(d), tunnels: d.tunnels, route: d.route || "cloudflare", linked: d.linked, manual,
                  example: d.tunnels === "none" ? null : `NAME.${d.zone.name}`,
                  subs: this.subsOf(d).map((x) => ({ ...x, host: x.wildcard ? `*.${x.name}.${d.zone.name}` : `${x.name}.${d.zone.name}`, example: x.wildcard ? `NAME.${x.name}.${d.zone.name}` : null })),
                  cert: certs.length ? { notAfter: ends.every(Boolean) ? Math.min(...ends) : null, issuing: certs.some((x) => x.st?.issuing), error: bad ? bad.st.error : null,
@@ -328,6 +372,7 @@ export class Domains {
   api(d, method, path, body) { const c = decodeCert(d.cert); return this.cfApi(c.token, method, `/zones/${c.zoneId}${path}`, body); }
 
   async add(spec) {
+    if (spec?.manual) return this.addManual(spec);
     const c = Domains.clean(spec);
     const subs = c.subs || [];
     const tunnels = c.tunnels || "all", route = c.route || (this.relay?.configured() ? "vps" : "cloudflare");
@@ -361,6 +406,7 @@ export class Domains {
   async update(zone, patch) {
     const d = this.get(zone);
     if (!d) throw new Error("No such domain.");
+    if (d.manual) return this.updateManual(d, patch);
     const c = Domains.clean({ label: "label" in patch ? patch.label : d.label, tunnels: patch.tunnels ?? d.tunnels, route: patch.route ?? d.route ?? "cloudflare", subs: patch.subs ?? this.subsOf(d) });
     let next = { ...d, label: c.label, tunnels: c.tunnels, route: c.route, subs: c.subs };
     if (!next.subs.length) delete next.subs;
@@ -384,6 +430,13 @@ export class Domains {
   async remove(zone) {
     const d = this.get(zone);
     if (!d) throw new Error("No such domain.");
+    if (d.manual) {
+      const rest = this.list().filter((x) => x.zone.name !== d.zone.name);
+      if (d.live) await this.pushManual(rest).catch((e) => this.log("domains: the VPS kept", d.zone.name, e.message));
+      this.save(rest);
+      this.log("domains: removed", d.zone.name, "(its records at your DNS provider are yours to delete)");
+      return this.view();
+    }
     this.connectors.get(d.zone.name)?.stop();
     this.connectors.delete(d.zone.name);
     try { await this.syncRecords({ ...d, label: "", tunnels: "none", subs: [] }, d); } catch (e) { this.log("domains: could not remove", d.zone.name, "records:", e.message); }
@@ -395,6 +448,80 @@ export class Domains {
     this.save(this.list().filter((x) => x.zone.name !== d.zone.name));
     this.log("domains: removed", d.zone.name);
     return this.view();
+  }
+
+  // ------------------------------------------------------------- manual domains (DNS at any provider)
+  // Added straight away (no access to ask for), live once checkDns finds its records.
+  async addManual(spec) {
+    if (!this.mainZone()) throw new Error("Link the main domain first (above).");
+    const zone = this.cleanZone(spec.zone);
+    if (String(spec.label || "").trim()) throw new Error("A dashboard there needs Cloudflare (a tunnel of the domain's own). Leave its name empty: tunnels only.");
+    if (!this.relay?.configured()) throw new Error("Link your VPS first (Settings → Domain → Your VPS): a domain on another DNS provider sends its tunnels through it.");
+    const c = Domains.clean({ label: "", tunnels: spec.tunnels || "all", route: "vps", subs: spec.subs || [] });
+    const d = { zone: { id: null, name: zone }, manual: true, label: "", tunnels: c.tunnels, route: "vps", ...(c.subs.length ? { subs: c.subs } : {}), linked: Date.now() };
+    this.validate(d);
+    if (!this.hasTunnels(d)) throw new Error("Give it some tunnels: all, the ones you pick, or a subdomain.");
+    try { this.lastIp = await this.relay.ip(); } catch { /* shown as soon as it's known */ }
+    this.save([...this.list(), d]);
+    this.log("domains: added", zone, "by hand (DNS elsewhere), tunnels:", d.tunnels, "through your VPS; waiting for its records");
+    return this.view();
+  }
+  async updateManual(d, patch) {
+    if ("label" in patch && String(patch.label || "").trim()) throw new Error("A dashboard there needs Cloudflare (a tunnel of the domain's own).");
+    if (patch.route && patch.route !== "vps") throw new Error("A domain on another DNS provider goes through your VPS only.");
+    const c = Domains.clean({ label: "", tunnels: patch.tunnels ?? d.tunnels, route: "vps", subs: patch.subs ?? this.subsOf(d) });
+    const next = { ...d, tunnels: c.tunnels, subs: c.subs };
+    if (!next.subs.length) delete next.subs;
+    this.validate(next);
+    if (!this.hasTunnels(next)) throw new Error("Give it some tunnels, or remove the domain.");
+    const list = this.list().map((x) => (x.zone.name === d.zone.name ? next : x));
+    if (next.live) await this.pushManual(list);               // new names answer once their records point at the VPS
+    this.save(list);
+    this.log("domains:", d.zone.name, "now tunnels:", next.tunnels, this.subsOf(next).length ? `subdomains: ${this.subsOf(next).map((x) => (x.wildcard ? `*.${x.name}` : `${x.name}→${x.port}`)).join(" ")}` : "");
+    return this.view();
+  }
+  // Are its records there? Every name asked of public resolvers (a made-up name under each wildcard);
+  // all pointing at the VPS: the zones go to the agent and the domain is live.
+  async checkDns(zone) {
+    const d = this.get(zone);
+    if (!d?.manual) throw new Error("Only a domain added by hand needs its records checked.");
+    if (!this.relay?.configured()) throw new Error("Link your VPS first (Settings → Domain → Your VPS).");
+    const ip = this.lastIp = await this.relay.ip();
+    const records = [];
+    for (const rec of this.dnsRecords(d, ip)) {
+      const probe = rec.name.startsWith("*.") ? `aegis-check-${randomBytes(3).toString("hex")}${rec.name.slice(1)}` : rec.name;
+      const got = new Set();
+      let error = null;
+      for (const server of RESOLVERS) {
+        try { for (const a of await this.resolve(probe, rec.type, server)) got.add(a); }
+        catch (e) { error = `${server} didn't answer (${e.code || e.message})`; }
+      }
+      const ok = got.has(ip) && got.size === 1;
+      records.push({ name: rec.name, type: rec.type, value: ip, ok, got: [...got], ...(ok ? {} : { error: got.size ? (got.has(ip) ? "points at other addresses too" : "points somewhere else") : error || "not there yet" }) });
+    }
+    let next = { ...d, dns: { at: Date.now(), ip, records } };
+    if (records.every((x) => x.ok) && !d.live) {
+      const ok = await this.relay.ready();
+      if (!ok.ok) throw new Error(`The records are right, but your VPS (${this.relay.host()}) isn't reachable: ${ok.error}`);
+      next = { ...next, live: Date.now() };
+      await this.pushManual(this.list().map((x) => (x.zone.name === d.zone.name ? next : x)));
+      this.log("domains:", d.zone.name, "is live: its records point at your VPS");
+    }
+    this.save(this.list().map((x) => (x.zone.name === d.zone.name ? next : x)));
+    return this.view();
+  }
+  // every live manual domain's zones, in full, to the agent
+  async pushManual(list = this.list()) {
+    const suffixes = list.filter((d) => d.manual && d.live).flatMap((d) => this.suffixesOf(d));
+    const r = await this.relay.manual(suffixes);
+    if (r?.ask && r.ask !== "ours") this.log(`domains: your VPS's Caddy already asks ${r.ask.replace(/^theirs /, "")} before on-demand certificates; it has to say yes to these names too`);
+    return r;
+  }
+  // a host on a live manual domain that is one of the tunnels here (the agent's ask, through the relay)
+  manualAsk(name, matchHost) {
+    name = String(name || "").toLowerCase().replace(/\.$/, "");
+    const d = this.list().find((x) => x.manual && x.live && this.suffixesOf(x).some((z) => name.endsWith(z) && !name.slice(0, -z.length).includes(".")));
+    return d ? matchHost(name) : null;
   }
 
   // ------------------------------------------------------------- the domain's Cloudflare tunnel (only when needed)
@@ -469,6 +596,9 @@ export class Domains {
     for (const d of this.list()) for (const c of this.certsOf(d)) {
       try { await this.relay?.push(await this.ensureCert(d, c), c.suffix); }
       catch (e) { this.log("domains: couldn't put the certificate for", c.name, "on the VPS:", e.message); }
+    }
+    if (this.relay?.manual && this.list().some((d) => d.manual && d.live)) {
+      try { await this.pushManual(); } catch (e) { this.log("domains: couldn't give the VPS the domains on other DNS providers:", e.message); }
     }
   }
   renewAll() { return this.pushAll(); }

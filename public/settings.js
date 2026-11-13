@@ -326,7 +326,9 @@ function domainBody() {
 // its name; access (whatever Aegis already holds is tried first; else a
 // Cloudflare sign-in or an API token); then what answers there and, for the
 // tunnels, the way in: your VPS (Aegis puts a certificate for *.<zone> on it,
-// no command) or Cloudflare's proxy.
+// no command) or Cloudflare's proxy. A domain whose DNS is somewhere else is
+// added by hand: Aegis shows the records to make there and checks them; its
+// tunnels go through your VPS, which gets a certificate per name on demand.
 const OD_MODES = [["all", "All tunnels"], ["picked", "Picked ones"], ["none", "None"]];
 const OD_ROUTES = [["vps", "Your VPS"], ["cloudflare", "Cloudflare"]];
 const odSeg = (act, opts, cur, zone) => `<div class="seg od-seg" role="group">${opts.map(([v, t]) =>
@@ -341,20 +343,37 @@ function odVpsNote(o) {
   if (o.vps.outdated === "reinstall") return `<p class="note-warn small">The agent on ${h(o.vps.host)} is ${h(o.vps.version || "old")}. It needs one more run of the install command (Your VPS, above) to carry more domains; after that it updates itself.</p>`;
   return "";
 }
+// A manual domain (DNS elsewhere): the records to make at its DNS provider, each one's
+// last check, and the Check button. Live once every record points at the VPS.
+function odRecords(x, o) {
+  const m = x.manual, recs = m.records || [];
+  const ask = o.vps?.ask && o.vps.ask.startsWith("theirs ") ? `<p class="note-warn small">Caddy on ${h(o.vps.host)} already asks <span class="mono">${h(o.vps.ask.slice(7))}</span> before an on-demand certificate. It must say yes to names under ${h(x.zone)} too, or point it at <span class="mono">http://127.0.0.1:18450/__aegis_ask</span>.</p>` : "";
+  return `<span class="od-t">
+      <p class="faint small">${m.live ? "These records are in place. Keep them as they are." : `Make these at ${h(x.zone)}'s DNS provider, then check. Nothing answers on it until they point at your VPS.`}</p>
+      <ul class="od-recs">${recs.map((r) => `<li class="${r.ok ? "ok" : r.error ? "bad" : ""}">
+        <span class="od-rec-k mono">${h(r.type)}</span><b class="mono">${h(r.name)}</b><span class="mono">${h(r.value || "your VPS's address")}</span><span class="faint small">TTL ${r.ttl}s (or auto)</span>
+        <span class="small">${r.ok ? '<i class="dot ok"></i> found' : r.error ? `<span class="err-msg">${h(r.error)}${r.got?.length ? `: ${h(r.got.join(", "))}` : ""}</span>` : '<span class="faint">not checked</span>'}</span></li>`).join("")}</ul>
+      <span class="row"><button type="button" class="btn sm${m.live ? " ghost" : " primary"}" data-act="od-dns-check" data-zone="${h(x.zone)}">${m.live ? "Check again" : "Check the records"}</button>
+        ${m.check ? `<span class="faint small">checked ${h(ago(m.check.at))} on 1.1.1.1 and 8.8.8.8</span>` : ""}</span>
+      ${ask}</span>`;
+}
 function odRow(x, o) {
-  const c = x.connector, ren = S.odRename === x.zone;
+  const c = x.connector, ren = S.odRename === x.zone, m = x.manual;
   const certLine = x.cert ? (x.cert.issuing ? '<span class="faint small"><i class="spin"></i> getting the certificate…</span>'
     : x.cert.error ? `<span class="err-msg small">certificate: ${h(x.cert.error)}</span>`
     : x.cert.notAfter ? `<span class="pill ok"><i class="dot ok"></i>certificate on ${h(o.vps?.host || "the VPS")} · until ${h(new Date(x.cert.notAfter).toLocaleDateString())}</span>` : "") : "";
   return `<div class="od-row" id="domain-${h(x.zone)}">
     <div class="od-top"><b class="mono">${h(x.zone)}</b>
       ${!c ? "" : c.running ? `<span class="pill ok"><i class="dot ok"></i>dashboard tunnel up · since ${h(ago(c.since))}</span>` : '<span class="pill err"><i class="dot err"></i>connector not running</span>'}
+      ${!m ? "" : m.live ? `<span class="pill ok"><i class="dot ok"></i>DNS by hand · live</span>` : '<span class="pill warn"><i class="dot warn"></i>DNS by hand · waiting for its records</span>'}
       <button class="btn ghost sm" data-act="od-remove" data-zone="${h(x.zone)}">Remove</button></div>
-    <div class="kv-row"><span>Dashboard</span>${ren ? `<form class="od-ren" data-zone="${h(x.zone)}"><div class="addr"><input class="input mono sm" id="odRename" value="${h(x.label)}" maxlength="40" placeholder="none" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(x.zone)}</span></div><button class="btn sm primary">Save</button><button type="button" class="btn sm ghost" data-act="od-ren-cancel">Cancel</button></form>`
+    ${m ? `<div class="kv-row"><span>Records</span>${odRecords(x, o)}</div>` : ""}
+    <div class="kv-row"><span>Dashboard</span>${m ? '<span class="faint small">none (a dashboard here needs the domain on Cloudflare)</span>' : ren ? `<form class="od-ren" data-zone="${h(x.zone)}"><div class="addr"><input class="input mono sm" id="odRename" value="${h(x.label)}" maxlength="40" placeholder="none" spellcheck="false" autocapitalize="none"><span class="mono zone">.${h(x.zone)}</span></div><button class="btn sm primary">Save</button><button type="button" class="btn sm ghost" data-act="od-ren-cancel">Cancel</button></form>`
       : `${x.dashboard ? `<a class="mono" href="https://${h(x.dashboard)}" target="_blank" rel="noopener">https://${h(x.dashboard)}</a>` : '<span class="faint">none</span>'}<button class="btn ghost sm" data-act="od-ren" data-zone="${h(x.zone)}">${x.dashboard ? "Change" : "Add one"}</button>`}</div>
     <div class="kv-row"><span>Tunnels</span><span class="od-t">${odSeg("od-tunnels", OD_MODES, x.tunnels, x.zone)}<span class="faint small">${odHint(x.tunnels, x.zone)}</span></span></div>
     <div class="kv-row"><span>Subdomains</span>${odSubs(x, o)}</div>
-    ${x.tunnels === "none" && !(x.subs || []).length ? "" : `<div class="kv-row"><span>Way in</span><span class="od-t">${odSeg("od-route", OD_ROUTES, x.route, x.zone)}<span class="faint small">${odRouteHint(x.route, x.zone, o.vps, x.cert?.names)}</span>${certLine}</span></div>`}
+    ${m ? `<div class="kv-row"><span>Way in</span><span class="od-t"><span class="faint small">Straight to <span class="mono">${h(o.vps?.host || "your VPS")}</span>. Its Caddy gets a free certificate for each tunnel name the first time it's opened, and renews it. Those names show up in public certificate logs.</span></span></div>`
+      : x.tunnels === "none" && !(x.subs || []).length ? "" : `<div class="kv-row"><span>Way in</span><span class="od-t">${odSeg("od-route", OD_ROUTES, x.route, x.zone)}<span class="faint small">${odRouteHint(x.route, x.zone, o.vps, x.cert?.names)}</span>${certLine}</span></div>`}
     ${c && c.log && c.log.length && !c.running ? `<details class="adv"><summary>Connector log</summary><pre class="log">${h(c.log.join("\n"))}</pre></details>` : ""}
   </div>`;
 }
@@ -381,7 +400,7 @@ function odSubs(x, o) {
         <div class="od-sub-line"><div class="addr"><span class="mono zone od-sub-star" ${kind === "wild" ? "" : "hidden"}>*.</span><input class="input mono sm" id="odSubName" value="${h(S.odSubName || "")}" maxlength="40" placeholder="${kind === "wild" ? "apps" : "blog"}" spellcheck="false" autocapitalize="none" aria-label="Subdomain"><span class="mono zone">.${h(x.zone)}</span></div>
           ${odSeg("od-sub-kind", [["wild", "Wildcard"], ["one", "One tunnel"]], kind, x.zone)}</div>
         ${kind === "one" ? (opts ? `<label class="od-sub-line"><span class="faint small">goes to</span><select class="input sm" id="odSubPort">${opts}</select></label>` : '<p class="faint small">No tunnels yet: add one on the Burrow page first.</p>') : ""}
-        <p class="faint small">${kind === "wild" ? `Every tunnel ${x.tunnels === "picked" ? "you pick for this domain " : ""}also at <span class="mono">NAME.${h(S.odSubName || "apps")}.${h(x.zone)}</span>${x.route === "vps" ? "; Aegis gets its certificate and puts it on your VPS" : ""}.` : `Just that tunnel at <span class="mono">${h(S.odSubName || "blog")}.${h(x.zone)}</span>, a record of its own.`}</p>
+        <p class="faint small">${kind === "wild" ? `Every tunnel ${x.tunnels === "picked" ? "you pick for this domain " : ""}also at <span class="mono">NAME.${h(S.odSubName || "apps")}.${h(x.zone)}</span>${x.manual ? "" : x.route === "vps" ? "; Aegis gets its certificate and puts it on your VPS" : ""}.` : `Just that tunnel at <span class="mono">${h(S.odSubName || "blog")}.${h(x.zone)}</span>, a record of its own.`}${x.manual ? " Make its record at your DNS provider too (it shows up under Records)." : ""}</p>
         ${wildWhy ? `<p class="note-warn small">${wildWhy}</p>` : ""}
         <div class="err-msg small" id="odSubErr">${h(S.odSubErr || "")}</div>
         <div class="row"><button class="btn sm primary" ${wildWhy || (kind === "one" && !opts) ? "disabled" : ""}>Add</button><button type="button" class="btn sm ghost" data-act="od-sub-cancel">Cancel</button></div>
@@ -397,8 +416,21 @@ async function patchSubs(zone, subs, busyMsg) {
   finally { S.busy = false; document.querySelector(".od-sub-busy")?.remove(); }
 }
 
+function odManual(o) {
+  const mode = S.odMode && S.odMode !== "none" ? S.odMode : "all", zone = (S.odZone || "").trim() || "example.org";
+  return `<form id="odManualForm" class="od-add" autocomplete="off">
+      <ol class="steps"><li class="on"><b>A domain on another DNS provider</b><span>You make its records; Aegis checks them.</span></li><li><b>Its records</b></li></ol>
+      <label class="field"><span>The domain</span><input class="input mono" id="odMZone" placeholder="example.org" spellcheck="false" autocapitalize="none" value="${h(S.odZone || "")}"></label>
+      <div class="field"><span>Tunnels on it</span>${odSeg("od-mode", OD_MODES.filter(([v]) => v !== "none"), mode)}<p class="faint small">${odHint(mode, zone)}</p></div>
+      ${o.vps ? `<p class="faint small">They go straight to <span class="mono">${h(o.vps.host)}</span>. Its Caddy gets a free certificate for each tunnel name the first time it's opened, so nothing needs renewing by hand. Those names show up in public certificate logs. No dashboard here: that needs the domain on Cloudflare. Add subdomains once it's added.</p>`
+        : '<p class="note-warn small">Link your VPS first (Your VPS, above): a domain on another DNS provider sends its tunnels through it.</p>'}
+      <div class="err-msg" id="odErr">${h(S.odErr || "")}</div>
+      <div class="row end"><button type="button" class="btn ghost" data-act="od-manual-cancel">Cancel</button><button class="btn primary" id="odMGo" ${o.vps ? "" : "disabled"}>Add, then show its records</button></div>
+    </form>`;
+}
 function odAdd(o, main) {
   const l = o.login, p = o.pending, n = o.need;
+  if (S.odManual && !p) return odManual(o);
   if (p) {
     const zone = p.zone || "the domain", mode = S.odMode || "all", route = S.odRoute || (o.vps ? "vps" : "cloudflare");
     return `<form id="odForm" class="od-add" autocomplete="off">
@@ -429,6 +461,8 @@ function odAdd(o, main) {
             <p class="faint small">From <a class="link" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">your API tokens</a>: Zone → DNS → Edit. Give it <b>all zones</b> and every domain you add later needs nothing more. (A dashboard on the domain also needs Account → Cloudflare Tunnel → Edit.)</p>
             <input class="input mono sm" id="odToken" type="password" placeholder="Cloudflare API token" spellcheck="false" autocapitalize="none">
             <button class="btn">Use this token</button></form>
+          <div class="od-opt"><b>Not on Cloudflare?</b><p class="faint small">Add it by hand: you make a record or two at its DNS provider, and its tunnels go through your VPS.</p>
+            <button type="button" class="btn" data-act="od-manual-open" data-zone="${h(n.zone)}">Add it by hand</button></div>
         </div>
         ${n.error || l?.error ? `<p class="err-msg">${h(n.error || l.error)}</p>` : ""}
         <div class="row end"><button type="button" class="btn ghost" data-act="od-forget">Cancel</button></div>
@@ -437,13 +471,14 @@ function odAdd(o, main) {
   return `<form id="odCheck" class="od-check" autocomplete="off">
       <input class="input mono" id="odZone" placeholder="another-domain.com" spellcheck="false" autocapitalize="none" value="${h(S.odZone || "")}">
       <button class="btn">${ICONS.globe} Add a domain</button>
+      <button type="button" class="btn ghost sm" data-act="od-manual-open">DNS somewhere else? Add it by hand</button>
     </form>${S.odErr ? `<p class="err-msg">${h(S.odErr)}</p>` : ""}`;
 }
 function otherDomains(main) {
   const o = S.doms;
   if (!o) return "";
   return `<div class="od">
-    <div class="od-head"><h3>Other domains</h3><p class="faint small">More Cloudflare domains beside <span class="mono">${h(main.zone)}</span>: the dashboard and your tunnels answer on them too. Tunnels can go straight to your VPS, which gets a certificate for each domain by itself. One sign-in still covers every domain.</p></div>
+    <div class="od-head"><h3>Other domains</h3><p class="faint small">More domains beside <span class="mono">${h(main.zone)}</span>: the dashboard and your tunnels answer on them too. Tunnels can go straight to your VPS, which gets a certificate for each domain by itself. A domain on another DNS provider works too, through your VPS, with records you make there. One sign-in still covers every domain.</p></div>
     ${o.domains.map((x) => odRow(x, o)).join("")}
     ${odAdd(o, main)}
   </div>`;
@@ -869,6 +904,18 @@ function wireForms() {
     } catch (ex) { S.busy = false; S.odErr = ex.message; $("#odErr").textContent = ex.message; b.disabled = false; b.textContent = "Try again"; }
   });
   $("#odZone")?.addEventListener("input", (e) => { S.odZone = e.target.value; });
+  $("#odMZone")?.addEventListener("input", (e) => { S.odZone = e.target.value; });
+  $("#odManualForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const b = $("#odMGo"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Adding…'; S.busy = true;
+    try {
+      S.doms = await post("/__gate/api/domains", { manual: true, zone: $("#odMZone").value, tunnels: S.odMode && S.odMode !== "none" ? S.odMode : "all" });
+      const z = S.doms.domains.at(-1)?.zone;
+      S.busy = false; S.odManual = false; S.odMode = null; S.odErr = ""; S.odZone = null;
+      toast(`${z} added. Make its records at your DNS provider, then check them.`); render();
+      document.getElementById(`domain-${z}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    } catch (ex) { S.busy = false; S.odErr = ex.message; $("#odErr").textContent = ex.message; b.disabled = false; b.textContent = "Try again"; }
+  });
   $("#odCheck")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const b = e.target.querySelector("button"); b.disabled = true; b.innerHTML = '<i class="spin"></i> Checking…';
@@ -1205,6 +1252,23 @@ document.addEventListener("click", async (e) => {
     else if (act === "od-cancel") { S.doms = await post("/__gate/api/domains/cancel"); render(); }
     else if (act === "od-forget") { S.doms = await post("/__gate/api/domains/forget"); S.odErr = ""; S.odMode = S.odRoute = S.odLabel = null; render(); }
     else if (act === "od-mode") { S.odMode = el.dataset.v; render(); }
+    else if (act === "od-manual-open") {
+      if (el.dataset.zone) { S.odZone = el.dataset.zone; await post("/__gate/api/domains/forget").then((v) => { S.doms = v; }, () => {}); }
+      else S.odZone = $("#odZone")?.value || S.odZone;
+      S.odManual = true; S.odErr = ""; S.odMode = null; render(); $("#odMZone")?.focus();
+    }
+    else if (act === "od-manual-cancel") { S.odManual = false; S.odErr = ""; S.odMode = null; render(); }
+    else if (act === "od-dns-check") {
+      const z = el.dataset.zone;
+      el.disabled = true; el.innerHTML = '<i class="spin"></i> Asking public DNS…'; S.busy = true;
+      try {
+        S.doms = await post(`/__gate/api/domains/${encodeURIComponent(z)}/check`);
+        const x = S.doms.domains.find((d) => d.zone === z), bad = (x?.manual?.records || []).filter((r) => !r.ok).length;
+        toast(x?.manual?.live ? `${z} is live: tunnel names there work in a moment` : `${bad} record${bad === 1 ? "" : "s"} not right yet. New records can take a few minutes to show up.`);
+      } catch (ex) { toast(ex.message); }
+      finally { S.busy = false; }
+      render();
+    }
     else if (act === "od-route-new") { S.odRoute = el.dataset.v; render(); }
     else if (act === "od-route") {
       const z = el.dataset.zone, v = el.dataset.v;
@@ -1236,7 +1300,9 @@ document.addEventListener("click", async (e) => {
     }
     else if (act === "od-remove") {
       const z = el.dataset.zone;
-      if (!confirm(`Remove ${z}? Its dashboard and tunnel names stop working; Aegis deletes its records and its Cloudflare tunnel. ${S.cf.domain.zone} is not touched.`)) return;
+      const byHand = !!S.doms.domains.find((d) => d.zone === z)?.manual;
+      if (!confirm(byHand ? `Remove ${z}? Its tunnel names stop working and your VPS lets go of it. Aegis never touched its DNS: delete its records at your DNS provider yourself.`
+        : `Remove ${z}? Its dashboard and tunnel names stop working; Aegis deletes its records and its Cloudflare tunnel. ${S.cf.domain.zone} is not touched.`)) return;
       el.disabled = true; el.innerHTML = '<i class="spin"></i> Removing…'; S.busy = true;
       try { S.doms = await api(`/__gate/api/domains/${encodeURIComponent(z)}`, { method: "DELETE" }); toast(`${z} removed`); } finally { S.busy = false; }
       render();

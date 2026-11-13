@@ -1547,6 +1547,8 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/domains" && req.method === "POST") {
       const r = await D.add(await readJsonBody(req)); audit("domain added", req, { zone: r.domains.at(-1)?.zone }); return sendJson(res, 200, r);
     }
+    const dc = /^\/__gate\/api\/domains\/([a-z0-9.-]{3,253})\/check$/.exec(path);
+    if (dc && req.method === "POST") return sendJson(res, 200, await D.checkDns(dc[1]));
     const dm = /^\/__gate\/api\/domains\/([a-z0-9.-]{3,253})$/.exec(path);
     if (dm && req.method === "PATCH") return sendJson(res, 200, await D.update(dm[1], await readJsonBody(req)));
     if (dm && req.method === "DELETE") { const r = await D.remove(dm[1]); audit("domain removed", req, { zone: dm[1] }); return sendJson(res, 200, r); }
@@ -2422,6 +2424,13 @@ const relayServer = createHttpServer((req, res) => {
     if (ok) { try { guardExt?.scan?.(ip); } catch { /* the addon's business */ } }
     res.writeHead(ok ? 204 : 403); return res.end();
   }
+  // Caddy on the VPS asks (through the agent, signed) before it fetches a certificate for a name
+  // on a domain added by hand: yes only for a tunnel that's here and on
+  if (req.url.startsWith("/__aegis-relay/ask?") && req.method === "GET") {
+    const ok = relayLink.configured() && relayVerify(relayLink.keyBuf(), req.headers["x-aegis-relay"], { host: "ask", ip: "0.0.0.0", method: "GET", url: req.url }, relayLink.agentNow());
+    const name = new URL(req.url, "http://x").searchParams.get("domain") || "";
+    res.writeHead(!ok ? 403 : burrow.manualAsk(name) ? 200 : 404); return res.end();
+  }
   // the relay doctor's ping (burrow/relaydoctor.mjs): any name under a zone the VPS carries, through
   // the whole way a visitor's request takes; it echoes the nonce it was sent and nothing else
   if (req.url.startsWith("/__aegis-relay/ping?")) {
@@ -2558,6 +2567,8 @@ burrow.domains.useRelay({
   },
   push: (cur, suffix) => relayLink.pushCert(cur, suffix),
   remove: (suffix) => relayLink.removeZone(suffix),
+  manual: (suffixes) => relayLink.manualZones(suffixes),
+  ask: () => relayLink.agent?.ask || null,
 });
 burrow.onDomainsChange = () => superviseRelay();
 // Public tunnels, checked on the VPS first (agent 1.2+): which names are public, and
@@ -2774,6 +2785,8 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
       if (path === "/domains" && method === "POST") {
         const r = await D.add(await readJson()); audit("domain added", null, { zone: r.domains.at(-1)?.zone, from: "command line" }); return ok(r);
       }
+      const dc = /^\/domains\/([a-z0-9.-]{3,253})\/check$/.exec(path);
+      if (dc && method === "POST") return ok(await D.checkDns(dc[1]));
       const dm = /^\/domains\/([a-z0-9.-]{3,253})$/.exec(path);
       if (dm && method === "PATCH") return ok(await D.update(dm[1], await readJson()));
       if (dm && method === "DELETE") { const r = await D.remove(dm[1]); audit("domain removed", null, { zone: dm[1], from: "command line" }); return ok(r); }
