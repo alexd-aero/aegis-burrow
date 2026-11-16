@@ -1,6 +1,7 @@
 // Settings: link a domain through Cloudflare, Termix, the login, connected apps.
 import { $, h, api, post, toast, ago, chrome, ICONS, UPD, updHero, verJump, runUpdate } from "./common.js";
 import { themesBody, wireThemes } from "./themes.js";
+import { devBody, wireDev, refreshDev } from "./devkeys.js";
 
 const app = $("#app");
 const S = { me: null, cf: null, termix: null, poll: null, busy: false,
@@ -661,6 +662,11 @@ const INDEX = [
   ["Burrow Pages: GitHub & GitLab Pages behind a password", "modules", "addon experimental github gitlab pages site secure reverse tunneling proxy custom domain subdomain password protect", "/__gate/tunnels#/pages"],
   ["Changelog: Burrow Pages", "changelog", "release notes pages addon", "log:burrow-pages"],
   ["A tunnel's own password (Burrow)", "account", "tunnel password own custom protect burrow share", "/__gate/tunnels"],
+  ["Developer options: API keys", "developer", "api key token developer dev options bearer automation script bot programmatic access rest http"],
+  ["Make an API key", "developer", "new api key create token scopes full access apps"],
+  ["API playground", "developer", "try api request test endpoint call json playground explorer"],
+  ["API examples (curl, Node.js, Python)", "developer", "example usage code sample curl node python javascript snippet docs"],
+  ["Switch the API off", "developer", "disable api off revoke all keys"],
   ["Where apps live (an app under a path)", "advanced", "path mount subpath directory base url /__gate/termix /__gate/forge advanced root"],
 ];
 function searchOpen() {
@@ -823,7 +829,7 @@ function render() {
   if (S.busy) return;
   const me = S.me || {};
   const focusId = document.activeElement?.id;
-  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName", "thSrc"].includes(focusId) || focusId.startsWith("mnt-"))) return;   // never repaint under typing
+  if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName", "thSrc"].includes(focusId) || focusId.startsWith("mnt-") || focusId.startsWith("dv"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
@@ -838,9 +844,11 @@ function render() {
     ${sec("activity", "Activity", "Every sign-in and failed one, Termix sessions and tunnel changes, with where they came from. Also on this machine: <span class=\"mono\">aegis audit</span>.", activityBody())}
     ${sec("account", "Login", "One login for the dashboard, Termix and every tunnel. A tunnel can also have a password of its own (Burrow → the tunnel → Password).", accountBody())}
     ${sec("apps", "Connected apps", "Apps on this machine that plugged into the dashboard.", integrationsBody())}
+    ${sec("developer", "Developer", "API keys for your scripts and apps: control everything Aegis × Burrow does, open the apps behind the login, and decide what each key may touch.", devBody())}
     ${advancedBody()}`;
   wireForms();
   wireThemes(render);
+  wireDev(render);
   landOnHash();
 }
 // #domain-<zone> (the gear in the dashboards menu) or a section: scrolled to once it's on the
@@ -1102,6 +1110,7 @@ async function load() {
     S.tuns = S.doms ? tuns?.tunnels || [] : [];
     S.audit = audit?.events || [];
     if (!S.upd && !S.checking) checkUpdates(false);
+    refreshDev();
     if (S.vers === undefined) { S.vers = null; loadVersions(); }
     loadLog(S.log);
   } catch (e) { toast(e.message); }

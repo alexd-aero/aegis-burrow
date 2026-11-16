@@ -1634,3 +1634,46 @@ textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-botto
   .th-cur { flex-wrap: wrap; } .th-shot { width: 100%; } .th-cur-acts { flex-direction: row; flex-wrap: wrap; }
   .th-row { flex-wrap: wrap; } .th-acts { max-width: none; justify-content: flex-start; }
 }
+
+/* ---------- Settings → Developer (public/devkeys.js) ---------- */
+.dv-head { margin-bottom: 14px; }
+.dv-base { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 12.5px; }
+.dv-base .mono { word-break: break-all; }
+.dv-tabs { margin-bottom: 14px; flex-wrap: wrap; }
+.dv-empty { padding: 18px; border: 1px dashed var(--line-2); border-radius: 12px; text-align: center; }
+.dv-keys { display: grid; gap: 10px; }
+.dv-key { display: flex; gap: 14px; align-items: flex-start; padding: 14px 16px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--field); }
+.dv-key.off { opacity: .72; }
+.dv-key .chips { margin-top: 8px; }
+.dv-meta { margin: 8px 0 0; line-height: 1.6; }
+.dv-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 260px; }
+.pill.dv-scope { color: #c9d4ff; border-color: rgba(122,167,255,.3); background: rgba(122,167,255,.07); }
+.pill.dv-scope.full { color: var(--warn); border-color: rgba(242,193,78,.4); background: rgba(242,193,78,.08); }
+.dv-scopes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-top: 10px; }
+.dv-sc { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 10px; cursor: pointer; background: var(--field); }
+.dv-sc.on { border-color: rgba(122,167,255,.45); background: rgba(122,167,255,.06); }
+.dv-sc input { margin-top: 3px; accent-color: var(--blue); }
+.dv-sc > span { display: grid; gap: 2px; }
+.dv-apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 10px; }
+.dv-form .seg { flex-wrap: wrap; }
+.dv-made { padding: 16px; border: 1px solid rgba(61,220,151,.35); border-radius: 12px; background: rgba(61,220,151,.05); }
+.dv-made p { margin: 0 0 10px; }
+.dv-secret .input { flex: 1; min-width: 0; font-size: 12.5px; }
+.dv-code { margin: 8px 0 0; padding: 12px 14px; overflow: auto; max-height: 420px; border-radius: 10px; background: #060708; border: 1px solid var(--line);
+  font: 12px/1.55 var(--mono); color: #d7dbe0; white-space: pre; }
+.dv-res { max-height: 520px; }
+.dv-ex { position: relative; }
+.dv-ex-copy { position: absolute; right: 8px; top: 8px; }
+.dv-play .row { flex-wrap: wrap; }
+.dv-play select.input.dv-method { width: 110px; flex: none; }
+.dv-path { display: flex; align-items: center; gap: 0; border: 1px solid var(--line-2); border-radius: 10px; background: var(--field); padding-left: 10px; min-width: 220px; }
+.dv-path .mono.faint { font-size: 12.5px; white-space: nowrap; }
+.dv-path .input { border: 0; background: transparent; box-shadow: none; padding-left: 2px; }
+.dv-body-in { width: 100%; margin-top: 8px; resize: vertical; font-size: 12.5px; }
+.dv-out { margin-top: 14px; }
+.dv-ul { margin: 0 0 8px; padding-left: 18px; display: grid; gap: 4px; }
+@media (max-width: 640px) {
+  .dv-head .mod-ico { display: none; }
+  .dv-key { flex-direction: column; }
+  .dv-acts { max-width: none; justify-content: flex-start; }
+}

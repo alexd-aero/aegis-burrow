@@ -442,6 +442,25 @@ Burrow's tab shows both views side by side: *Seen from Burrow* and *Seen from Se
 
 Any other app can plug in the same way. It drops `~/.config/aegis/integrations/<id>.json` with `{spec, id, kind, name, version, url, port, logo}`, and Aegis reads the folder on every request.
 
+## 🧑‍💻 Developer API
+
+**Settings → Developer** makes API keys for your scripts, bots and apps. One key can drive everything the
+dashboard and `aegis` do (tunnels, addons, machines, domains, the relay, the shield, updates, themes) and
+open the apps behind your login, or only the parts you pick:
+
+- **Scopes:** Everything, Read, Tunnels, Addons, Machines, Network, System, Apps. A call a key can't make answers `403` and names the scope it needs.
+- **Apps:** every app, or only the tunnels and apps you tick. The key rides in a header; Aegis strips it before the app sees the request.
+- **Manageable:** an expiry, an address list (IPs or ranges), a rate limit, switch off, roll (a new secret), revoke, revoke all, and one switch for the whole API. "Last used" and an activity list per key.
+- **Safe by design:** only a SHA-256 of each key is kept, so a key is shown once. No key can see or make keys, change the login, or answer a root job's password prompt, so a leaked key can't lock you out. Every change a key makes is in Settings → Activity with its name.
+- **Playground and examples:** try any call from the page, copy it as curl, and copy ready-made curl, Node.js and Python snippets with your address filled in.
+
+```sh
+curl -s https://aegis.example.com/__gate/v1/tunnels -H "Authorization: Bearer $AEGIS_KEY"
+aegis keys create "deploy bot" --scopes read,tunnels --expires 90
+```
+
+Reference: [docs/API.md](docs/API.md) · clients: [examples/api](examples/api) (curl, Node.js, Python; no packages).
+
 ## 🔐 The login
 
 ```
@@ -466,6 +485,7 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 |---|---|
 | `aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli\|browser]` | Install, or upgrade in place (keeps the login, settings, tunnels and addons) |
 | `aegis upgrade` | Copy this checkout's code over the installed one and restart |
+| `aegis keys [create NAME … \| set \| enable \| disable \| roll \| revoke KEY \| on \| off \| log]` | Developer API keys (Settings → Developer, [docs/API.md](docs/API.md)) |
 | `aegis` · `aegis setup` | The home screen · set it up here (login, pack, domain) |
 | `aegis update [--check]` · `auto on\|off` | Fetch the newest version from GitHub and install it (or just say whether there is one) · install by themselves |
 | `aegis tunnels` · `domain [link\|rename NAME\|unlink]` · `passwd` · `open` | Tunnels with the arrow keys · the domain · a new login · the dashboard's links |

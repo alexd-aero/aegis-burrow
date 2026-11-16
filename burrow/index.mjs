@@ -256,6 +256,7 @@ export class Burrow {
       req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); } catch { reject(new Error("bad JSON")); } });
       req.on("error", reject);
     });
+    this.controlExtra = extra;
     this.control = createServer(async (req, res) => {
       const reply = (status, obj, headers = {}) => {
         res.writeHead(status, { "Content-Type": "application/json", ...headers });
@@ -269,32 +270,8 @@ export class Burrow {
       this.clients.set(id, c);
       try {
         const path = new URL(req.url || "/", "http://x").pathname.replace(/^\/__gate\/api/, "");
-        if (path === "/status" && req.method === "GET") return reply(200, this.status());
-        const x = extra ? await extra(req.method, path, () => readJson(req)) : null;
-        if (x) {
-          if (req.method !== "GET" && path !== "/askpass" && !/^\/addons\/jobs\/[0-9a-f]{12}\/line$/.test(path)) this.note(id, `changed ${path.slice(1)}`);
-          return x.body !== undefined ? reply(x.status, x.body, x.headers) : reply(x.status, x.json);
-        }
-        if (path === "/module" && req.method === "POST") {
-          const b = await readJson(req);
-          this.setOn(b.burrow !== false);
-          this.note(id, this.on ? "switched Burrow on" : "switched Burrow off");
-          return reply(200, this.status());
-        }
-        const before = req.method === "DELETE" || req.method === "PATCH" ? this.tunnels.get(Number(path.split("/")[2])) : null;
-        const r = await this.handle(req.method, path, () => readJson(req));
+        const r = await this.dispatch(id, req.method, path, () => readJson(req));
         if (!r) return reply(404, { error: "not found" });
-        if (r.status === 200 && req.method !== "GET") {
-          const t = r.json || {};
-          const port = t.port || before?.port, name = t.name || before?.name;
-          const what = req.method === "POST" ? (path.endsWith("/kick") ? "kicked clients from" : "published")
-                     : req.method === "DELETE" ? "unpublished" : "changed";
-          this.note(id, what, port, name);
-          this.log(`control: ${id} ${what} ${port || ""} ${name || ""}`.trim());
-        }
-        if (path === "/tunnels" && req.method === "GET" && r.status === 200) {
-          r.json = { app: "aegis-burrow", engine: "burrow", version: this.version, mainHost: this.settings.get("domain")?.mainHost || null, ...r.json };
-        }
         return r.body !== undefined ? reply(r.status, r.body, r.headers) : reply(r.status, r.json);
       } catch (e) { return reply(400, { error: e.message }); }
     });
@@ -315,6 +292,39 @@ export class Burrow {
     });
     this.controlPath = path;
     this.controlReal = real;
+  }
+
+  // One control call: the socket's routes (Burrow's, then the ones Aegis adds), for the
+  // socket itself and for the developer API (/__gate/v1, aegis/apikeys.mjs), which
+  // calls in with the key's name as the client. -> {status, json|body} | null
+  async dispatch(id, method, path, readJson) {
+    if (path === "/status" && method === "GET") return { status: 200, json: this.status() };
+    const x = this.controlExtra ? await this.controlExtra(method, path, readJson) : null;
+    if (x) {
+      if (method !== "GET" && path !== "/askpass" && !/^\/addons\/jobs\/[0-9a-f]{12}\/line$/.test(path)) this.note(id, `changed ${path.slice(1)}`);
+      return x;
+    }
+    if (path === "/module" && method === "POST") {
+      const b = await readJson();
+      this.setOn(b.burrow !== false);
+      this.note(id, this.on ? "switched Burrow on" : "switched Burrow off");
+      return { status: 200, json: this.status() };
+    }
+    const before = method === "DELETE" || method === "PATCH" ? this.tunnels.get(Number(path.split("/")[2])) : null;
+    const r = await this.handle(method, path, readJson);
+    if (!r) return null;
+    if (r.status === 200 && method !== "GET") {
+      const t = r.json || {};
+      const port = t.port || before?.port, name = t.name || before?.name;
+      const what = method === "POST" ? (path.endsWith("/kick") ? "kicked clients from" : "published")
+                 : method === "DELETE" ? "unpublished" : "changed";
+      this.note(id, what, port, name);
+      this.log(`control: ${id} ${what} ${port || ""} ${name || ""}`.trim());
+    }
+    if (path === "/tunnels" && method === "GET" && r.status === 200) {
+      r.json = { app: "aegis-burrow", engine: "burrow", version: this.version, mainHost: this.settings.get("domain")?.mainHost || null, ...r.json };
+    }
+    return r;
   }
 
   // For the dashboard: which programs used the control socket, and what they did.

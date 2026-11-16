@@ -44,6 +44,7 @@ import { webcrypto, randomBytes, randomUUID, scryptSync, timingSafeEqual,
 import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Devices, DEVICE_TTL_S } from "./devices.mjs";
+import { ApiKeys, KeyError, SCOPES as KEY_SCOPES, scopeFor, stripKey } from "./apikeys.mjs";
 import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
@@ -101,6 +102,8 @@ const lockout = () => {
 function log(...args) { console.log(new Date().toISOString(), ...args); }
 // your devices (aegis/devices.mjs): which browser a request comes from, for sure (its device key)
 const devices = new Devices({ file: join(DATA, "devices.json"), log });
+// developer API keys (aegis/apikeys.mjs): Settings → Developer, `aegis keys`, /__gate/v1
+const apiKeys = new ApiKeys({ file: join(DATA, "apikeys.json"), log });
 
 // ---------- the audit log ----------
 // Who did what, kept apart from the noise: every sign-in (and failed one), sign-out,
@@ -121,7 +124,8 @@ function audit(event, req, extra = {}) {
   }
   const e = { t: new Date().toISOString(), event, ip,
               ...(req ? { host: hostOf(req), ua: String(req.headers["user-agent"] || "").slice(0, 200) } : {}),
-              ...(req && sessionOf(req) ? { sid: String(sessionOf(req).sid).slice(0, 8) } : {}), ...extra };
+              ...(req && sessionOf(req) ? { sid: String(sessionOf(req).sid).slice(0, 8) } : {}),
+              ...(req && keyOk(req) ? { key: keyOk(req).name } : {}), ...extra };
   log("audit:", event, ip, ...Object.entries(extra).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`));
   try {
     const f = AUDIT_FILE();
@@ -229,7 +233,7 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "themes.js", "ui.css", "login.css",
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "themes.js", "devkeys.js", "ui.css", "login.css",
                  "core/host.js", "core/host.css",
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/bulwark.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
@@ -817,7 +821,28 @@ function cloneKeyOk(req, t) {
   return !!(s && s.p === t.port && s.h === hostOf(req) && s.e === t.lock.epoch);
 }
 // anyone (public), the Aegis login (login, and password too), or its own password (or a clone's key for it)
-const mayOpen = (req, t) => t.access === "public" || isAuthed(req) || (t.access === "password" && (unlocked(req, t) || cloneKeyOk(req, t)));
+const mayOpen = (req, t) => t.access === "public" || isAuthed(req) || keyOpens(req, `tunnel:${t.port}`) || (t.access === "password" && (unlocked(req, t) || cloneKeyOk(req, t)));
+
+// ---------- developer API keys (aegis/apikeys.mjs) ----------
+// Checked once per request (keyCheck, first thing in the handler), then stripped from the
+// headers so no app behind the gate ever sees one. A bad key is refused outright: it never
+// falls back to being an anonymous visitor.
+function keyCheck(req) {
+  if (req._key !== undefined) return req._key;
+  req._key = apiKeys.check(req, clientIp(req));
+  if (req._key) stripKey(req);
+  return req._key;
+}
+const keyOk = (req) => (req._key && !req._key.error ? req._key.key : null);
+function keyOpens(req, app) {
+  const k = keyOk(req);
+  if (!k || !apiKeys.opens(k, app)) return false;
+  if (!req._keyApp) { req._keyApp = app; apiKeys.used(k, { ip: clientIp(req), method: req.method, path: `${app} ${String(req.url || "").split("?")[0]}`, status: 0, app: true }); }
+  return true;
+}
+function keyRefused(res, r) {
+  return sendJson(res, r.status, { error: r.error }, { "WWW-Authenticate": 'Bearer realm="aegis"', ...(r.retry ? { "Retry-After": String(r.retry) } : {}) });
+}
 
 function unlockPage(res, t, host) {
   const html = FILES["unlock.html"].toString().replaceAll("{{name}}", esc(t.name || t.site?.host || `tunnel-${t.port}`))
@@ -951,6 +976,7 @@ async function unwrapSealed(msg) {
 }
 
 function readBody(req, limit = 16384) {
+  if (req._raw) return req._raw.length > limit ? Promise.reject(new Error("too large")) : Promise.resolve(req._raw.toString());
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
     req.on("data", (c) => { size += c.length; if (size > limit) { reject(new Error("too large")); req.destroy(); } else chunks.push(c); });
@@ -1158,6 +1184,10 @@ async function handleGate(req, res, path, url, host, isMain) {
     } catch (e) { return sendJson(res, 400, { error: e.message }); }
   }
 
+  // ---- the developer API: an API key, or this dashboard's own pages (the playground) ----
+  if (isMain && (path === "/__gate/v1" || path.startsWith("/__gate/v1/") || (keyOk(req) && path.startsWith("/__gate/api/")))) return await devApi(req, res, path, url);
+  if (keyOk(req)) return sendJson(res, 404, { error: "An API key opens /__gate/v1/… (the API) and the apps it may open, not the dashboard's pages." });
+
   // ---- dashboard, signed in only ----
   if (!isAuthed(req)) {
     if (path.startsWith("/__gate/api/")) return sendJson(res, 401, { error: "login required" });
@@ -1352,7 +1382,7 @@ function me(req) {
   const s = sessionOf(req);
   const d = settings.get("domain");
   return {
-    app: "aegis-burrow", version: VERSION, title: settings.get("title"), user: s?.u || null,
+    app: "aegis-burrow", version: VERSION, title: settings.get("title"), user: s?.u || (keyOk(req) ? settings.auth()?.username || null : null),
     mode: tunnels.mode, pattern: tunnels.pattern(),
     domain: d ? { mainHost: d.mainHost, managed: !!d.managed } : null,
     dashboards: dashboards(hostOf(req)),
@@ -1431,9 +1461,110 @@ function savePrefs(p) {
   settings.set(patch);
 }
 
+// ---------- the developer API: /__gate/v1 ----------
+// One API for everything: first the control socket's routes (what `aegis` and `burrow`
+// use on this machine: plain JSON, no sealing), then the dashboard's own (/__gate/api/…:
+// machines, integrations, notices…). Callers: an API key (Authorization: Bearer), or a
+// signed-in dashboard page (the playground in Settings → Developer, same-origin + X-Gate).
+// What a key may call is its scopes (aegis/apikeys.mjs scopeFor); keys, the login and a
+// root job's askpass are never reachable here.
+const V1_LIMIT = 64 * 1024 * 1024;
+const v1Base = (req) => `${mainHost() ? `https://${mainHost()}` : `${isSecure(req) ? "https" : "http"}://${req.headers.host}`}/__gate/v1`;
+function v1Index(req, k) {
+  return {
+    app: "aegis-burrow", version: VERSION, api: "v1", base: v1Base(req),
+    you: k ? { key: k.id, name: k.name, scopes: k.scopes, apps: k.apps, expires: k.expires || null } : { session: true, user: settings.auth()?.username || null },
+    scopes: Object.fromEntries(Object.entries(KEY_SCOPES).map(([id, x]) => [id, x.note])),
+    auth: "Authorization: Bearer aegis_… (or X-Aegis-Key: aegis_…)",
+    docs: "https://github.com/alexd-aero/aegis-burrow/blob/main/docs/API.md",
+    try: ["GET /overview", "GET /tunnels", "POST /tunnels {port, name, access}", "GET /addons", "GET /fleet", "GET /domains", "GET /audit", "GET /update"],
+  };
+}
+async function devApi(req, res, path, url) {
+  const k = keyOk(req);
+  const sub = (path.startsWith("/__gate/v1") ? path.slice("/__gate/v1".length) : path.slice("/__gate/api".length)) || "/";
+  const ip = clientIp(req), method = req.method;
+  if (!k) {
+    // a signed-in page of this dashboard (the playground)
+    if (!isAuthed(req)) return sendJson(res, 401, { error: "Send an API key: Authorization: Bearer aegis_…  Make one in Settings → Developer." }, { "WWW-Authenticate": 'Bearer realm="aegis"' });
+    if (method !== "GET") {
+      const o = req.headers.origin;
+      let same = true;
+      try { if (o) same = new URL(o).host === req.headers.host; } catch { same = false; }
+      if (req.headers["x-gate"] !== "1" || !same) return sendJson(res, 403, { error: "forbidden" });
+    }
+  }
+  const done = (status) => { if (k) apiKeys.used(k, { ip, method, path: sub, status, ua: req.headers["user-agent"] }); };
+  if (sub === "/" || sub === "/whoami") { done(200); return sendJson(res, 200, v1Index(req, k)); }
+  if (scopeFor(method, sub) === "never" || (k && !apiKeys.may(k, method, sub))) {
+    const need = scopeFor(method, sub);
+    done(403);
+    return sendJson(res, 403, { error: need === "never" ? "No API call can do that: keys and the login are managed only by a signed-in person." : `This key can't do that: it needs the "${need}" scope.`, need });
+  }
+  if (method !== "GET" && method !== "HEAD") {
+    try { req._raw = await readRaw(req, V1_LIMIT); } catch (e) { done(413); return sendJson(res, 413, { error: e.message }); }
+  }
+  const readJson = async () => { try { return JSON.parse((req._raw || "").toString() || "{}"); } catch { throw new Error("The body isn't JSON."); } };
+  try {
+    const r = await burrow.dispatch(k ? `key:${k.name}`.slice(0, 40) : "playground", method, sub, readJson);
+    if (r) {
+      done(r.status);
+      if (method !== "GET" && r.status < 400) audit(`api: ${method} ${sub}`.slice(0, 120), req, {});
+      return r.body !== undefined ? send(res, r.status, r.body, r.headers) : sendJson(res, r.status, r.json);
+    }
+  } catch (e) { done(400); return sendJson(res, e.status || 400, { error: e.message }); }
+  // the dashboard's own routes, as if this were a signed-in page
+  req._devApi = true;
+  res.once("finish", () => {
+    done(res.statusCode);
+    if (method !== "GET" && res.statusCode < 400) audit(`api: ${method} ${sub}`.slice(0, 120), req, {});
+  });
+  url.pathname = "/__gate/api" + sub;
+  return handleApi(req, res, "/__gate/api" + sub, url);
+}
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on("data", (c) => { size += c.length; if (size > limit) { reject(new Error("The body is too large.")); req.destroy(); } else chunks.push(c); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+// Settings → Developer: the keys, and what they may open (signed in only; never through a key)
+function devAppsList() {
+  const apps = [...tunnels.tunnels.values()].map((t) => ({ id: `tunnel:${t.port}`, name: t.name || t.sub || t.site?.host || `port ${t.port}`, kind: "tunnel", access: t.access || "login", url: t.url || null }));
+  for (const m of mounts()) apps.push({ id: `app:${m.id}`, name: m.name, kind: "app", url: m.prefix + "/" });
+  if (termixUpstream() && !termixMounted()) apps.push({ id: "app:termix", name: "Termix", kind: "app", url: "/" });
+  return apps;
+}
+async function devKeysApi(req, res, path) {
+  const by = sessionOf(req)?.u || "dashboard";
+  const out = (v) => sendJson(res, 200, { ...apiKeys.view(), apps: devAppsList(), base: v1Base(req), ...v });
+  try {
+    if (path === "/__gate/api/devkeys" && req.method === "GET") return out();
+    if (path === "/__gate/api/devkeys" && req.method === "POST") {
+      const r = apiKeys.create(await readJsonBody(req), by);
+      audit("api key created", req, { key: r.name, scopes: r.scopes.join(",") });
+      notify("aegis", { level: "info", key: `apikey-${r.id}`, title: `API key "${r.name}" made`, body: `Scopes: ${r.scopes.join(", ")}. Revoke it any time in Settings → Developer.`, link: "/__gate/settings#developer" });
+      return out({ made: r });
+    }
+    if (path === "/__gate/api/devkeys/enabled" && req.method === "POST") {
+      const on = (await readJsonBody(req)).on !== false;
+      apiKeys.setEnabled(on); audit(on ? "api switched on" : "api switched off", req, {});
+      return out();
+    }
+    if (path === "/__gate/api/devkeys/revoke-all" && req.method === "POST") { apiKeys.removeAll(by); audit("api keys: all revoked", req, {}); return out(); }
+    const m = /^\/__gate\/api\/devkeys\/([0-9a-f]{10})(\/roll)?$/.exec(path);
+    if (m && m[2] && req.method === "POST") { const r = apiKeys.roll(m[1], by); audit("api key rolled", req, { key: r.name }); return out({ made: r }); }
+    if (m && req.method === "PATCH") { const r = apiKeys.update(m[1], await readJsonBody(req), by); audit("api key changed", req, { key: r.name }); return out(); }
+    if (m && req.method === "DELETE") { const name = apiKeys.get(m[1]).name; apiKeys.remove(m[1], by); audit("api key revoked", req, { key: name }); return out(); }
+    return sendJson(res, 404, { error: "No such developer call." });
+  } catch (e) { return sendJson(res, e.status || 400, { error: e.message }); }
+}
+
 async function handleApi(req, res, path, url) {
   const mutating = req.method !== "GET";
-  if (mutating) {
+  if (mutating && !req._devApi) {
     // CSRF: a same-origin fetch from our own page, nothing else.
     const o = req.headers.origin;
     let sameOrigin = true;
@@ -1442,6 +1573,10 @@ async function handleApi(req, res, path, url) {
   }
   try {
     if (path === "/__gate/api/me") return sendJson(res, 200, me(req));
+    if (path === "/__gate/api/devkeys" || path.startsWith("/__gate/api/devkeys/")) {
+      if (!sessionOf(req) || req._devApi) return sendJson(res, 403, { error: "Keys are managed only from a signed-in dashboard, or `aegis keys` on this machine." });
+      return await devKeysApi(req, res, path);
+    }
     if (path === "/__gate/api/notices" && req.method === "GET") return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
     if (path === "/__gate/api/notices/read" && req.method === "POST") {
       const b = await readJsonBody(req), ids = new Set(Array.isArray(b.ids) ? b.ids : []);
@@ -2107,12 +2242,12 @@ function shieldStop(req, path, host) {
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req),
+                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) || !!keyOk(req),
                    headers: H };     // all of them (cookies, X-Forwarded-For, Transfer-Encoding…): attacks hide there too; the guard reads, never keeps them
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
-  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), ipChecks, trusted: () => !!dev || isAuthed(req) });
+  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), ipChecks, trusted: () => !!dev || isAuthed(req) || !!keyOk(req) });
 }
 // the guard addon's log line, once the response is done (never in the request's way)
 function observeDone(req, res, extra = {}) {
@@ -2135,6 +2270,7 @@ async function handler(req, res) {
       const name = String(url.searchParams.get("domain") || "").toLowerCase();
       return send(res, burrow.on && tunnels.relayAsk(name) ? 200 : 404, "");
     }
+    keyCheck(req);
     const stop = shieldStop(req, path, host);
     if (req._guard) res.once("close", () => observeDone(req, res));
     if (stop) {
@@ -2144,6 +2280,10 @@ async function handler(req, res) {
           "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", ...(stop.retry ? { "Retry-After": String(stop.retry) } : {}) });
       }
       return send(res, stop.status, stop.body, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Connection: "close", ...(stop.retry ? { "Retry-After": String(stop.retry) } : {}) });
+    }
+    if (req._key?.error) {
+      if (req._key.key) apiKeys.used(req._key.key, { ip: clientIp(req), method: req.method, path, status: req._key.status, ua: req.headers["user-agent"] });
+      return keyRefused(res, req._key);
     }
     const port = tunnelFor(req, host);
     if (port !== null) return await tunnelRequest(port, req, res, path, url, host);
@@ -2159,7 +2299,7 @@ async function handler(req, res) {
     // an app served under a path of the dashboard (it may live under /__gate/ too)
     const mount = settings.auth() ? mountAt(path) : null;
     if (mount) {
-      if (!isAuthed(req)) {
+      if (!isAuthed(req) && !keyOpens(req, `app:${mount.id}`)) {
         const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
         return wantsHtml ? send(res, 302, "", { Location: "/__gate/login?next=" + encodeURIComponent(safeNext(req.url, "/")) })
                          : sendJson(res, 401, { error: "login required" });
@@ -2169,6 +2309,8 @@ async function handler(req, res) {
     }
     if (path.startsWith("/__gate/")) return await handleGate(req, res, path, url, host, true);
     if (!settings.auth()) return send(res, 302, "", { Location: "/__gate/setup" + url.search });
+    // Termix at the root, for a key that opens it
+    if (!isAuthed(req) && termixUpstream() && !termixMounted() && keyOpens(req, "app:termix")) return proxy(req, res);
     if (!isAuthed(req)) {
       const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
       if (path !== "/" && termixUpstream()) audit("termix refused: not signed in", req, { path: path.slice(0, 120), quiet: true });
@@ -2215,7 +2357,9 @@ server.on("upgrade", (req, socket, head) => {
   const host = hostOf(req);
   // a linked machine's agent (signed per machine; nothing else is answered there)
   if (isDashHost(host) && fleet.enabled() && fleetAgents.handleUpgrade(req, socket, head)) return;
+  keyCheck(req);
   const stop = shieldStop(req, new URL(req.url || "/", "http://x").pathname, host);
+  if (!stop && req._key?.error) { socket.end(`HTTP/1.1 ${req._key.status} Unauthorized\r\nConnection: close\r\n\r\n`); return; }
   if (req._guard) { req._guard.info.ws = true; observeDone(req, null, { status: stop ? stop.status : 101 }); }
   if (stop) { socket.end(`HTTP/1.1 ${stop.status} ${stop.status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`); return; }
   const port = tunnelFor(req, host);
@@ -2225,7 +2369,9 @@ server.on("upgrade", (req, socket, head) => {
     if (!mayOpen(req, t)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return; }
     return tunnels.proxyUpgrade(port, req, socket, head, { stripCookie: stripGateCookie });
   }
-  if (!isDashHost(host) || !isAuthed(req)) {
+  const um = isDashHost(host) && !isAuthed(req) ? mountAt(new URL(req.url || "/", "http://x").pathname) : null;
+  const keyIn = um ? keyOpens(req, `app:${um.id}`) : isDashHost(host) && !termixMounted() && keyOpens(req, "app:termix");
+  if (!isDashHost(host) || !(isAuthed(req) || keyIn)) {
     if (termixUpstream()) audit("termix connection refused: not signed in", req, { path: String(req.url || "").slice(0, 120), quiet: true });
     socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return;
   }
@@ -2748,6 +2894,22 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
     log("password changed from the command line - every session is signed out"); audit("password changed", null, { from: "command line", user: username });
     return ok({ ok: true, user: username });
   }
+  // developer API keys (aegis keys …): the same as Settings → Developer
+  if (path === "/keys" || path.startsWith("/keys/")) {
+    try {
+      if (path === "/keys" && method === "GET") return ok({ ...apiKeys.view(), apps: devAppsList() });
+      if (path === "/keys" && method === "POST") {
+        const r = apiKeys.create(await readJson(), "command line"); audit("api key created", null, { key: r.name, scopes: r.scopes.join(","), from: "command line" }); return ok(r);
+      }
+      if (path === "/keys/enabled" && method === "POST") { const on = (await readJson()).on !== false; apiKeys.setEnabled(on); audit(on ? "api switched on" : "api switched off", null, { from: "command line" }); return ok(apiKeys.view()); }
+      if (path === "/keys/revoke-all" && method === "POST") { apiKeys.removeAll("command line"); audit("api keys: all revoked", null, { from: "command line" }); return ok(apiKeys.view()); }
+      const km = /^\/keys\/([0-9a-f]{10})(\/roll)?$/.exec(path);
+      if (km && km[2] && method === "POST") { const r = apiKeys.roll(km[1], "command line"); audit("api key rolled", null, { key: r.name, from: "command line" }); return ok(r); }
+      if (km && method === "PATCH") return ok(apiKeys.update(km[1], await readJson(), "command line"));
+      if (km && method === "DELETE") { const name = apiKeys.get(km[1]).name; apiKeys.remove(km[1], "command line"); audit("api key revoked", null, { key: name, from: "command line" }); return ok(apiKeys.view()); }
+    } catch (e) { return no(e.status || 400, e.message); }
+    return no(404, "No such keys command.");
+  }
   // the pack
   if (path === "/pack" && method === "GET") { await pack.detect(); return ok(pack.status()); }
   if (path === "/pack" && method === "POST") {
@@ -2885,7 +3047,7 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
   if (xc) return extRoute(xc[1], xc[2] || "/", method, new URLSearchParams(), readJson, "control");
   return null;
 });
-for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { relayLink.stop(); burrow.stop(); serveo.stop(); devices.stop(); process.exit(0); });
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { relayLink.stop(); burrow.stop(); serveo.stop(); devices.stop(); apiKeys.stop(); process.exit(0); });
 
 const LOCAL_URL = `${TLS ? "https" : "http"}://${LISTEN.host === "0.0.0.0" || LISTEN.host === "::" ? "127.0.0.1" : LISTEN.host}:${LISTEN.port}`;
 // data/runtime.json: where it answers right now (bin/aegis prints these)

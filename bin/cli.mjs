@@ -18,6 +18,7 @@
 //   node cli.mjs addon-root ID OP [ACTION]  does OP need root: none|passwordless|password|nosudo, \x1f-separated with
 //                                           the name, the reason, why not, the hint and the homepage (bin/aegis asks)
 //   node cli.mjs domains [list|add|set|remove|tunnel] …   other domains (aegis domains)
+//   node cli.mjs keys [list|create|set|enable|disable|roll|revoke|on|off|log] …   developer API keys (aegis keys)
 //   node cli.mjs addon-here OP ID [--action A] [--purge]
 //                                           a root one run in this terminal (burrow/terminal.mjs): sudo asks here
 //
@@ -373,6 +374,80 @@ async function domains(op = "list", ...rest) {
   return 2;
 }
 
+// aegis keys: developer API keys (Settings → Developer). A new or rolled key is printed
+// once, on its own line last, so `aegis keys create … | tail -1` hands it to a script.
+async function keys(op = "list", ...rest) {
+  const flags = {}, pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (/^--(scopes|apps|expires|ips|rate|note|name)$/.test(a)) flags[a.slice(2)] = rest[++i] ?? "";
+    else if (a === "--full" || a === "--read") flags.scopes = a.slice(2);
+    else if (a.startsWith("--")) { out(red(`  ✗ unknown option ${a}`)); return 2; }
+    else pos.push(a);
+  }
+  const spec = () => {
+    const b = {};
+    if ("name" in flags) b.name = flags.name;
+    if ("scopes" in flags) b.scopes = flags.scopes.split(",").map((x) => x.trim()).filter(Boolean);
+    if ("apps" in flags) b.apps = flags.apps === "all" ? "all" : flags.apps.split(",").map((x) => x.trim()).filter(Boolean).map((x) => (/^\d+$/.test(x) ? `tunnel:${x}` : x.includes(":") ? x : `app:${x}`));
+    if ("expires" in flags) b.expires = /^(never|none|0)$/.test(flags.expires) ? null : /^\d+$/.test(flags.expires) ? `${flags.expires}d` : flags.expires;
+    if ("ips" in flags) b.ips = flags.ips;
+    if ("rate" in flags) b.rate = Number(flags.rate);
+    if ("note" in flags) b.note = flags.note;
+    return b;
+  };
+  const find = async (q) => {
+    const v = await call("GET", "/keys", null, 10000);
+    const k = v.keys.find((x) => x.id === q) || v.keys.find((x) => x.name.toLowerCase() === String(q || "").toLowerCase());
+    if (!k) throw new Error(`no key "${q}" (aegis keys list)`);
+    return k;
+  };
+  const line = (k) => {
+    const st = k.status === "on" ? ON() : k.status === "expired" ? WARN() : OFF();
+    out(`  ${st}  ${bold(k.name)}  ${dim(k.id)}  ${violet(k.scopes.join(","))}${k.apps === "all" || !(k.scopes.includes("full") || k.scopes.includes("apps")) ? "" : dim(`  apps: ${k.apps.join(" ")}`)}`);
+    out(dim(`       ${k.status === "expired" ? "expired" : k.expires ? `expires ${new Date(k.expires).toISOString().slice(0, 10)}` : "never expires"} · ${k.rate ? `${k.rate}/min` : "no rate limit"}${k.ips.length ? ` · only from ${k.ips.join(" ")}` : ""} · used ${k.uses}× · last ${k.last ? `${ago(k.last.at)} from ${k.last.ip}` : "never"}`));
+  };
+  try {
+    if (op === "list" || op === "ls") {
+      const v = await call("GET", "/keys", null, 10000);
+      out(`  API ${v.enabled ? green("on") : dim("off")}${v.enabled ? "" : dim("  (aegis keys on)")}`);
+      if (!v.keys.length) out(dim("  no keys yet: aegis keys create NAME [--full | --scopes read,tunnels,…]"));
+      v.keys.forEach(line);
+      return 0;
+    }
+    if (op === "on" || op === "off") { const v = await call("POST", "/keys/enabled", JSON.stringify({ on: op === "on" }), 10000); out(green(`  ✓ the API is ${v.enabled ? "on" : "off"}`)); return 0; }
+    if (op === "create" || op === "new") {
+      const b = { scopes: ["full"], ...spec() };
+      b.name = b.name || pos.join(" ");
+      if (!b.name) { out(red("  ✗ aegis keys create NAME [--full | --read | --scopes a,b] [--apps all|PORT,app,…] [--expires DAYS|never] [--ips CIDR,…] [--rate N]")); return 2; }
+      const k = await call("POST", "/keys", JSON.stringify(b), 10000);
+      line(k);
+      out(yellow("  Copy it now: it is never shown again."));
+      out(k.key);
+      return 0;
+    }
+    if (op === "roll") {
+      const k = await call("POST", `/keys/${(await find(pos[0])).id}/roll`, "{}", 10000);
+      out(yellow(`  ${k.name}: the old key stopped working. The new one (shown once):`));
+      out(k.key);
+      return 0;
+    }
+    if (op === "set") { line(await call("PATCH", `/keys/${(await find(pos[0])).id}`, JSON.stringify(spec()), 10000)); return 0; }
+    if (op === "enable" || op === "disable") { line(await call("PATCH", `/keys/${(await find(pos[0])).id}`, JSON.stringify({ disabled: op === "disable" }), 10000)); return 0; }
+    if (op === "revoke" || op === "rm" || op === "remove") {
+      if (pos[0] === "--all" || pos[0] === "all") { await call("POST", "/keys/revoke-all", "{}", 10000); out(green("  ✓ every key revoked")); return 0; }
+      const k = await find(pos[0]); await call("DELETE", `/keys/${k.id}`, null, 10000); out(green(`  ✓ ${k.name} revoked`)); return 0;
+    }
+    if (op === "log") {
+      const v = await call("GET", "/keys", null, 10000);
+      for (const e of v.log.slice(0, 40)) out(`  ${dim(new Date(e.t).toISOString().replace("T", " ").slice(0, 19))}  ${bold(e.name)}  ${e.event}${e.ip ? dim(`  ${e.ip}`) : ""}${e.status ? (e.status >= 400 ? red(`  ${e.status}`) : dim(`  ${e.status}`)) : ""}${e.by ? dim(`  by ${e.by}`) : ""}`);
+      return 0;
+    }
+  } catch (e) { out(red(`  ✗ ${e.message}`)); return e.code === "DOWN" ? 3 : 1; }
+  out(red("  ✗ aegis keys list | create NAME … | set KEY … | enable|disable KEY | roll KEY | revoke KEY|--all | on | off | log"));
+  return 2;
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 const run = {
   // on failure the message goes to stdout too: bash reads it with out="$(…)" || die "$out"
@@ -390,6 +465,7 @@ const run = {
   addons: addonsList, addon: () => addonOp(...args), "addon-root": () => addonRoot(args[0], args[1], args[2]),
   "addon-here": () => addonHere(...args),
   domains: () => domains(...args),
+  keys: () => keys(...args),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },
