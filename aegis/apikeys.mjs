@@ -10,7 +10,7 @@
 // it before anything is passed on to an app.
 //
 // What no key can do, whatever its scopes: make, change or see other keys, change
-// the login, or read the askpass of a root job. A leaked key can always be revoked
+// the login or single sign-on, or read the askpass of a root job. A leaked key can always be revoked
 // from the dashboard by the person who signed in, and it can't lock them out.
 //
 // data/apikeys.json: {enabled, keys: [{id, name, note, hash, scopes, apps, expires,
@@ -39,7 +39,7 @@ const KEY_RE = /^aegis_([0-9a-f]{10})_([A-Za-z0-9_-]{43})$/;
 export function scopeFor(method, path) {
   if (/^\/(keys|devkeys)(\/|$)/.test(path)) return "never";
   if (/^\/(askpass)(\/|$)/.test(path) || /^\/addons\/[a-z0-9-]+\/runspec$/.test(path) || /^\/addons\/jobs\/[0-9a-f]{12}\/(line|done)$/.test(path)) return "never";
-  if (/^\/(password|setup)$/.test(path)) return "never";
+  if (/^\/(password|setup)$/.test(path) || /^\/sso(\/|$)/.test(path)) return "never";          // the login, and single sign-on (who may sign in)
   if (method === "GET" || method === "HEAD") return "read";
   if (/^\/(tunnels|ports|module)(\/|$)/.test(path)) return "tunnels";
   if (/^\/(addons?|bridge|x|integrations)(\/|$)/.test(path)) return "addons";

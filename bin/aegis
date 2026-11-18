@@ -12,6 +12,7 @@
 #                 | set ZONE … [--wildcard NAME] [--drop-sub NAME] | check ZONE | remove ZONE | tunnel PORT [ZONE…]]   other domains (Settings → Domain)
 #   aegis keys [list | create NAME [--full | --read | --scopes a,b] [--apps all|PORT,app,…] [--expires DAYS|never] [--ips CIDR,…] [--rate N]
 #              | set KEY … | enable|disable KEY | roll KEY | revoke KEY|--all | on | off | log]   developer API keys (Settings → Developer)
+#   aegis sso [list | password on|off | link | enable ID | disable ID]   single sign-on (Settings → Sign-in)
 #   aegis passwd                     a new login (every browser is signed out)
 #   aegis update [--check] | auto on|off
 #   aegis versions                   the versions kept here, and which is held back
@@ -1190,6 +1191,8 @@ usage() {
     aegis termix install | remove
     aegis keys                   developer API keys: list | create NAME [--full | --read | --scopes a,b] [--apps all|PORT,…]
                                  [--expires DAYS] [--ips CIDR,…] | roll KEY | disable KEY | revoke KEY | on | off | log
+    aegis sso                    sign-in providers: list | password on|off (SSO only) | link (a one-time
+                                 link to the password form) | enable ID | disable ID
     aegis doctor [--fix]         check (and fetch) Node.js and cloudflared
     aegis url | setup-link | version
     aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli|browser]
@@ -1252,6 +1255,7 @@ case "$1" in
   domain) shift; need_installed; cmd_domain "$@" ;;
   domains) shift; need_installed; ensure_running; cli domains "$@" ;;
   keys|key|api) shift; need_installed; ensure_running; cli keys "$@" ;;
+  sso) shift; need_installed; ensure_running; cli sso "$@" ;;
   passwd|password) need_installed; cmd_passwd ;;
   install) shift; cmd_install "$@" ;;
   upgrade) shift; cmd_install "$@" ;;

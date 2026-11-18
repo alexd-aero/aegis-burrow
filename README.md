@@ -474,6 +474,7 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 - **Passwords** are stored as scrypt (N=2¹⁵), with a configurable lockout.
 - **Sessions** are AES-256-GCM sealed tokens bound to their host. **One login per browser:** login-protected tunnels sign in through the dashboard with single-use 60-second tickets.
 - **A tunnel's own password** is entered on the tunnel's address (sealed the same way), counts toward the same lockout, and opens a cookie bound to that tunnel, its host and the password's version.
+- **Single sign-on, besides the password.** *Settings → Sign-in* adds "Sign in with Google" (straight, or through Auth0), Microsoft Entra ID, Okta, GitHub, Robo Accounts, or any OpenID Connect, OAuth 2.0 or SAML 2.0 provider, as buttons above the password. Each has a "Set it up" panel with the exact URLs to whitelist (copy buttons) and a **Test sign-in** that shows what the provider sent back. A provider proves it's you: nobody gets in until you allow an email, a domain, a subject or a group. OIDC uses PKCE, state and nonce and checks the id_token against the provider's keys; SAML answers are checked with [xml-crypto](https://github.com/node-saml/xml-crypto) (vendored, no runtime packages). The password stays, unless you switch on *SSO only*; even then `aegis sso password on`, or a one-time link from `aegis sso link`, brings it back. Step by step for every provider: [docs/SSO.md](docs/SSO.md).
 - **TLS.** With `tls` set, the server speaks TLS 1.3 with X25519MLKEM768 and AES-256-GCM only.
 
 ## 📖 Reference
@@ -486,6 +487,7 @@ payload  = AES-256-GCM(K_outer, AES-256-GCM(K_inner, {username, password}))
 | `aegis install [--port N] [--bind ADDR] [--home DIR] [--termix] [--no-start] [--setup cli\|browser]` | Install, or upgrade in place (keeps the login, settings, tunnels and addons) |
 | `aegis upgrade` | Copy this checkout's code over the installed one and restart |
 | `aegis keys [create NAME … \| set \| enable \| disable \| roll \| revoke KEY \| on \| off \| log]` | Developer API keys (Settings → Developer, [docs/API.md](docs/API.md)) |
+| `aegis sso [list \| password on\|off \| link \| enable ID \| disable ID]` | Single sign-on (Settings → Sign-in, [docs/SSO.md](docs/SSO.md)): the providers, the password form back on (or off: SSO only), a one-time link to the password form |
 | `aegis` · `aegis setup` | The home screen · set it up here (login, pack, domain) |
 | `aegis update [--check]` · `auto on\|off` | Fetch the newest version from GitHub and install it (or just say whether there is one) · install by themselves |
 | `aegis tunnels` · `domain [link\|rename NAME\|unlink]` · `passwd` · `open` | Tunnels with the arrow keys · the domain · a new login · the dashboard's links |

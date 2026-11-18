@@ -13,7 +13,7 @@ Authorization: Bearer aegis_<id>_<secret>        (or  X-Aegis-Key: aegis_…)
   missing scope (then `need` names it) · `404` no such call · `413` body over 64 MB · `429` rate limit (`Retry-After`).
 - Keys go in a header, never in a link. Aegis keeps only a SHA-256 of the secret: a lost key can't be shown
   again, only rolled (a new secret) or revoked.
-- No key can see or make keys, change the login, or reach a root job's password prompt, whatever its scopes.
+- No key can see or make keys, change the login or single sign-on (`/sso`, [docs/SSO.md](SSO.md)), or reach a root job's password prompt, whatever its scopes.
   So a leaked key never locks you out: revoke it in Settings → Developer.
 - Every change a key makes lands in Settings → Activity (`aegis audit`) with the key's name, and in the key's
   own activity list (Settings → Developer → Activity, `aegis keys log`).

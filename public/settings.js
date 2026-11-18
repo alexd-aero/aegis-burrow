@@ -2,6 +2,7 @@
 import { $, h, api, post, toast, ago, chrome, ICONS, UPD, updHero, verJump, runUpdate } from "./common.js";
 import { themesBody, wireThemes } from "./themes.js";
 import { devBody, wireDev, refreshDev } from "./devkeys.js";
+import { ssoBody, wireSso } from "./sso.js";
 
 const app = $("#app");
 const S = { me: null, cf: null, termix: null, poll: null, busy: false,
@@ -636,6 +637,10 @@ const INDEX = [
   ["Stay signed in for (days)", "signin", "session days cookie remember"],
   ["Lock out after wrong tries", "signin", "brute force attempts minutes lockout security"],
   ["Customize the home page", "signin", "dashboard tiles greeting tagline background columns gear links", "/?customize=1"],
+  ["Sign in with Google, Auth0, Microsoft, Okta, GitHub (single sign-on)", "sso", "sso single sign-on google auth0 microsoft entra azure okta github oauth oidc openid connect login provider"],
+  ["Sign in with SAML 2.0 (and Robo Accounts)", "sso", "saml idp sp metadata acs entity robo accounts authentik adfs keycloak"],
+  ["Who may sign in with a provider (allow list)", "sso", "allow list emails domain subject group sso test sign-in"],
+  ["SSO only: hide the password form", "sso", "password hide sso only break glass"],
   ["Themes", "themes", "theme look skin appearance style weft custom ui zip discover"],
   ["Add a theme (a .zip, a link, GitHub or GitLab)", "themes", "install theme upload zip repository github gitlab weft"],
   ["Discover themes", "themes", "browse find themes forks weft community gallery"],
@@ -691,7 +696,7 @@ function searchOpen() {
       }
     }
     sel = Math.min(sel, Math.max(0, hits.length - 1));
-    list.innerHTML = hits.length ? hits.map(([t, s], i) => `<button type="button" class="srch-hit${i === sel ? " on" : ""}" data-i="${i}" role="option"><b>${h(t)}</b><span>${h(document.getElementById(s)?.querySelector("h2")?.textContent || "Advanced")}</span></button>`).join("")
+    list.innerHTML = hits.length ? hits.map(([t, s], i) => `<button type="button" class="srch-hit${i === sel ? " on" : ""}" data-i="${i}" role="option"><b>${h(t)}</b><span>${h((document.getElementById(s)?.closest("section") || document.getElementById(s))?.querySelector("h2")?.textContent || "Advanced")}</span></button>`).join("")
       : '<p class="muted small srch-none">Nothing by that name. Try a word like domain, password, update, serveo.</p>';
   };
   const go = (i) => {
@@ -831,10 +836,11 @@ function render() {
   const focusId = document.activeElement?.id;
   if (focusId && (["label", "odLabel", "odRename", "odZone", "odToken", "nmPrefix", "nmRelay", "pwUser", "pwCur", "pwNew", "pwNew2", "siTitle", "siSub", "siDays", "siTries", "siMins", "frPaste", "frToken", "odSubName", "thSrc"].includes(focusId) || focusId.startsWith("mnt-") || focusId.startsWith("dv"))) return;   // never repaint under typing
   if (document.querySelector(".srch")) return;   // nor under the search box
+  if (document.activeElement?.closest?.(".sso-sec") && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;   // nor under a sign-in provider's form
   app.innerHTML = `
     <div class="head"><div><h1>Settings</h1><p>${h(me.title || "Aegis")} ${me.version ? `<span class="mono faint">v${h(me.version)}</span>` : ""}</p></div>
       <div class="spacer"></div><button class="btn srch-btn" data-act="search" title="Search all settings (/ or Ctrl+K)">${SEARCH}<span>Search all settings</span><kbd>/</kbd></button></div>
-    ${sec("signin", "Sign-in", "What the sign-in page says, and how long a sign-in lasts.", signinBody())}
+    ${sec("signin", "Sign-in", "What the sign-in page says, how long a sign-in lasts, and other ways in: Google, Auth0, any OpenID Connect, OAuth 2.0 or SAML provider.", signinBody() + ssoBody())}
     ${sec("themes", "Themes", "A new look for the signed-in pages, as Weft themes: from a .zip, a link, or a fork of the Weft repository.", themesBody())}
     ${sec("updates", "Updates", "New versions of Aegis × Burrow, by hand or by themselves.", updatesBody())}
     ${sec("changelog", "Changelog", "What changed lately in Aegis × Burrow, Selkies Forge and the Weft Architecture.", changelogBody())}
@@ -849,6 +855,7 @@ function render() {
   wireForms();
   wireThemes(render);
   wireDev(render);
+  wireSso(render);
   landOnHash();
 }
 // #domain-<zone> (the gear in the dashboards menu) or a section: scrolled to once it's on the

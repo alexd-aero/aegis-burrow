@@ -19,6 +19,10 @@
 // The session cookie is an AES-256-GCM sealed token bound to the host it was
 // issued for.
 //
+// Besides the password: single sign-on with Google (straight or through Auth0),
+// any OpenID Connect / OAuth 2.0 provider and SAML 2.0 (aegis/sso.mjs), for the
+// owner and whoever the owner allowed; Settings -> Sign-in.
+//
 // One sign-in per browser: with a linked domain, a "login" tunnel host
 // without a session bounces to the dashboard's /__gate/sso, which (if signed
 // in) hands back a single-use, 60 s ticket bound to that tunnel host. Every
@@ -45,6 +49,7 @@ import { ml_kem768_x25519 as xwing } from "./vendor/pq.mjs";
 import { APP, HOME, DATA, VERSION, Settings, writeJson } from "./config.mjs";
 import { Devices, DEVICE_TTL_S } from "./devices.mjs";
 import { ApiKeys, KeyError, SCOPES as KEY_SCOPES, scopeFor, stripKey } from "./apikeys.mjs";
+import { Sso, SsoError, secretBox, iconOf, buttonOf, allowed as ssoAllowed, identityLabel, showClaims, PRESETS as SSO_PRESETS, ICONS as SSO_ICONS } from "./sso.mjs";
 import { Burrow } from "../burrow/index.mjs";
 import { CHECK_PATH } from "../burrow/edge.mjs";
 import { readProxyHeader } from "../burrow/proxyproto.mjs";
@@ -233,7 +238,7 @@ const PUBLIC = join(APP, "public");
 const FILES = {};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 for (const f of ["login.html", "setup.html", "unlock.html", "home.html", "tunnels.html", "settings.html", "welcome.html",
-                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "themes.js", "devkeys.js", "ui.css", "login.css",
+                 "login.js", "common.js", "home.js", "tunnels.js", "settings.js", "welcome.js", "distros.js", "fleet.js", "themes.js", "devkeys.js", "sso.js", "ui.css", "login.css",
                  "core/host.js", "core/host.css",
                  "logos/aegis.svg", "logos/aegis-burrow.svg", "logos/burrow.svg", "logos/termix.svg", "logos/forge.svg", "logos/weft.svg", "logos/burrow-pages.svg", "logos/bulwark.svg"]) {
   FILES[f] = readFileSync(join(PUBLIC, f));
@@ -718,7 +723,7 @@ function parseCookies(header) {
 
 function stripGateCookie(header) {
   if (!header) return header;
-  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK, DEVICE, "__Host-" + DEVICE].map((n) => n + "=");
+  const ours = [COOKIE, PLAIN_COOKIE, GO, "__Host-" + GO, UNLOCK, "__Host-" + UNLOCK, DEVICE, "__Host-" + DEVICE, SSO_BIND, "__Host-" + SSO_BIND, BREAK].map((n) => n + "=");
   const portUnlock = new RegExp(`^(__Host-)?${UNLOCK}-\\d+=`);             // the password of a tunnel on a port (unlockName)
   const kept = header.split(";").map((p) => p.trim()).filter((p) => p && !ours.some((n) => p.startsWith(n)) && !portUnlock.test(p));
   return kept.length ? kept.join("; ") : undefined;
@@ -908,6 +913,198 @@ function openTicket(token, host) {
 const ssoUrl = (host, next) =>
   `https://${mainHost()}/__gate/sso?to=${encodeURIComponent(host)}&next=${encodeURIComponent(safeNext(next, "/"))}`;
 
+// ---------- signing in with a provider: Google, Auth0, any OIDC / OAuth 2.0 / SAML (aegis/sso.mjs) ----------
+// The provider's callbacks live on the main host (or the sign-in address set in
+// Settings → Sign-in), like the tickets above: a tunnel host sends people there to
+// sign in, so one sign-in still covers every tunnel. One that gets through does
+// what the password does; a refused one counts against the address like a wrong
+// password. The password stays unless the owner hides it (SSO only), and even then
+// `aegis sso password on`, or a one-time link from `aegis sso link`, brings it back.
+const sso = new Sso({ settings, log, box: secretBox(SESSION_KEY) });
+const SSO_BIND = "aegis-sso";               // which browser started a sign-in (sso.mjs take)
+const BREAK = "aegis-bg";                   // a break-glass link was opened: the password form, even SSO-only
+const SSO_PATH = /^\/__gate\/sso\/([a-z0-9][a-z0-9-]{0,31})\/(start|callback|acs|metadata)$/;
+const ssoBase = () => sso.conf().base || (mainHost() ? `https://${mainHost()}` : null);
+const ssoOnly = () => sso.conf().only && !!ssoBase() && sso.shown().length > 0;
+// SameSite=None over HTTPS: a SAML answer comes back as a cross-site POST
+const ssoBindName = (req) => (isSecure(req) ? "__Host-" + SSO_BIND : SSO_BIND);
+const ssoBindCookie = (req, v, maxAge = 900) => `${ssoBindName(req)}=${v}; Path=/; ${isSecure(req) ? "Secure; SameSite=None" : "SameSite=Lax"}; HttpOnly; Max-Age=${maxAge}`;
+const ssoBindOf = (req) => { const v = parseCookies(req.headers.cookie)[ssoBindName(req)]; return /^[A-Za-z0-9_-]{16,64}$/.test(v || "") ? v : null; };
+const SSO_MSG = {
+  failed: "That sign-in didn't work. Try again, or use the password.", denied: "You signed in at the provider, but that account isn't allowed here.",
+  expired: "That sign-in expired or was already used. Try again.", cancelled: "The sign-in was cancelled.",
+  config: "That provider isn't set up right yet: check Settings → Sign-in.", off: "That way of signing in is switched off.",
+  throttled: "Too many attempts. Try again in 15 minutes.", glass: "That one-time link has expired or was used already.",
+};
+
+// Break glass: `aegis sso link` on this machine makes a one-time link (15 minutes)
+// that shows the password form even when the sign-in page is SSO only.
+const breakGlass = new Map();               // sha256(token) -> expiry
+function breakGlassLink() {
+  const now = Date.now(), token = b64u(randomBytes(24)), expires = now + 15 * 60e3;
+  for (const [k, exp] of breakGlass) if (exp < now) breakGlass.delete(k);
+  breakGlass.set(b64u(sha256(token)), expires);
+  return { token, expires };
+}
+const glassOk = (req) => {
+  const s = unseal(parseCookies(req.headers.cookie)[BREAK] || "", BREAK);
+  return !!(s && s.exp > Date.now() && s.h === hostOf(req) && (s.e || null) === (settings.auth()?.epoch || null));
+};
+// SSO only needs someone who can get in: a provider that's on, with someone on its allow list
+function ssoOnlyCheck() {
+  if (!ssoBase()) throw new SsoError("Link a domain first (or set the sign-in address): the providers call back there.", "config");
+  if (!sso.shown().length) {
+    throw new SsoError("Switch on a provider that allows someone (you) first, and try it: SSO only hides the password.", "config");
+  }
+}
+
+// The sign-in page: a button per provider that's on, above the password (or
+// instead of it: SSO only), and what went wrong with the last try.
+function loginPage(req, res, url) {
+  const l = settings.get("login") || {}, base = ssoBase(), list = base ? sso.shown() : [];
+  const only = ssoOnly() && !glassOk(req);
+  const next = safeNext(url.searchParams.get("next"), "");
+  const btns = list.map((p) => `<a class="sso-btn" href="${esc(`${base}/__gate/sso/${p.id}/start${next ? `?next=${encodeURIComponent(next)}` : ""}`)}">${iconOf(p)}`
+    + `<span>${esc(buttonOf(p))}</span></a>`).join("");
+  const why = SSO_MSG[url.searchParams.get("sso")] || "";
+  const html = FILES["login.html"].toString().replaceAll("{{title}}", () => esc(settings.get("title"))).replaceAll("{{subtitle}}", () => esc(l.subtitle || "Secure channel"))
+    .replace("{{sso}}", () => (btns ? `<div class="sso">${btns}${only ? "" : '<div class="sso-or">or your password</div>'}</div>` : ""))
+    .replace("{{state}}", why ? "err" : "idle").replace("{{only}}", only ? " data-sso-only" : "").replace("{{msg}}", () => esc(why));
+  send(res, 200, html, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": GATE_CSP });
+}
+
+// What a test sign-in (Settings → Sign-in → Test) shows in its popup. The
+// dashboard reads the same result and offers to allow who it was.
+function ssoTestPage(res, p, { verdict, identity, error }) {
+  const row = (k, v) => (v && v.length !== 0 ? `<br><b>${esc(k)}</b> ${esc(Array.isArray(v) ? v.join(", ") : v)}` : "");
+  const title = error ? "Test sign-in failed" : verdict.ok ? "Test sign-in: allowed" : "Test sign-in: not allowed yet";
+  const body = error ? `${esc(p.name)}: ${esc(error)}`
+    : `${esc(p.name)} sent back:${row("subject", identity.sub)}${row("email", identity.email ? `${identity.email}${identity.emailVerified ? " (verified)" : " (not verified)"}` : "")}`
+      + `${row("name", identity.name)}${row("username", identity.username)}${row("groups", identity.groups)}<br><br>`
+      + (verdict.ok ? `Allowed (by ${esc(verdict.by)}): this account can sign in.` : `Not allowed: ${esc(verdict.why)}. Add it in Settings → Sign-in.`);
+  return messagePage(res, 200, title, `${body}<br><br>No one was signed in by this test. The result is waiting in Settings; you can close this window.`);
+}
+
+async function ssoRoute(req, res, id, action, url, host) {
+  const p = sso.get(id), base = ssoBase(), ip = clientIp(req);
+  const back = (code, next) => send(res, 302, "", { Location: `/__gate/login?sso=${code}${next && next !== "/" ? `&next=${encodeURIComponent(next)}` : ""}` });
+  if (!p || !base) return action === "metadata" ? send(res, 404, "No such provider.") : back("config");
+  // it all happens on the sign-in address: the provider knows that one only
+  if (host !== new URL(base).hostname) return req.method === "GET" && (action === "start" || action === "metadata") ? send(res, 302, "", { Location: base + req.url }) : back("config");
+  if (action === "metadata") {
+    if (p.kind !== "saml") return send(res, 404, "Not a SAML provider.");
+    return send(res, 200, sso.metadata(p, base), { "Content-Type": "application/xml; charset=utf-8", "Cache-Control": "no-cache" });
+  }
+  if (action === "start") {
+    if (req.method !== "GET") return send(res, 405, "");
+    const test = url.searchParams.get("test");
+    if (test && !sso.testOk(test, p.id)) return messagePage(res, 403, "Test expired", "Start the test again from Settings → Sign-in.");
+    if (!test) {
+      if (!p.enabled) return back("off");
+      if (tooManyFails(ip)) { log("sso throttled", ip, p.id); audit("sign-in throttled", req, { via: p.name }); return back("throttled"); }
+      if (isAuthed(req)) return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/") });
+    }
+    const bind = ssoBindOf(req) || b64u(randomBytes(24));
+    try {
+      const to = await sso.start(p, { base, next: safeNext(url.searchParams.get("next"), "/"), test, bind });
+      return send(res, 302, "", { Location: to, "Set-Cookie": ssoBindCookie(req, bind) });
+    } catch (e) {
+      log("sso:", p.id, "couldn't start:", e.message);
+      audit(test ? "sso test failed" : "sign-in failed", req, { via: p.name, sso: p.id, why: e.message.slice(0, 200) });
+      if (test) { sso.testDone(test, { ok: false, error: e.message }); return ssoTestPage(res, p, { error: e.message }); }
+      return back(e.code === "config" ? "config" : "failed");
+    }
+  }
+  // back from the provider: OIDC / OAuth 2.0 at /callback (GET), SAML at /acs (POST)
+  if ((action === "callback" && req.method !== "GET") || (action === "acs" && req.method !== "POST")) return send(res, 405, "");
+  const throttled = tooManyFails(ip);
+  let r;
+  try {
+    if ((action === "acs") !== (p.kind === "saml")) throw new SsoError(`This provider answers at /${p.kind === "saml" ? "acs" : "callback"}.`, "config");
+    r = action === "callback" ? await sso.callback(p, { base, query: url.searchParams, bind: ssoBindOf(req) })
+      : await sso.acs(p, { base, form: Object.fromEntries(new URLSearchParams(await readBody(req, 1024 * 1024))), bind: ssoBindOf(req), loose: !isSecure(req) });
+  } catch (e) {
+    const test = e.flow?.test;
+    log("sso:", p.id, test ? "test" : "sign-in", "refused:", e.message);
+    if (test) { sso.testDone(test, { ok: false, error: e.message }); audit("sso test failed", req, { via: p.name, sso: p.id, why: e.message.slice(0, 200) }); return ssoTestPage(res, p, { error: e.message }); }
+    recordFail(ip); audit("sign-in failed", req, { via: p.name, sso: p.id, why: e.message.slice(0, 200) });
+    return back(e.code || "failed", e.flow?.next);
+  }
+  const who = (identityLabel(r.identity) || "(no identity)").slice(0, 120), verdict = ssoAllowed(p, r.identity);
+  if (r.flow.test) {
+    // a test from the dashboard: what came back, never a session
+    sso.testDone(r.flow.test, { ok: verdict.ok, by: verdict.by, why: verdict.why, identity: r.identity, claims: showClaims(r.claims) });
+    audit("sso test", req, { via: p.name, sso: p.id, user: who, allowed: verdict.ok });
+    return ssoTestPage(res, p, { verdict, identity: r.identity });
+  }
+  if (!p.enabled) return back("off");
+  if (throttled) { log("sso throttled", ip, p.id); audit("sign-in throttled", req, { via: p.name }); return back("throttled", r.flow.next); }
+  if (!verdict.ok) {
+    recordFail(ip); log("sso:", p.id, "not allowed:", who);
+    audit("sign-in refused", req, { via: p.name, sso: p.id, user: who, why: verdict.why });
+    return back("denied", r.flow.next);
+  }
+  fails.delete(ip); log("auth ok", ip, host, "via", p.id, who); audit("sign-in", req, { user: who, via: p.name, sso: p.id, by: verdict.by });
+  burrow.shield.trust(ip);
+  try { guardExt?.signedIn?.(ip); } catch { /* the addon's business */ }
+  return send(res, 302, "", { Location: safeNext(r.flow.next, "/"), "Set-Cookie": [sessionCookie(req, b64u(randomBytes(12))), enrollDevice(req), ssoBindCookie(req, "", 0)] });
+}
+
+// Settings → Sign-in: the providers (add, change, test, allow, remove) and the two
+// options (the sign-in address, SSO only). A signed-in page only, never an API key.
+function ssoView(req) {
+  const c = sso.conf(), base = ssoBase();
+  return { base, baseSet: c.base, mainHost: mainHost(), only: c.only, onlyActive: ssoOnly(), here: `${isSecure(req) ? "https" : "http"}://${req.headers.host}`,
+           providers: c.providers.map((p) => sso.view(p, base)),
+           presets: Object.fromEntries(Object.entries(SSO_PRESETS).map(([k, x]) => [k, { name: x.name, kind: x.kind, button: x.button, scopes: x.scopes || "", fields: x.fields || [],
+                                                                                        verifiedEmail: x.verifiedEmail !== false, icon: SSO_ICONS[k === "robo-saml" ? "robo" : k] }])) };
+}
+async function ssoApi(req, res, path) {
+  const out = (extra = {}) => sendJson(res, 200, { ...ssoView(req), ...extra });
+  try {
+    if (path === "/__gate/api/sso" && req.method === "GET") return out();
+    if (path === "/__gate/api/sso/options" && req.method === "POST") {
+      const b = await readJsonBody(req);
+      if (b.only === true) ssoOnlyCheck();
+      // the sign-in address must reach this dashboard, or no provider could call back
+      if (b.base) { let hn = ""; try { hn = new URL(String(b.base)).hostname.toLowerCase(); } catch { /* sso.setOptions says why */ }
+                    if (hn && !isDashHost(hn)) throw new SsoError(`${hn} isn't one of this dashboard's addresses (the main host, a local name, or one under extraHosts).`, "config"); }
+      sso.setOptions({ base: b.base, only: b.only });
+      audit("sign-in options changed", req, { address: sso.conf().base || "the main host", ssoOnly: sso.conf().only });
+      return out();
+    }
+    if (path === "/__gate/api/sso/providers" && req.method === "POST") {
+      const p = await sso.add(await readJsonBody(req));
+      audit("sign-in provider added", req, { sso: p.id, via: p.name });
+      return out({ made: p.id });
+    }
+    const m = /^\/__gate\/api\/sso\/providers\/([a-z0-9][a-z0-9-]{0,31})(?:\/(test|allow|toggle))?$/.exec(path);
+    if (m && !m[2] && req.method === "PATCH") { const p = await sso.update(m[1], await readJsonBody(req)); audit("sign-in provider changed", req, { sso: p.id, via: p.name }); return out(); }
+    if (m && !m[2] && req.method === "DELETE") { const name = sso.get(m[1])?.name; sso.remove(m[1]); audit("sign-in provider removed", req, { sso: m[1], via: name }); return out(); }
+    if (m && m[2] === "toggle" && req.method === "POST") {
+      const on = (await readJsonBody(req)).on !== false, p = sso.patch(m[1], (x) => { x.enabled = on; });
+      if (!sso.shown().length && sso.conf().only) sso.setOptions({ only: false });      // never SSO-only with nothing to sign in with
+      audit(on ? "sign-in provider on" : "sign-in provider off", req, { sso: p.id, via: p.name });
+      return out();
+    }
+    if (m && m[2] === "allow" && req.method === "POST") {
+      const b = await readJsonBody(req), p = sso.allow(m[1], b.kind, b.value);
+      audit("sign-in: allowed", req, { sso: p.id, [String(b.kind).slice(0, 10)]: String(b.value).slice(0, 120) });
+      return out();
+    }
+    if (m && m[2] === "test" && req.method === "POST") {
+      const p = sso.get(m[1]), base = ssoBase();
+      if (!p) return sendJson(res, 404, { error: "No such provider." });
+      if (!base) return sendJson(res, 409, { error: "Link a domain first, or set the sign-in address: the provider calls back there." });
+      const token = sso.testStart(p.id);
+      return sendJson(res, 200, { token, url: `${base}/__gate/sso/${p.id}/start?test=${token}` });
+    }
+    const t = /^\/__gate\/api\/sso\/test\/([A-Za-z0-9_-]{10,40})$/.exec(path);
+    if (t && req.method === "GET") { const r = sso.testResult(t[1]); return r ? sendJson(res, 200, r) : sendJson(res, 404, { error: "That test expired: start it again." }); }
+    return sendJson(res, 404, { error: "No such sign-in call." });
+  } catch (e) { return sendJson(res, 400, { error: e.message }); }
+}
+
 // ---------- credentials ----------
 
 const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
@@ -1090,16 +1287,29 @@ async function handleGate(req, res, path, url, host, isMain) {
   }
 
   if (path === "/__gate/login" && req.method === "GET") {
+    // a break-glass link (`aegis sso link`): once, then a cookie that shows the password form for its 15 minutes
+    const bg = isMain ? url.searchParams.get("bg") : null;
+    if (bg) {
+      const k = b64u(sha256(bg)), exp = breakGlass.get(k);
+      breakGlass.delete(k);
+      if (!exp || exp < Date.now()) { audit("break-glass link refused", req); return send(res, 302, "", { Location: "/__gate/login?sso=glass" }); }
+      audit("break-glass link opened", req);
+      return send(res, 302, "", { Location: "/__gate/login", "Set-Cookie": `${BREAK}=${seal({ exp, h: hostOf(req), e: settings.auth()?.epoch || null }, BREAK)}; ${cookieAttrs(req, Math.ceil((exp - Date.now()) / 1000))}` });
+    }
     if (isAuthed(req)) return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/") });
     // With a domain, tunnel hosts sign in through the dashboard, so one login covers them all.
     if (!isMain && hasDomain) return send(res, 302, "", { Location: ssoUrl(hostWithPort(req), url.searchParams.get("next")) });
-    return page(res, "login.html");
+    return loginPage(req, res, url);
   }
   if (path === "/__gate/auth" && req.method === "POST") {
     const ip = clientIp(req);
     if (tooManyFails(ip)) {
       log("auth throttled", ip, host); audit("sign-in throttled", req);
       return sendJson(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
+    }
+    if (ssoOnly() && !glassOk(req)) {
+      log("auth refused: SSO only", ip, host); audit("sign-in refused", req, { why: "password sign-in is hidden (SSO only)" });
+      return sendJson(res, 403, { error: "Sign in with a button above. (On this machine, `aegis sso link` opens the password form once.)" });
     }
     let creds;
     try { creds = await unwrapSealed(await readJsonBody(req)); }
@@ -1135,6 +1345,10 @@ async function handleGate(req, res, path, url, host, isMain) {
     return send(res, 302, "", { Location: safeNext(url.searchParams.get("next"), "/"), "Set-Cookie": [sessionCookie(req, t.sid), ...(dev ? [deviceCookie(req, dev)] : [])] });
   }
   if (!isMain) return send(res, 404, "Not found");
+
+  // ---- single sign-on with a provider: start, callback (OIDC), acs and metadata (SAML) ----
+  const sm = SSO_PATH.exec(path);
+  if (sm && sm[1] !== "callback") return await ssoRoute(req, res, sm[1], sm[2], url, host);
 
   // ---- dashboard: hand a login tunnel a ticket (asks for the login first if needed) ----
   if (path === "/__gate/sso" && req.method === "GET") {
@@ -1576,6 +1790,10 @@ async function handleApi(req, res, path, url) {
     if (path === "/__gate/api/devkeys" || path.startsWith("/__gate/api/devkeys/")) {
       if (!sessionOf(req) || req._devApi) return sendJson(res, 403, { error: "Keys are managed only from a signed-in dashboard, or `aegis keys` on this machine." });
       return await devKeysApi(req, res, path);
+    }
+    if (path === "/__gate/api/sso" || path.startsWith("/__gate/api/sso/")) {
+      if (!sessionOf(req) || req._devApi) return sendJson(res, 403, { error: "Sign-in providers are managed only from a signed-in dashboard, or `aegis sso` on this machine." });
+      return await ssoApi(req, res, path);
     }
     if (path === "/__gate/api/notices" && req.method === "GET") return sendJson(res, 200, { notices: noticesLoad().slice(0, 100), ...noticesView() });
     if (path === "/__gate/api/notices/read" && req.method === "POST") {
@@ -2231,7 +2449,7 @@ function frontClaim(req) {
 const SIGN_IN_PATHS = new Set(["/__gate/login", "/__gate/login.css", "/__gate/login.js", "/__gate/logos/aegis-burrow.svg", "/__gate/challenge", "/__gate/auth"]);
 function shieldStop(req, path, host) {
   const isMain = isDashHost(host);
-  if (isMain && SIGN_IN_PATHS.has(path)) return null;
+  if (isMain && (SIGN_IN_PATHS.has(path) || SSO_PATH.test(path))) return null;
   const ip = clientIp(req);
   // one of your devices (its device key): yours for sure, whatever the address
   const dev = deviceOf(req);
@@ -2909,6 +3127,35 @@ burrow.listenControl(join(DATA, "control.sock"), async (method, path, readJson) 
       if (km && method === "DELETE") { const name = apiKeys.get(km[1]).name; apiKeys.remove(km[1], "command line"); audit("api key revoked", null, { key: name, from: "command line" }); return ok(apiKeys.view()); }
     } catch (e) { return no(e.status || 400, e.message); }
     return no(404, "No such keys command.");
+  }
+  // single sign-on (aegis sso …): see the providers, bring the password form back, a
+  // one-time break-glass link to it, a provider on or off. Never through an API key.
+  if (path === "/sso" || path.startsWith("/sso/")) {
+    const view = () => ok({ base: ssoBase(), only: sso.conf().only, onlyActive: ssoOnly(),
+                            providers: sso.list().map((p) => ({ id: p.id, name: p.name, kind: p.kind, preset: p.preset, enabled: !!p.enabled, allow: p.allow || {} })) });
+    try {
+      if (path === "/sso" && method === "GET") return view();
+      if (path === "/sso/only" && method === "POST") {
+        const on = (await readJson()).on === true;
+        if (on) ssoOnlyCheck();
+        sso.setOptions({ only: on });
+        audit(on ? "sign-in options changed" : "password sign-in back on", null, { ssoOnly: on, from: "command line" });
+        return view();
+      }
+      if (path === "/sso/link" && method === "POST") {
+        const l = breakGlassLink();
+        audit("break-glass link made", null, { from: "command line" });
+        return ok({ urls: [...new Set([ssoBase(), LOCAL_URL].filter(Boolean))].map((b) => `${b}/__gate/login?bg=${l.token}`), expires: l.expires });
+      }
+      const pm = /^\/sso\/providers\/([a-z0-9][a-z0-9-]{0,31})$/.exec(path);
+      if (pm && method === "PATCH") {
+        const b = await readJson(), p = sso.patch(pm[1], (x) => { if (b.enabled !== undefined) x.enabled = !!b.enabled; });
+        if (!sso.shown().length && sso.conf().only) sso.setOptions({ only: false });
+        audit(p.enabled ? "sign-in provider on" : "sign-in provider off", null, { sso: p.id, from: "command line" });
+        return view();
+      }
+    } catch (e) { return no(400, e.message); }
+    return no(404, "No such sso command.");
   }
   // the pack
   if (path === "/pack" && method === "GET") { await pack.detect(); return ok(pack.status()); }

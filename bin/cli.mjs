@@ -19,6 +19,7 @@
 //                                           the name, the reason, why not, the hint and the homepage (bin/aegis asks)
 //   node cli.mjs domains [list|add|set|remove|tunnel] …   other domains (aegis domains)
 //   node cli.mjs keys [list|create|set|enable|disable|roll|revoke|on|off|log] …   developer API keys (aegis keys)
+//   node cli.mjs sso [list|password on|off|link|enable ID|disable ID]   single sign-on (aegis sso)
 //   node cli.mjs addon-here OP ID [--action A] [--purge]
 //                                           a root one run in this terminal (burrow/terminal.mjs): sudo asks here
 //
@@ -448,6 +449,42 @@ async function keys(op = "list", ...rest) {
   return 2;
 }
 
+// aegis sso: the sign-in providers (Settings → Sign-in), and the way back to the
+// password when the sign-in page is SSO only: `password on`, or a one-time `link`.
+async function sso(op = "list", ...rest) {
+  try {
+    if (op === "list" || op === "ls" || op === "status") {
+      const v = await call("GET", "/sso", null, 10000);
+      out(`  sign-in address  ${v.base ? bold(v.base) : dim("none yet: link a domain, or set it in Settings → Sign-in")}`);
+      out(`  password form    ${v.only ? yellow("hidden (SSO only)") + dim("   aegis sso password on  brings it back") : green("shown")}`);
+      if (!v.providers.length) out(dim("  no providers yet: add one in Settings → Sign-in"));
+      for (const p of v.providers) {
+        const n = ["emails", "domains", "subjects", "groups"].reduce((a, k) => a + (p.allow?.[k]?.length || 0), 0);
+        out(`  ${p.enabled ? ON() : OFF()}  ${bold(p.name)}  ${dim(p.id)}  ${violet(p.kind)}  ${n ? dim(`${n} allowed`) : yellow("nobody allowed yet")}`);
+      }
+      return 0;
+    }
+    if (op === "password" && (rest[0] === "on" || rest[0] === "off")) {
+      await call("POST", "/sso/only", JSON.stringify({ on: rest[0] === "off" }), 10000);
+      out(green(rest[0] === "on" ? "  ✓ the password form is back on the sign-in page" : "  ✓ SSO only: the sign-in page hides the password form (aegis sso password on brings it back)"));
+      return 0;
+    }
+    if (op === "link" || op === "break-glass") {
+      const v = await call("POST", "/sso/link", "{}", 10000);
+      out(yellow("  A one-time link to the password form, even with SSO only (15 minutes):"));
+      for (const u of v.urls) out(u);
+      return 0;
+    }
+    if ((op === "enable" || op === "disable") && rest[0]) {
+      const v = await call("PATCH", `/sso/providers/${encodeURIComponent(rest[0])}`, JSON.stringify({ enabled: op === "enable" }), 10000);
+      out(green(`  ✓ ${rest[0]} ${op === "enable" ? "on" : "off"}`) + (v.only && !v.onlyActive ? dim("  (SSO only is off: no provider is on)") : ""));
+      return 0;
+    }
+  } catch (e) { out(red(`  ✗ ${e.message}`)); return e.code === "DOWN" ? 3 : 1; }
+  out(red("  ✗ aegis sso list | password on|off | link | enable ID | disable ID"));
+  return 2;
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 const run = {
   // on failure the message goes to stdout too: bash reads it with out="$(…)" || die "$out"
@@ -466,6 +503,7 @@ const run = {
   "addon-here": () => addonHere(...args),
   domains: () => domains(...args),
   keys: () => keys(...args),
+  sso: () => sso(...args),
 }[cmd];
 if (!run) { process.stderr.write("cli.mjs: unknown command\n"); process.exit(2); }
 Promise.resolve(run()).then((code) => { if (code != null) process.exit(code); },

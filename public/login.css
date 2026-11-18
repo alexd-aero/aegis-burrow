@@ -139,3 +139,18 @@ body[data-state=err] main { animation: shake .35s; }
 .lede { margin: -12px 0 18px; color: var(--muted); font-size: 13px; }
 .lede b { color: var(--text); font-weight: 500; }
 .mark .logo { width: 40px; height: 40px; flex: none; border-radius: 11px; }
+
+/* single sign-on: a button per provider above the password (aegis/sso.mjs) */
+.sso { display: grid; gap: 8px; margin-bottom: 14px; }
+.sso-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px; height: 44px; padding: 0 14px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: #15161a; color: var(--text);
+  font: 500 14px var(--sans); text-decoration: none; box-shadow: 0 1px 0 rgba(255,255,255,.05) inset;
+  transition: border-color .15s, background .15s;
+}
+.sso-btn:hover { background: #1b1c20; border-color: rgba(255,255,255,.2); }
+.sso-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.sso-btn svg { width: 18px; height: 18px; flex: none; }
+.sso-or { display: flex; align-items: center; gap: 10px; margin-top: 6px; font: 10.5px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
+.sso-or::before, .sso-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+body[data-sso-only] #f { display: none; }

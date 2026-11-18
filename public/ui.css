@@ -1677,3 +1677,46 @@ textarea.input { height: auto; min-height: 92px; padding-top: 9px; padding-botto
   .dv-key { flex-direction: column; }
   .dv-acts { max-width: none; justify-content: flex-start; }
 }
+
+/* Settings → Sign-in → Sign in with…: single sign-on providers (public/sso.js) */
+.sso-sec { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); scroll-margin-top: 80px; }
+.sso-sec .od-head { margin-bottom: 12px; }
+.sso-base { display: grid; gap: 4px; margin-bottom: 12px; }
+.sso-sec > .dv-base { margin: 0 0 12px; }
+.sso-list { display: grid; gap: 10px; margin-bottom: 14px; }
+.sso-card { border: 1px solid var(--line-2); border-radius: 12px; background: var(--field); padding: 14px 16px; }
+.sso-card.off { opacity: .8; }
+.sso-card.sso-new { border-style: dashed; margin-bottom: 14px; }
+.sso-card-head { display: flex; gap: 12px; align-items: flex-start; }
+.sso-ico { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 10px; background: #15161a; border: 1px solid var(--line-2); }
+.sso-ico svg, .sso-preset svg { width: 18px; height: 18px; }
+.sso-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-left: 46px; }
+.sso-acts .btn.on { border-color: var(--line-hi); background: rgba(255,255,255,.07); }
+.sso-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sso-steps { margin: 0; padding-left: 20px; display: grid; gap: 10px; font-size: 13px; line-height: 1.55; }
+.sso-steps li::marker { color: var(--faint); font: 12px var(--mono); }
+.sso-copy { display: grid; gap: 4px; margin: 8px 0; }
+.sso-copy .row { gap: 6px; }
+.sso-copy .input { flex: 1; min-width: 0; }
+.sso-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; }
+.sso-preset { display: flex; gap: 10px; align-items: flex-start; text-align: left; padding: 11px 12px; border: 1px solid var(--line-2); border-radius: 11px;
+              background: rgba(255,255,255,.015); color: var(--text); cursor: pointer; font: inherit; transition: border-color .15s, background .15s; }
+.sso-preset:hover, .sso-preset:focus-visible { border-color: var(--line-hi); background: rgba(255,255,255,.04); outline: none; }
+.sso-preset svg { margin-top: 2px; flex: none; }
+.sso-preset > span { display: grid; gap: 2px; }
+.sso-preset b { font-size: 13.5px; font-weight: 600; }
+.sso-allow { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.sso-allow .field { margin-bottom: 0; }
+.sso-allow textarea.input { min-height: 58px; font-family: var(--mono); font-size: 12px; }
+.sso-form textarea.input.mono { font-family: var(--mono); font-size: 12px; }
+.sso-form label.check { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 10px; font-size: 13px; }
+.sso-only { border-bottom: 0; padding-top: 14px; }
+.sso-id .kv-row > span:last-child { min-width: 0; }
+.sso-id .mono { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .sso-acts { padding-left: 0; }
+  .sso-card-head .switch { margin-top: 4px; }
+}
+.sso-list, .sso-steps { grid-template-columns: minmax(0, 1fr); }
+.sso-card, .sso-panel, .sso-card-head .grow, .sso-steps li { min-width: 0; }
+.sso-card .mono, .sso-steps .mono, .sso-steps .link, .sso-sec .dv-base .mono { overflow-wrap: anywhere; }
