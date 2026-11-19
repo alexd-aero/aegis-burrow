@@ -65,6 +65,7 @@ import { Standby } from "../burrow/standby.mjs";
 import { RelayDoctor } from "../burrow/relaydoctor.mjs";
 import { health as bridgeHealth, submitToForge, adoptForge, forgeJob, forgeHasUs } from "./bridge.mjs";
 import { Termix } from "./termix.mjs";
+import { FrameKeys } from "./frames.mjs";
 import { Fleet, isUp as machineUp, FleetError, termixQuery } from "./fleet.mjs";
 import { AgentHub } from "./fleet-agent.mjs";
 import { CATALOG as FLEET_APPS, install as fleetInstall, swap as fleetSwap, transfer as fleetTransfer, moveGate as fleetMoveGate, toTermix,
@@ -784,6 +785,12 @@ function openSession(token, host) {
 
 const sessionOf = (req) => openSession(parseCookies(req.headers.cookie)[cookieName(req)], hostOf(req));
 const isAuthed = (req) => !!sessionOf(req);
+// Termix's plugin frames carry no cookies (aegis/frames.mjs): their own keys,
+// minted for a page signed in here, let them through
+const frameKeys = new FrameKeys({ file: join(DATA, "frame-keys.json"), alive: (s) => !!s && s.exp > Date.now() && !(s.sid && revoked.has(s.sid))
+                                   && (s.e || null) === (settings.auth()?.epoch || null) });
+const termixAtRoot = () => !!termixUpstream() && !termixMounted();
+const frameKeyIn = (req, path, ws = false) => termixAtRoot() && frameKeys.allows(req, path, { ws }) === "key";
 const sessionCookie = (req, sid) =>
   `${cookieName(req)}=${sealSession(settings.auth().username, hostOf(req), sid)}; ${cookieAttrs(req, sessionTtl() / 1000)}`;
 const clearSessionCookie = (req) => `${cookieName(req)}=; ${cookieAttrs(req, 0)}`;
@@ -2361,14 +2368,24 @@ function proxy(req, res, extra) {
   const up = termixUpstream();
   if (!up) return send(res, 302, "", { Location: "/" });
   const mod = up.https ? httpsRequest : httpRequest;
+  const headers = upstreamHeaders(req);
+  if (extra?.sniff) delete headers["accept-encoding"];      // a body the gate reads: plain
   const r = mod({
-    host: up.host, port: up.port, method: req.method, path: req.url, headers: upstreamHeaders(req),
+    host: up.host, port: up.port, method: req.method, path: req.url, headers,
     rejectUnauthorized: false, // Termix's own self-signed cert, on this machine
   }, (upRes) => {
     const headers = { ...upRes.headers };
     if (extra?.setCookie) headers["set-cookie"] = [...[].concat(headers["set-cookie"] || []), ...[].concat(extra.setCookie)];
-    res.writeHead(upRes.statusCode, headers);
-    upRes.pipe(res);
+    if (!extra?.sniff) { res.writeHead(upRes.statusCode, headers); upRes.pipe(res); return; }
+    const parts = []; let size = 0;
+    upRes.on("data", (c) => { size += c.length; if (size <= 1 << 20) parts.push(c); });
+    upRes.on("end", () => {
+      const body = Buffer.concat(parts);
+      if (upRes.statusCode === 200 && size <= 1 << 20 && !headers["content-encoding"]) { try { extra.sniff(body); } catch (e) { log("frame keys:", e.message); } }
+      delete headers["transfer-encoding"]; headers["content-length"] = String(body.length);
+      res.writeHead(upRes.statusCode, headers); res.end(body);
+    });
+    upRes.on("error", () => res.destroy());
   });
   r.on("error", (e) => { log("termix upstream error", e.message); if (!res.headersSent) messagePage(res, 502, "Termix is not responding", "Check it under Settings → Termix."); else res.destroy(); });
   req.pipe(r);
@@ -2460,12 +2477,12 @@ function shieldStop(req, path, host) {
     const info = { t0: Date.now(), method: req.method, path: req.url, host, country: String(H["cf-ipcountry"] || ""), ua: H["user-agent"] || "",
                    referer: H.referer || "", lang: String(H["accept-language"] || "").split(",")[0], ray: H["cf-ray"] || "", proto: req.httpVersion,
                    via: H["x-aegis-front-host"] !== undefined ? "worker" : viaProxy(req) ? (H["cf-ray"] ? "cloudflare" : "relay") : viaServeo(req) ? "serveo" : "direct",
-                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) || !!keyOk(req),
+                   port, access: port !== null ? tunnels.get(port)?.access || "login" : null, ipChecks, main: isMain, device: dev, trusted: () => !!dev || isAuthed(req) || !!keyOk(req) || frameKeyIn(req, path, !!req.headers.upgrade),
                    headers: H };     // all of them (cookies, X-Forwarded-For, Transfer-Encoding…): attacks hide there too; the guard reads, never keeps them
     req._guard = { ip, info, bytes0: req.socket?.bytesWritten || 0 };
     try { return guardExt.guard(ip, info); } catch (e) { log("shield addon:", e.message); return null; }
   }
-  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), ipChecks, trusted: () => !!dev || isAuthed(req) || !!keyOk(req) });
+  return burrow.shield.gate(ip, { method: req.method, path: req.url, host, country: String(req.headers["cf-ipcountry"] || ""), ipChecks, trusted: () => !!dev || isAuthed(req) || !!keyOk(req) || frameKeyIn(req, path, !!req.headers.upgrade) });
 }
 // the guard addon's log line, once the response is done (never in the request's way)
 function observeDone(req, res, extra = {}) {
@@ -2529,6 +2546,8 @@ async function handler(req, res) {
     if (!settings.auth()) return send(res, 302, "", { Location: "/__gate/setup" + url.search });
     // Termix at the root, for a key that opens it
     if (!isAuthed(req) && termixUpstream() && !termixMounted() && keyOpens(req, "app:termix")) return proxy(req, res);
+    // what a Termix plugin frame loads by itself: its files, and its own routes with a key minted for a page signed in here
+    if (!isAuthed(req) && termixAtRoot() && frameKeys.allows(req, path)) return proxy(req, res);
     if (!isAuthed(req)) {
       const wantsHtml = req.method === "GET" && (req.headers.accept || "").includes("text/html");
       if (path !== "/" && termixUpstream()) audit("termix refused: not signed in", req, { path: path.slice(0, 120), quiet: true });
@@ -2550,6 +2569,10 @@ async function handler(req, res) {
       if (parseCookies(req.headers.cookie)[goName(req)] !== "termix") return page(res, "home.html", withRenew);
       audit("termix opened", req);
       return proxy(req, res, { setCookie: [`${goName(req)}=; ${cookieAttrs(req, 0)}`, ...renew] });
+    }
+    if (frameKeys.isTokenAsk(req.method, path)) {
+      const s = sessionOf(req);
+      return proxy(req, res, { ...(renew.length ? { setCookie: renew } : {}), sniff: (body) => frameKeys.learn(path, body, s) });
     }
     proxy(req, res, renew.length ? { setCookie: renew } : undefined);
   } catch (e) {
@@ -2589,7 +2612,8 @@ server.on("upgrade", (req, socket, head) => {
   }
   const um = isDashHost(host) && !isAuthed(req) ? mountAt(new URL(req.url || "/", "http://x").pathname) : null;
   const keyIn = um ? keyOpens(req, `app:${um.id}`) : isDashHost(host) && !termixMounted() && keyOpens(req, "app:termix");
-  if (!isDashHost(host) || !(isAuthed(req) || keyIn)) {
+  const frameIn = isDashHost(host) && !um && frameKeyIn(req, new URL(req.url || "/", "http://x").pathname, true);
+  if (!isDashHost(host) || !(isAuthed(req) || keyIn || frameIn)) {
     if (termixUpstream()) audit("termix connection refused: not signed in", req, { path: String(req.url || "").slice(0, 120), quiet: true });
     socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return;
   }
